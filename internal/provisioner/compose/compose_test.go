@@ -508,6 +508,23 @@ func envValue(payload string, key string) string {
 	return ""
 }
 
+func fakeComposeCommand(t *testing.T, psOutput string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-compose")
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$arg\" = \"ps\" ]; then\n" +
+		"    cat <<'JSON'\n" + psOutput + "\nJSON\n" +
+		"    exit 0\n" +
+		"  fi\n" +
+		"done\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestSyncConfigCanDisableCaptcha(t *testing.T) {
 	root := t.TempDir()
 	provisioner := NewWithOptions(Options{RootDir: root})
@@ -934,6 +951,92 @@ func TestStatusReportsRenderDrift(t *testing.T) {
 	}
 	if !strings.Contains(status.Message, "missing vector.yml") || !strings.Contains(status.Message, "compose missing supabase/storage-api:") {
 		t.Fatalf("expected drift details in message, got %q", status.Message)
+	}
+}
+
+func TestStatusUsesLiveComposePSWhenApplyEnabled(t *testing.T) {
+	root := t.TempDir()
+	renderer := NewWithOptions(Options{RootDir: root})
+	if err := renderer.Create(context.Background(), control.ProjectSpec{
+		Ref:    "alpha",
+		Domain: "supadupa.test",
+		Services: map[string]control.ServiceSpec{
+			"storage":   {Enabled: false},
+			"imgproxy":  {Enabled: false},
+			"functions": {Enabled: false},
+			"studio":    {Enabled: false},
+		},
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	command := fakeComposeCommand(t, `[{"Service":"db","State":"running","Health":"healthy"},{"Service":"kong","State":"running"},{"Service":"meta","State":"running"},{"Service":"auth","State":"running"},{"Service":"rest","State":"running"},{"Service":"realtime","State":"running"},{"Service":"pooler","State":"running"},{"Service":"analytics","State":"running"},{"Service":"vector","State":"running"}]`)
+	provisioner := NewWithOptions(Options{RootDir: root, Apply: true, Command: command})
+
+	status, err := provisioner.Status(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.Phase != control.ProjectHealthy || status.Message != "compose project running" {
+		t.Fatalf("expected live healthy status, got %#v", status)
+	}
+	if status.Endpoints["storage"] != "" || status.Endpoints["functions"] != "" || status.Endpoints["studio"] != "" {
+		t.Fatalf("disabled service endpoints should not be surfaced, got %#v", status.Endpoints)
+	}
+}
+
+func TestStatusReportsLiveComposeDrift(t *testing.T) {
+	root := t.TempDir()
+	renderer := NewWithOptions(Options{RootDir: root})
+	if err := renderer.Create(context.Background(), control.ProjectSpec{
+		Ref:    "alpha",
+		Domain: "supadupa.test",
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	command := fakeComposeCommand(t, `{"Service":"db","State":"running","Health":"healthy"}
+{"Service":"kong","State":"exited","ExitCode":1}
+{"Service":"meta","State":"running"}`)
+	provisioner := NewWithOptions(Options{RootDir: root, Apply: true, Command: command})
+
+	status, err := provisioner.Status(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("status should report live drift without error: %v", err)
+	}
+	if status.Phase != control.ProjectDegraded {
+		t.Fatalf("expected degraded status, got %#v", status)
+	}
+	if !strings.Contains(status.Message, "missing live services") || !strings.Contains(status.Message, "unhealthy live services kong=exited") {
+		t.Fatalf("expected live drift details, got %q", status.Message)
+	}
+}
+
+func TestStatusReportsLivePausedState(t *testing.T) {
+	root := t.TempDir()
+	renderer := NewWithOptions(Options{RootDir: root})
+	if err := renderer.Create(context.Background(), control.ProjectSpec{
+		Ref:    "alpha",
+		Domain: "supadupa.test",
+		Services: map[string]control.ServiceSpec{
+			"storage":   {Enabled: false},
+			"imgproxy":  {Enabled: false},
+			"functions": {Enabled: false},
+			"studio":    {Enabled: false},
+		},
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if err := updateEnvValue(filepath.Join(root, "alpha", ".env"), "SUPADUPA_DESIRED_STATE", "paused"); err != nil {
+		t.Fatal(err)
+	}
+	command := fakeComposeCommand(t, `[{"Service":"db","State":"exited","ExitCode":0},{"Service":"kong","State":"exited","ExitCode":0},{"Service":"meta","State":"exited","ExitCode":0},{"Service":"auth","State":"exited","ExitCode":0},{"Service":"rest","State":"exited","ExitCode":0},{"Service":"realtime","State":"exited","ExitCode":0},{"Service":"pooler","State":"exited","ExitCode":0},{"Service":"analytics","State":"exited","ExitCode":0},{"Service":"vector","State":"exited","ExitCode":0}]`)
+	provisioner := NewWithOptions(Options{RootDir: root, Apply: true, Command: command})
+
+	status, err := provisioner.Status(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.Phase != control.ProjectPaused || status.Message != "compose project paused" {
+		t.Fatalf("expected live paused status, got %#v", status)
 	}
 }
 

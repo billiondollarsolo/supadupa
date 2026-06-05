@@ -1,0 +1,123 @@
+name: supadupa
+
+services:
+  meta-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: supadupa_meta
+      POSTGRES_USER: supadupa
+      POSTGRES_PASSWORD: supadupa
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - supadupa-meta-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supadupa -d supadupa_meta"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  supadupavisor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control-plane
+    environment:
+      SUPADUPA_ADDR: ":8080"
+      SUPADUPA_META_DSN: postgres://supadupa:supadupa@meta-db:5432/supadupa_meta?sslmode=disable
+      SUPADUPA_SECRET_KEY: ${SUPADUPA_SECRET_KEY:-local-dev-secret-change-me}
+      SUPADUPA_AUTH_SECRET: ${SUPADUPA_AUTH_SECRET:-}
+      SUPADUPA_BOOTSTRAP_EMAIL: ${SUPADUPA_BOOTSTRAP_EMAIL:-}
+      SUPADUPA_BOOTSTRAP_PASSWORD: ${SUPADUPA_BOOTSTRAP_PASSWORD:-}
+      SUPADUPA_CORS_ORIGINS: ${SUPADUPA_CORS_ORIGINS:-https://${SUPADUPA_ADMIN_HOST:-admin.supadupa.test},http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174}
+      SUPADUPA_PROVISIONER: ${SUPADUPA_PROVISIONER:-compose}
+      SUPADUPA_PROJECT_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/projects
+      SUPADUPA_ROUTES_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/routes
+      SUPADUPA_CERT_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/certs
+      SUPADUPA_BACKUP_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/backups
+      SUPADUPA_COMPOSE_APPLY: ${SUPADUPA_COMPOSE_APPLY:-false}
+      SUPADUPA_COMPOSE_COMMAND: ${SUPADUPA_COMPOSE_COMMAND:-docker compose}
+    ports:
+      - "${SUPADUPA_API_ADDR:-127.0.0.1:8080}:8080"
+    volumes:
+      - ${SUPADUPA_RUNTIME_HOST_DIR:-../runtime}:${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      meta-db:
+        condition: service_healthy
+    networks:
+      - default
+      - supadupa-ingress
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: supadupa-ingress
+      traefik.http.routers.supadupa-api.rule: Host(`${SUPADUPA_API_HOST:-api.supadupa.test}`)
+      traefik.http.routers.supadupa-api.entrypoints: websecure
+      traefik.http.routers.supadupa-api.tls.certresolver: letsencrypt
+      traefik.http.routers.supadupa-api-http.rule: Host(`${SUPADUPA_API_HOST:-api.supadupa.test}`)
+      traefik.http.routers.supadupa-api-http.entrypoints: web
+      traefik.http.routers.supadupa-api-http.middlewares: supadupa-api-https
+      traefik.http.middlewares.supadupa-api-https.redirectscheme.scheme: https
+      traefik.http.services.supadupa-api.loadbalancer.server.port: "8080"
+
+  admin-ui:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.admin
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-https://${SUPADUPA_API_HOST:-api.supadupa.test}}
+    ports:
+      - "${SUPADUPA_ADMIN_ADDR:-127.0.0.1:3000}:80"
+    depends_on:
+      - supadupavisor
+    networks:
+      - default
+      - supadupa-ingress
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: supadupa-ingress
+      traefik.http.routers.supadupa-admin.rule: Host(`${SUPADUPA_ADMIN_HOST:-admin.supadupa.test}`)
+      traefik.http.routers.supadupa-admin.entrypoints: websecure
+      traefik.http.routers.supadupa-admin.tls.certresolver: letsencrypt
+      traefik.http.routers.supadupa-admin-http.rule: Host(`${SUPADUPA_ADMIN_HOST:-admin.supadupa.test}`)
+      traefik.http.routers.supadupa-admin-http.entrypoints: web
+      traefik.http.routers.supadupa-admin-http.middlewares: supadupa-admin-https
+      traefik.http.middlewares.supadupa-admin-https.redirectscheme.scheme: https
+      traefik.http.services.supadupa-admin.loadbalancer.server.port: "80"
+
+  edge-router:
+    image: traefik:v3.3
+    profiles: ["edge"]
+    command:
+      - --api.dashboard=${SUPADUPA_TRAEFIK_DASHBOARD_ENABLED:-false}
+      - --api.insecure=${SUPADUPA_TRAEFIK_DASHBOARD_INSECURE:-false}
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --providers.docker=true
+      - --providers.docker.endpoint=unix:///var/run/docker.sock
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --certificatesresolvers.letsencrypt.acme.email=${SUPADUPA_ACME_EMAIL:-admin@example.com}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --log.level=${SUPADUPA_TRAEFIK_LOG_LEVEL:-INFO}
+      - --accesslog=true
+    ports:
+      - "${SUPADUPA_HTTP_ADDR:-0.0.0.0:80}:80"
+      - "${SUPADUPA_HTTPS_ADDR:-0.0.0.0:443}:443"
+      - "${SUPADUPA_TRAEFIK_DASHBOARD_ADDR:-127.0.0.1:8088}:8080"
+    volumes:
+      - ${SUPADUPA_ROUTES_HOST_DIR:-../runtime/routes}:/etc/traefik/dynamic:ro
+      - supadupa-letsencrypt:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - supadupa-ingress
+
+volumes:
+  supadupa-meta-db:
+  supadupa-letsencrypt:
+
+networks:
+  supadupa-ingress:
+    name: supadupa-ingress
+    external: true

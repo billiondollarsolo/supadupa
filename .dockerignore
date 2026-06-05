@@ -1,0 +1,7 @@
+.git
+frontend/dist
+frontend/node_modules
+runtime
+tmp
+**/*.test
+**/*_test.go

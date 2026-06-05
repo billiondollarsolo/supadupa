@@ -1,0 +1,12 @@
+.DS_Store
+bin/
+dist/
+node_modules/
+runtime/
+tmp/
+*.tsbuildinfo
+/supadupa
+*.log
+.env
+.env.*
+!*.env.example

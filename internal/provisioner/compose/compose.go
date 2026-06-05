@@ -289,9 +289,10 @@ func (p *Provisioner) Status(ctx context.Context, ref string) (control.ProjectSt
 				"rest":    fmt.Sprintf("https://%s/rest/v1", ref),
 				"graphql": fmt.Sprintf("https://%s/graphql/v1", ref),
 			},
+			Services: renderedRuntimeServices(serviceStates),
 		}, nil
 	}
-	livePhase, liveMessage, liveErr := p.liveComposeStatus(ctx, projectDir, ref, phase, message, serviceStates)
+	livePhase, liveMessage, runtimeServices, liveErr := p.liveComposeStatus(ctx, projectDir, ref, phase, message, serviceStates)
 	if liveErr != nil {
 		return control.ProjectStatus{Ref: ref, Phase: control.ProjectError, Message: liveErr.Error()}, liveErr
 	}
@@ -324,35 +325,38 @@ func (p *Provisioner) Status(ctx context.Context, ref string) (control.ProjectSt
 		Phase:     phase,
 		Message:   message,
 		Endpoints: endpoints,
+		Services:  runtimeServices,
 	}, nil
 }
 
-func (p *Provisioner) liveComposeStatus(ctx context.Context, projectDir string, ref string, renderedPhase control.ProjectPhase, renderedMessage string, serviceStates map[string]bool) (control.ProjectPhase, string, error) {
+func (p *Provisioner) liveComposeStatus(ctx context.Context, projectDir string, ref string, renderedPhase control.ProjectPhase, renderedMessage string, serviceStates map[string]bool) (control.ProjectPhase, string, []control.RuntimeService, error) {
 	if !p.apply {
-		return renderedPhase, renderedMessage, nil
+		return renderedPhase, renderedMessage, renderedRuntimeServices(serviceStates), nil
 	}
 	output, err := p.runComposeOutput(ctx, projectDir, ref, "ps", "--format", "json")
 	if err != nil {
-		return control.ProjectError, "", err
+		return control.ProjectError, "", nil, err
 	}
 	services, err := parseComposePS(output)
 	if err != nil {
-		return control.ProjectError, "", err
+		return control.ProjectError, "", nil, err
 	}
+	runtimeServices := liveRuntimeServices(serviceStates, services)
 	if renderedPhase == control.ProjectPaused {
 		expected := expectedComposeServices(serviceStates)
 		if missing := missingComposeServices(services, expected); len(missing) > 0 {
-			return control.ProjectDegraded, "compose desired paused but live services are missing " + strings.Join(missing, ", "), nil
+			return control.ProjectDegraded, "compose desired paused but live services are missing " + strings.Join(missing, ", "), runtimeServices, nil
 		}
 		running := runningComposeServices(services, expected)
 		if len(running) == 0 {
-			return control.ProjectPaused, "compose project paused", nil
+			return control.ProjectPaused, "compose project paused", runtimeServices, nil
 		}
-		return control.ProjectDegraded, "compose desired paused but live services still running " + strings.Join(running, ", "), nil
+		return control.ProjectDegraded, "compose desired paused but live services still running " + strings.Join(running, ", "), runtimeServices, nil
 	}
 	missing := missingComposeServices(services, expectedComposeServices(serviceStates))
 	unhealthy := unhealthyComposeServices(services, expectedComposeServices(serviceStates))
-	if len(missing) > 0 || len(unhealthy) > 0 {
+	unexpected := unexpectedComposeServices(services, expectedComposeServices(serviceStates))
+	if len(missing) > 0 || len(unhealthy) > 0 || len(unexpected) > 0 {
 		var parts []string
 		if len(missing) > 0 {
 			parts = append(parts, "missing live services "+strings.Join(missing, ", "))
@@ -360,9 +364,12 @@ func (p *Provisioner) liveComposeStatus(ctx context.Context, projectDir string, 
 		if len(unhealthy) > 0 {
 			parts = append(parts, "unhealthy live services "+strings.Join(unhealthy, ", "))
 		}
-		return control.ProjectDegraded, "compose live drift: " + strings.Join(parts, "; "), nil
+		if len(unexpected) > 0 {
+			parts = append(parts, "unexpected live services "+strings.Join(unexpected, ", "))
+		}
+		return control.ProjectDegraded, "compose live drift: " + strings.Join(parts, "; "), runtimeServices, nil
 	}
-	return control.ProjectHealthy, "compose project running", nil
+	return control.ProjectHealthy, "compose project running", runtimeServices, nil
 }
 
 type composePSService struct {
@@ -414,21 +421,9 @@ func parseComposePS(payload []byte) (map[string]composePSService, error) {
 
 func expectedComposeServices(serviceStates map[string]bool) []string {
 	services := []string{"db", "kong", "meta"}
-	optional := map[string]string{
-		"auth":      "auth",
-		"rest":      "rest",
-		"realtime":  "realtime",
-		"storage":   "storage",
-		"imgproxy":  "imgproxy",
-		"functions": "edge-runtime",
-		"pooler":    "pooler",
-		"studio":    "studio",
-		"analytics": "analytics",
-		"vector":    "vector",
-	}
 	for _, service := range control.AllowedProjectServices() {
 		if serviceStates[service] {
-			if composeService := optional[service]; composeService != "" {
+			if composeService := optionalComposeService(service); composeService != "" {
 				services = append(services, composeService)
 			}
 		}
@@ -445,6 +440,29 @@ func missingComposeServices(actual map[string]composePSService, expected []strin
 		}
 	}
 	return missing
+}
+
+func unexpectedComposeServices(actual map[string]composePSService, expected []string) []string {
+	expectedSet := map[string]struct{}{}
+	for _, service := range expected {
+		expectedSet[service] = struct{}{}
+	}
+	var unexpected []string
+	for service, row := range actual {
+		if _, ok := expectedSet[service]; ok {
+			continue
+		}
+		if !knownComposeService(service) {
+			continue
+		}
+		detail := service
+		if row.State != "" {
+			detail += "=" + row.State
+		}
+		unexpected = append(unexpected, detail)
+	}
+	sort.Strings(unexpected)
+	return unexpected
 }
 
 func unhealthyComposeServices(actual map[string]composePSService, expected []string) []string {
@@ -487,6 +505,157 @@ func composeServiceRunning(row composePSService) bool {
 		return false
 	}
 	return row.Health == "" || row.Health == "healthy"
+}
+
+func renderedRuntimeServices(serviceStates map[string]bool) []control.RuntimeService {
+	services := composeServiceDescriptors(serviceStates)
+	out := make([]control.RuntimeService, 0, len(services))
+	for _, service := range services {
+		state := "rendered"
+		message := "service rendered into compose desired state"
+		if !service.Desired {
+			state = "disabled"
+			message = "service disabled in desired state"
+		}
+		service.State = state
+		service.Message = message
+		out = append(out, service)
+	}
+	return out
+}
+
+func liveRuntimeServices(serviceStates map[string]bool, actual map[string]composePSService) []control.RuntimeService {
+	services := composeServiceDescriptors(serviceStates)
+	seen := map[string]struct{}{}
+	out := make([]control.RuntimeService, 0, len(services))
+	for _, service := range services {
+		seen[service.ComposeService] = struct{}{}
+		row, ok := actual[service.ComposeService]
+		if !service.Desired {
+			service.State = "disabled"
+			service.Message = "service disabled in desired state"
+			if ok {
+				service.State = row.State
+				service.Health = row.Health
+				service.ExitCode = row.ExitCode
+				service.Message = "service disabled but still present in Docker Compose state"
+			}
+			out = append(out, service)
+			continue
+		}
+		if !ok {
+			service.State = "missing"
+			service.Message = "expected service is missing from Docker Compose state"
+			out = append(out, service)
+			continue
+		}
+		service.State = row.State
+		service.Health = row.Health
+		service.ExitCode = row.ExitCode
+		if composeServiceRunning(row) {
+			service.Message = "service running"
+		} else {
+			service.Message = "service not running or unhealthy"
+		}
+		out = append(out, service)
+	}
+	for name, row := range actual {
+		if _, ok := seen[name]; ok || !knownComposeService(name) {
+			continue
+		}
+		out = append(out, control.RuntimeService{
+			Name:           serviceDisplayName(name),
+			ComposeService: name,
+			Desired:        false,
+			State:          row.State,
+			Health:         row.Health,
+			ExitCode:       row.ExitCode,
+			Message:        "unexpected service in Docker Compose state",
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ComposeService < out[j].ComposeService
+	})
+	return out
+}
+
+func composeServiceDescriptors(serviceStates map[string]bool) []control.RuntimeService {
+	out := []control.RuntimeService{
+		{Name: "Postgres", ComposeService: "db", Desired: true},
+		{Name: "Kong gateway", ComposeService: "kong", Desired: true},
+		{Name: "Postgres Meta", ComposeService: "meta", Desired: true},
+	}
+	for _, service := range control.AllowedProjectServices() {
+		composeService := optionalComposeService(service)
+		if composeService == "" {
+			continue
+		}
+		out = append(out, control.RuntimeService{
+			Name:           serviceDisplayName(composeService),
+			ComposeService: composeService,
+			Desired:        serviceStates[service],
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ComposeService < out[j].ComposeService
+	})
+	return out
+}
+
+func optionalComposeService(service string) string {
+	switch service {
+	case "auth", "rest", "realtime", "storage", "imgproxy", "pooler", "studio", "analytics", "vector":
+		return service
+	case "functions":
+		return "edge-runtime"
+	default:
+		return ""
+	}
+}
+
+func knownComposeService(service string) bool {
+	if service == "db" || service == "kong" || service == "meta" {
+		return true
+	}
+	for _, allowed := range control.AllowedProjectServices() {
+		if optionalComposeService(allowed) == service {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceDisplayName(service string) string {
+	switch service {
+	case "db":
+		return "Postgres"
+	case "kong":
+		return "Kong gateway"
+	case "meta":
+		return "Postgres Meta"
+	case "auth":
+		return "Auth"
+	case "rest":
+		return "REST API"
+	case "realtime":
+		return "Realtime"
+	case "storage":
+		return "Storage"
+	case "imgproxy":
+		return "Image proxy"
+	case "edge-runtime":
+		return "Edge Runtime"
+	case "pooler":
+		return "Supavisor pooler"
+	case "studio":
+		return "Studio"
+	case "analytics":
+		return "Logflare analytics"
+	case "vector":
+		return "Vector logs"
+	default:
+		return service
+	}
 }
 
 func requiredProjectFiles() []string {

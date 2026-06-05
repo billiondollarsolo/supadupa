@@ -525,6 +525,20 @@ func fakeComposeCommand(t *testing.T, psOutput string) string {
 	return path
 }
 
+func assertRuntimeService(t *testing.T, services []control.RuntimeService, composeService string, desired bool, state string) {
+	t.Helper()
+	for _, service := range services {
+		if service.ComposeService != composeService {
+			continue
+		}
+		if service.Desired != desired || service.State != state {
+			t.Fatalf("runtime service %s = %#v, want desired=%t state=%s", composeService, service, desired, state)
+		}
+		return
+	}
+	t.Fatalf("runtime service %s not found in %#v", composeService, services)
+}
+
 func TestSyncConfigCanDisableCaptcha(t *testing.T) {
 	root := t.TempDir()
 	provisioner := NewWithOptions(Options{RootDir: root})
@@ -876,6 +890,11 @@ func TestStatusReportsRenderedProjectEndpoints(t *testing.T) {
 			t.Fatalf("expected endpoint %q in %#v", endpoint, status.Endpoints)
 		}
 	}
+	if len(status.Services) == 0 {
+		t.Fatalf("expected rendered service status list")
+	}
+	assertRuntimeService(t, status.Services, "db", true, "rendered")
+	assertRuntimeService(t, status.Services, "edge-runtime", true, "rendered")
 }
 
 func TestPauseResumeStatusTracksRenderedDesiredState(t *testing.T) {
@@ -982,6 +1001,9 @@ func TestStatusUsesLiveComposePSWhenApplyEnabled(t *testing.T) {
 	if status.Endpoints["storage"] != "" || status.Endpoints["functions"] != "" || status.Endpoints["studio"] != "" {
 		t.Fatalf("disabled service endpoints should not be surfaced, got %#v", status.Endpoints)
 	}
+	assertRuntimeService(t, status.Services, "db", true, "running")
+	assertRuntimeService(t, status.Services, "storage", false, "disabled")
+	assertRuntimeService(t, status.Services, "edge-runtime", false, "disabled")
 }
 
 func TestStatusReportsLiveComposeDrift(t *testing.T) {
@@ -1008,6 +1030,8 @@ func TestStatusReportsLiveComposeDrift(t *testing.T) {
 	if !strings.Contains(status.Message, "missing live services") || !strings.Contains(status.Message, "unhealthy live services kong=exited") {
 		t.Fatalf("expected live drift details, got %q", status.Message)
 	}
+	assertRuntimeService(t, status.Services, "kong", true, "exited")
+	assertRuntimeService(t, status.Services, "auth", true, "missing")
 }
 
 func TestStatusReportsLivePausedState(t *testing.T) {
@@ -1038,6 +1062,7 @@ func TestStatusReportsLivePausedState(t *testing.T) {
 	if status.Phase != control.ProjectPaused || status.Message != "compose project paused" {
 		t.Fatalf("expected live paused status, got %#v", status)
 	}
+	assertRuntimeService(t, status.Services, "db", true, "exited")
 }
 
 func TestUpgradeRerendersVersion(t *testing.T) {

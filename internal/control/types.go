@@ -18,6 +18,17 @@ type ProjectStatus struct {
 	Phase     ProjectPhase      `json:"phase"`
 	Message   string            `json:"message"`
 	Endpoints map[string]string `json:"endpoints"`
+	Services  []RuntimeService  `json:"services,omitempty"`
+}
+
+type RuntimeService struct {
+	Name           string `json:"name"`
+	ComposeService string `json:"compose_service"`
+	Desired        bool   `json:"desired"`
+	State          string `json:"state"`
+	Health         string `json:"health,omitempty"`
+	ExitCode       int    `json:"exit_code,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 type ProjectPhase string

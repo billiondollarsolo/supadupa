@@ -409,6 +409,17 @@ export type ProjectRuntimeStatus = {
   phase: ProjectPhase | string;
   message: string;
   endpoints?: Record<string, string>;
+  services?: RuntimeService[];
+};
+
+export type RuntimeService = {
+  name: string;
+  compose_service: string;
+  desired: boolean;
+  state: string;
+  health?: string;
+  exit_code?: number;
+  message?: string;
 };
 
 export type Project = {

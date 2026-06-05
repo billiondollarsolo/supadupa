@@ -270,10 +270,40 @@ export function RuntimeStatusPanel({ project }: { project?: Project }) {
             </div>
             {drift ? <p className="mt-2 text-xs text-warning">Drift detected. Reconcile should converge actual runtime back to desired state.</p> : null}
           </div>
+          {runtime?.services?.length ? (
+            <div className="rounded-md border border-border bg-bg p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <p className="label">Compose services</p>
+                <span className="text-xs text-faint">{runtime.services.filter((service) => service.desired).length} desired</span>
+              </div>
+              <div className="grid gap-1">
+                {runtime.services.map((service) => (
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5" key={service.compose_service}>
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-medium">{service.name}</p>
+                      <p className="truncate font-mono text-[11px] text-faint">{service.compose_service}{service.message ? ` · ${service.message}` : ""}</p>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {!service.desired ? <span className="pill">disabled</span> : null}
+                      {service.health ? <span className={`pill ${service.health === "healthy" ? "healthy" : "provisioning"}`}>{service.health}</span> : null}
+                      <span className={`pill ${runtimeServiceTone(service.state)}`}>{service.state || "unknown"}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       )}
     </section>
   );
+}
+
+function runtimeServiceTone(state: string) {
+  const normalized = state.toLowerCase();
+  if (normalized === "running" || normalized === "rendered") return "healthy";
+  if (normalized === "missing" || normalized === "exited" || normalized === "dead") return "error";
+  return "provisioning";
 }
 
 export function SecretsPanel({ project, secrets, loading }: { project?: Project; secrets: ProjectSecret[]; loading: boolean }) {

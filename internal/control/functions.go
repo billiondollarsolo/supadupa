@@ -20,11 +20,12 @@ type FunctionDeploymentOptions struct {
 }
 
 type FunctionArtifact struct {
-	Directory    string `json:"directory"`
-	Entrypoint   string `json:"entrypoint"`
-	SourcePath   string `json:"source_path"`
-	SecretsPath  string `json:"secrets_path"`
-	MetadataPath string `json:"metadata_path"`
+	Directory        string `json:"directory"`
+	RuntimeDirectory string `json:"runtime_directory"`
+	Entrypoint       string `json:"entrypoint"`
+	SourcePath       string `json:"source_path"`
+	SecretsPath      string `json:"secrets_path"`
+	MetadataPath     string `json:"metadata_path"`
 }
 
 func NewFunctionDeploymentService() *FunctionDeploymentService {
@@ -56,34 +57,27 @@ func (s *FunctionDeploymentService) Deploy(ctx context.Context, function Project
 	if source == "" {
 		return FunctionArtifact{}, fmt.Errorf("function source is required")
 	}
-	secrets, err := normalizeConfigValues(input.Secrets)
+	secrets, err := normalizeFunctionSecretValues(input.Secrets)
 	if err != nil {
 		return FunctionArtifact{}, err
 	}
 
-	dir := filepath.Join(s.projectRoot, function.ProjectRef, "functions", function.Name)
-	sourcePath := filepath.Join(dir, filepath.FromSlash(entrypoint))
-	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o700); err != nil {
+	functionsRoot := filepath.Join(s.projectRoot, function.ProjectRef, "functions")
+	dir := filepath.Join(functionsRoot, function.Name)
+	if err := writeFunctionRuntimeArtifact(dir, function, entrypoint, source, secrets); err != nil {
 		return FunctionArtifact{}, err
 	}
-	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
-		return FunctionArtifact{}, err
-	}
-
-	secretsPath := filepath.Join(dir, ".env")
-	if err := writeFunctionSecretsFile(secretsPath, function, secrets); err != nil {
-		return FunctionArtifact{}, err
-	}
-	metadataPath := filepath.Join(dir, "metadata.json")
-	if err := writeFunctionMetadataFile(metadataPath, function, entrypoint); err != nil {
+	runtimeDir := filepath.Join(functionsRoot, ".supadupa-runtime", fmt.Sprintf("%s-v%d", function.Name, function.Version))
+	if err := writeFunctionRuntimeArtifact(runtimeDir, function, entrypoint, source, secrets); err != nil {
 		return FunctionArtifact{}, err
 	}
 	return FunctionArtifact{
-		Directory:    dir,
-		Entrypoint:   entrypoint,
-		SourcePath:   sourcePath,
-		SecretsPath:  secretsPath,
-		MetadataPath: metadataPath,
+		Directory:        dir,
+		RuntimeDirectory: runtimeDir,
+		Entrypoint:       entrypoint,
+		SourcePath:       filepath.Join(dir, filepath.FromSlash(entrypoint)),
+		SecretsPath:      filepath.Join(dir, ".env"),
+		MetadataPath:     filepath.Join(dir, "metadata.json"),
 	}, nil
 }
 
@@ -97,7 +91,20 @@ func (s *FunctionDeploymentService) Delete(ctx context.Context, ref string, name
 	if err != nil {
 		return err
 	}
-	return os.RemoveAll(filepath.Join(s.projectRoot, ref, "functions", normalized))
+	functionsRoot := filepath.Join(s.projectRoot, ref, "functions")
+	if err := os.RemoveAll(filepath.Join(functionsRoot, normalized)); err != nil {
+		return err
+	}
+	stale, err := filepath.Glob(filepath.Join(functionsRoot, ".supadupa-runtime", normalized+"-v*"))
+	if err != nil {
+		return err
+	}
+	for _, path := range stale {
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *FunctionDeploymentService) SyncRegionalInvocations(ctx context.Context, ref string, regions []ProjectFunctionRegion) error {
@@ -182,6 +189,42 @@ func normalizeFunctionEntrypoint(entrypoint string) (string, error) {
 		return "", fmt.Errorf("function entrypoint must be a relative path inside the function directory")
 	}
 	return cleaned, nil
+}
+
+func writeFunctionRuntimeArtifact(dir string, function ProjectFunction, entrypoint string, source string, secrets map[string]string) error {
+	sourcePath := filepath.Join(dir, filepath.FromSlash(entrypoint))
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
+		return err
+	}
+	if err := writeFunctionSecretsFile(filepath.Join(dir, ".env"), function, secrets); err != nil {
+		return err
+	}
+	return writeFunctionMetadataFile(filepath.Join(dir, "metadata.json"), function, entrypoint)
+}
+
+func normalizeFunctionSecretValues(values map[string]string) (map[string]string, error) {
+	out := map[string]string{}
+	for key, value := range values {
+		normalizedKey := strings.TrimSpace(key)
+		if normalizedKey == "" {
+			return nil, fmt.Errorf("function secret key is required")
+		}
+		for index, char := range normalizedKey {
+			valid := char == '_' || char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || index > 0 && char >= '0' && char <= '9'
+			if !valid {
+				return nil, fmt.Errorf("function secret key %q is invalid", key)
+			}
+		}
+		normalizedValue := strings.TrimSpace(value)
+		if strings.ContainsAny(normalizedValue, "\r\n") {
+			return nil, fmt.Errorf("function secret %q must be a single line", normalizedKey)
+		}
+		out[normalizedKey] = normalizedValue
+	}
+	return out, nil
 }
 
 func writeFunctionSecretsFile(path string, function ProjectFunction, secrets map[string]string) error {

@@ -8,7 +8,7 @@ import { ProjectPage } from "./layout";
 import { LifecyclePanel, RuntimeStatusPanel } from "./side-panels";
 
 export function ProjectConfigPage() {
-  const { activeFeatureFlags, activeOrgId, activeProject, configArea, domains, networkConnections, networkPolicy, onProjectDestroyed, projectConfig, projectServices, routes, setConfigArea } = useDashboardContext();
+  const { activeFeatureFlags, activeOrgId, activeProject, configArea, domains, networkConnections, networkPolicy, onProjectDestroyed, projectConfig, projectServices, routeManifest, setConfigArea } = useDashboardContext();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const selectedSection = pathname.match(/^\/projects\/[^/]+\/config\/([^/]+)/)?.[1];
@@ -22,12 +22,12 @@ export function ProjectConfigPage() {
       configArea,
       services: enabledServices,
       domains: domains.data?.length ?? 0,
-      routes: routes.data?.length ?? 0,
+      routes: (routeManifest.data?.http_routes.length ?? 0) + (routeManifest.data?.tcp_routes.length ?? 0),
       network: networkConnections.data?.length ?? 0,
       allowlist,
       status: activeProject?.status ?? "loading",
     };
-  }, [activeProject?.status, configArea, domains.data, networkConnections.data, networkPolicy.data, projectServices.data, routes.data]);
+  }, [activeProject?.status, configArea, domains.data, networkConnections.data, networkPolicy.data, projectServices.data, routeManifest.data]);
 
   return (
     <ProjectPage>
@@ -57,7 +57,7 @@ export function ProjectConfigPage() {
       {activeSection === "domains" ? <DomainsPanel project={activeProject} domains={domains.data ?? []} loading={domains.isLoading} enabled={Boolean(activeFeatureFlags.custom_domains)} /> : null}
       {activeSection === "network" ? (
         <div className="grid gap-4">
-          <RoutesPanel routes={routes.data ?? []} loading={routes.isLoading} />
+          <RoutesPanel manifest={routeManifest.data} loading={routeManifest.isLoading} />
           <NetworkConnectionsPanel project={activeProject} policy={networkPolicy.data} connections={networkConnections.data ?? []} loading={networkConnections.isLoading || networkPolicy.isLoading} enabled={Boolean(activeFeatureFlags.network_restrictions)} />
         </div>
       ) : null}

@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -14,7 +15,7 @@ func TestPlatformDefaultsApplyToProjectCreation(t *testing.T) {
 	}
 	_, err = store.UpdatePlatformDefaults(ctx, PlatformDefaultsInput{
 		Domain:         "apps.example.com",
-		StackVersion:   "2026.06.05",
+		StackVersion:   "15.8.1.060",
 		Profile:        StackProfileEssential,
 		ResourceTier:   ResourceTierMedium,
 		BackupSchedule: "hourly",
@@ -56,7 +57,7 @@ func TestPlatformDefaultsApplyToProjectCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if project.Spec.Domain != "apps.example.com" || project.Spec.StackVersion != "2026.06.05" || project.Spec.Profile != StackProfileEssential || project.Spec.ResourceTier != ResourceTierMedium {
+	if project.Spec.Domain != "apps.example.com" || project.Spec.StackVersion != "15.8.1.060" || project.Spec.Profile != StackProfileEssential || project.Spec.ResourceTier != ResourceTierMedium {
 		t.Fatalf("expected project spec to use platform defaults, got %#v", project.Spec)
 	}
 	policy, err := store.GetBackupPolicy(ctx, project.Ref)
@@ -82,6 +83,16 @@ func TestPlatformDefaultsValidateSupportedValues(t *testing.T) {
 	}
 	if defaults.Profile != StackProfileOrioleDB {
 		t.Fatalf("expected orioledb profile defaults, got %#v", defaults.Profile)
+	}
+	_, err = store.UpdatePlatformDefaults(context.Background(), PlatformDefaultsInput{
+		Domain:         "apps.example.com",
+		StackVersion:   "2026.06.05",
+		Profile:        StackProfileFull,
+		ResourceTier:   ResourceTierSmall,
+		BackupSchedule: "daily",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported stack version to fail")
 	}
 	_, err = store.UpdatePlatformDefaults(context.Background(), PlatformDefaultsInput{
 		Domain:         "apps.example.com",
@@ -114,6 +125,54 @@ func TestPlatformDefaultsValidateSupportedValues(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected unsupported feature flag to fail")
+	}
+	_, err = store.UpdatePlatformDefaults(context.Background(), PlatformDefaultsInput{
+		Domain:         strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63),
+		StackVersion:   "latest",
+		Profile:        StackProfileFull,
+		ResourceTier:   ResourceTierSmall,
+		BackupSchedule: "daily",
+	})
+	if err == nil || !strings.Contains(err.Error(), "253-character DNS name limit") {
+		t.Fatalf("expected generated host length validation for platform domain, got %v", err)
+	}
+}
+
+func TestProjectCreationValidatesStackVersion(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectRequest{
+		OrgID:        org.ID,
+		Ref:          "latest-stack",
+		Name:         "Latest Stack",
+		Domain:       "apps.example.com",
+		StackVersion: "latest",
+		Profile:      StackProfileFull,
+		ResourceTier: ResourceTierSmall,
+	})
+	if err != nil {
+		t.Fatalf("expected latest stack version to create project: %v", err)
+	}
+	if project.Spec.StackVersion != DefaultStackReleaseVersion {
+		t.Fatalf("expected latest to normalize to %s, got %s", DefaultStackReleaseVersion, project.Spec.StackVersion)
+	}
+
+	_, err = store.CreateProject(ctx, CreateProjectRequest{
+		OrgID:        org.ID,
+		Ref:          "bad-stack",
+		Name:         "Bad Stack",
+		Domain:       "apps.example.com",
+		StackVersion: "2026.06.05",
+		Profile:      StackProfileFull,
+		ResourceTier: ResourceTierSmall,
+	})
+	if err == nil {
+		t.Fatal("expected unsupported project stack version to fail")
 	}
 }
 

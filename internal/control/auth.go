@@ -27,10 +27,12 @@ const (
 )
 
 type TokenClaims struct {
-	Subject string `json:"sub"`
-	Email   string `json:"email"`
-	Role    string `json:"role"`
-	Expires int64  `json:"exp"`
+	Subject    string `json:"sub"`
+	Email      string `json:"email"`
+	Role       string `json:"role"`
+	Expires    int64  `json:"exp"`
+	Audience   string `json:"aud,omitempty"`
+	ProjectRef string `json:"project_ref,omitempty"`
 }
 
 func NewAuthService(secret string) *AuthService {
@@ -63,6 +65,37 @@ func (s *AuthService) Issue(user User, ttl time.Duration) (string, error) {
 	}
 	body := base64.RawURLEncoding.EncodeToString(payload)
 	return body + "." + s.sign(body), nil
+}
+
+func (s *AuthService) IssueStudio(claims TokenClaims, projectRef string, ttl time.Duration) (string, error) {
+	studioClaims := TokenClaims{
+		Subject:    claims.Subject,
+		Email:      claims.Email,
+		Role:       claims.Role,
+		Expires:    time.Now().Add(ttl).Unix(),
+		Audience:   "studio",
+		ProjectRef: strings.TrimSpace(projectRef),
+	}
+	payload, err := json.Marshal(studioClaims)
+	if err != nil {
+		return "", err
+	}
+	body := base64.RawURLEncoding.EncodeToString(payload)
+	return body + "." + s.sign(body), nil
+}
+
+func (s *AuthService) VerifyStudio(token string, projectRef string) (TokenClaims, error) {
+	claims, err := s.Verify(token)
+	if err != nil {
+		return TokenClaims{}, err
+	}
+	if claims.Audience != "studio" {
+		return TokenClaims{}, fmt.Errorf("token is not scoped for studio")
+	}
+	if !strings.EqualFold(strings.TrimSpace(claims.ProjectRef), strings.TrimSpace(projectRef)) {
+		return TokenClaims{}, fmt.Errorf("token is not scoped for project")
+	}
+	return claims, nil
 }
 
 func (s *AuthService) Verify(token string) (TokenClaims, error) {

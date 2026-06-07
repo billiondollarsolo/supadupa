@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -39,11 +40,13 @@ var socialOAuthProviders = map[string]string{
 	"bitbucket":     "BITBUCKET",
 	"discord":       "DISCORD",
 	"facebook":      "FACEBOOK",
+	"figma":         "FIGMA",
 	"gitlab":        "GITLAB",
 	"kakao":         "KAKAO",
 	"keycloak":      "KEYCLOAK",
 	"linkedin_oidc": "LINKEDIN_OIDC",
 	"notion":        "NOTION",
+	"snapchat":      "SNAPCHAT",
 	"slack_oidc":    "SLACK_OIDC",
 	"spotify":       "SPOTIFY",
 	"twitch":        "TWITCH",
@@ -60,6 +63,10 @@ var authHookEnvTypes = map[string]string{
 	"mfa_verification_attempt":      "MFA_VERIFICATION_ATTEMPT",
 	"password_verification_attempt": "PASSWORD_VERIFICATION_ATTEMPT",
 }
+
+const (
+	bindMountFileMode = 0o644
+)
 
 func New() *Provisioner {
 	return NewWithOptions(Options{
@@ -92,6 +99,9 @@ func (p *Provisioner) Create(ctx context.Context, spec control.ProjectSpec) erro
 	if err := os.MkdirAll(filepath.Join(projectDir, "functions"), 0o700); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Join(projectDir, "functions", "main"), 0o700); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Join(projectDir, "log-drains"), 0o700); err != nil {
 		return err
 	}
@@ -99,13 +109,25 @@ func (p *Provisioner) Create(ctx context.Context, spec control.ProjectSpec) erro
 	if err != nil {
 		return err
 	}
-	if err := writeKongConfigFile(filepath.Join(projectDir, "kong.yml"), spec.Services); err != nil {
+	if err := writeKongConfigFile(filepath.Join(projectDir, "kong.yml"), spec.Ref, spec.Services); err != nil {
+		return err
+	}
+	if err := writeKongEntrypointFile(filepath.Join(projectDir, "kong-entrypoint.sh")); err != nil {
 		return err
 	}
 	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), spec.Ref); err != nil {
 		return err
 	}
+	if err := writePoolerConfigFile(filepath.Join(projectDir, "pooler.exs")); err != nil {
+		return err
+	}
 	if err := writeDatabaseInitFile(filepath.Join(projectDir, "00-supadupa-init.sql"), postgresPassword); err != nil {
+		return err
+	}
+	if err := writePostgresHBAFile(filepath.Join(projectDir, "pg_hba.conf")); err != nil {
+		return err
+	}
+	if err := writeDefaultFunctionEntrypoint(filepath.Join(projectDir, "functions", "main", "index.ts")); err != nil {
 		return err
 	}
 	if err := writeAuthHooksFile(filepath.Join(projectDir, "auth-hooks.json"), nil); err != nil {
@@ -116,6 +138,21 @@ func (p *Provisioner) Create(ctx context.Context, spec control.ProjectSpec) erro
 	}
 	if !p.apply {
 		return nil
+	}
+	if err := p.runCompose(ctx, projectDir, spec.Ref, "up", "-d", "db"); err != nil {
+		return err
+	}
+	if err := p.applyDatabaseBootstrap(ctx, projectDir, spec.Ref); err != nil {
+		return err
+	}
+	if control.ProjectServiceStates(spec.Services)["pooler"] {
+		if err := p.runCompose(ctx, projectDir, spec.Ref, "up", "-d", "--scale", "pooler=0"); err != nil {
+			return err
+		}
+		if err := p.applyDatabaseBootstrap(ctx, projectDir, spec.Ref); err != nil {
+			return err
+		}
+		return p.ensurePoolerStarted(ctx, projectDir, spec.Ref)
 	}
 	return p.runCompose(ctx, projectDir, spec.Ref, "up", "-d")
 }
@@ -130,6 +167,7 @@ func (p *Provisioner) SyncSecrets(ctx context.Context, ref string, spec control.
 	if err != nil {
 		return err
 	}
+	applyRuntimeDefaultEnvValues(values, spec)
 	for _, key := range control.ManagedSecretEnvironmentKeys() {
 		if value := strings.TrimSpace(spec.Environment[key]); value != "" {
 			values[key] = value
@@ -146,10 +184,28 @@ func (p *Provisioner) SyncSecrets(ctx context.Context, ref string, spec control.
 	if err := writeDatabaseInitFile(filepath.Join(projectDir, "00-supadupa-init.sql"), postgresPassword); err != nil {
 		return err
 	}
+	if err := writePostgresHBAFile(filepath.Join(projectDir, "pg_hba.conf")); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(projectDir, "functions", "main"), 0o700); err != nil {
+		return err
+	}
+	if err := writeDefaultFunctionEntrypoint(filepath.Join(projectDir, "functions", "main", "index.ts")); err != nil {
+		return err
+	}
+	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec); err != nil {
+		return err
+	}
 	if !p.apply {
 		return nil
 	}
-	return p.runCompose(ctx, projectDir, ref, "up", "-d")
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--remove-orphans"); err != nil {
+		return err
+	}
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "kong"); err != nil {
+		return err
+	}
+	return p.applyDatabaseBootstrap(ctx, projectDir, ref)
 }
 
 func (p *Provisioner) SyncConfig(ctx context.Context, ref string, config control.ProjectConfig) error {
@@ -162,14 +218,34 @@ func (p *Provisioner) SyncConfig(ctx context.Context, ref string, config control
 	if err != nil {
 		return err
 	}
+	applyRuntimeDefaultEnvValues(values, control.ProjectSpec{Ref: ref})
 	applyConfigEnvValues(values, config)
+	if config.Area == "functions" {
+		if err := materializeFunctionImportMap(projectDir, values, config.Config["import_map"]); err != nil {
+			return err
+		}
+	}
 	if err := writeEnvValues(envPath, values); err != nil {
 		return err
+	}
+	if config.Area == "functions" {
+		if err := os.MkdirAll(filepath.Join(projectDir, "functions", "main"), 0o700); err != nil {
+			return err
+		}
+		if err := writeDefaultFunctionEntrypoint(filepath.Join(projectDir, "functions", "main", "index.ts")); err != nil {
+			return err
+		}
 	}
 	if !p.apply {
 		return nil
 	}
-	return p.runCompose(ctx, projectDir, ref, "up", "-d")
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d"); err != nil {
+		return err
+	}
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "kong"); err != nil {
+		return err
+	}
+	return p.applyDatabaseBootstrap(ctx, projectDir, ref)
 }
 
 func (p *Provisioner) SyncServices(ctx context.Context, ref string, spec control.ProjectSpec) error {
@@ -182,11 +258,30 @@ func (p *Provisioner) SyncServices(ctx context.Context, ref string, spec control
 	if err != nil {
 		return err
 	}
+	applyRuntimeDefaultEnvValues(values, spec)
 	applyServiceEnvValues(values, spec.Services)
 	if err := writeEnvValues(envPath, values); err != nil {
 		return err
 	}
-	if err := writeKongConfigFile(filepath.Join(projectDir, "kong.yml"), spec.Services); err != nil {
+	if err := writeKongConfigFile(filepath.Join(projectDir, "kong.yml"), spec.Ref, spec.Services); err != nil {
+		return err
+	}
+	if err := writeKongEntrypointFile(filepath.Join(projectDir, "kong-entrypoint.sh")); err != nil {
+		return err
+	}
+	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), spec.Ref); err != nil {
+		return err
+	}
+	if err := writePoolerConfigFile(filepath.Join(projectDir, "pooler.exs")); err != nil {
+		return err
+	}
+	if err := writePostgresHBAFile(filepath.Join(projectDir, "pg_hba.conf")); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(projectDir, "functions", "main"), 0o700); err != nil {
+		return err
+	}
+	if err := writeDefaultFunctionEntrypoint(filepath.Join(projectDir, "functions", "main", "index.ts")); err != nil {
 		return err
 	}
 	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec); err != nil {
@@ -195,7 +290,20 @@ func (p *Provisioner) SyncServices(ctx context.Context, ref string, spec control
 	if !p.apply {
 		return nil
 	}
-	return p.runCompose(ctx, projectDir, ref, "up", "-d", "--remove-orphans")
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--remove-orphans"); err != nil {
+		return err
+	}
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "kong"); err != nil {
+		return err
+	}
+	functionsEnabled := serviceStatesFromEnv(values)["functions"]
+	if service, ok := spec.Services["functions"]; ok {
+		functionsEnabled = service.Enabled
+	}
+	if functionsEnabled {
+		return p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "edge-runtime")
+	}
+	return nil
 }
 
 func (p *Provisioner) SyncAuthHooks(ctx context.Context, ref string, hooks []control.ProjectAuthHook) error {
@@ -208,6 +316,7 @@ func (p *Provisioner) SyncAuthHooks(ctx context.Context, ref string, hooks []con
 	if err != nil {
 		return err
 	}
+	applyRuntimeDefaultEnvValues(values, control.ProjectSpec{Ref: ref})
 	applyAuthHookEnvValues(values, hooks)
 	if err := writeEnvValues(envPath, values); err != nil {
 		return err
@@ -218,7 +327,13 @@ func (p *Provisioner) SyncAuthHooks(ctx context.Context, ref string, hooks []con
 	if !p.apply {
 		return nil
 	}
-	return p.runCompose(ctx, projectDir, ref, "up", "-d")
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d"); err != nil {
+		return err
+	}
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "kong"); err != nil {
+		return err
+	}
+	return p.applyDatabaseBootstrap(ctx, projectDir, ref)
 }
 
 func (p *Provisioner) Destroy(ctx context.Context, ref string) error {
@@ -228,8 +343,21 @@ func (p *Provisioner) Destroy(ctx context.Context, ref string) error {
 func (p *Provisioner) DestroyWithOptions(ctx context.Context, ref string, opts control.DestroyOptions) error {
 	projectDir := filepath.Join(p.rootDir, ref)
 	if p.apply {
-		if err := p.runCompose(ctx, projectDir, ref, "down"); err != nil {
+		args := []string{"down"}
+		if !opts.RetainVolumes {
+			args = append(args, "-v")
+		}
+		composeFiles, err := projectComposeFilesWithReplicaOverlay(projectDir)
+		if err != nil {
 			return err
+		}
+		if err := p.runComposeWithFiles(ctx, projectDir, ref, composeFiles, args...); err != nil {
+			return err
+		}
+		if !opts.RetainVolumes {
+			if err := p.removeProjectLabeledVolumes(ctx, ref); err != nil {
+				return err
+			}
 		}
 	}
 	if opts.RetainVolumes {
@@ -238,6 +366,51 @@ func (p *Provisioner) DestroyWithOptions(ctx context.Context, ref string, opts c
 		}
 	}
 	return os.RemoveAll(projectDir)
+}
+
+func projectComposeFilesWithReplicaOverlay(projectDir string) ([]string, error) {
+	composeFile, err := filepath.Abs(filepath.Join(projectDir, "compose.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve compose file path: %w", err)
+	}
+	files := []string{composeFile}
+	replicaOverlay := filepath.Join(projectDir, "replicas", "compose.yaml")
+	if _, err := os.Stat(replicaOverlay); err == nil {
+		abs, err := filepath.Abs(replicaOverlay)
+		if err != nil {
+			return nil, fmt.Errorf("resolve replica compose file path: %w", err)
+		}
+		files = append(files, abs)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	return files, nil
+}
+
+func (p *Provisioner) removeProjectLabeledVolumes(ctx context.Context, ref string) error {
+	cli := composeVolumeCLI(p.command)
+	if cli == "" {
+		return nil
+	}
+	output, err := exec.CommandContext(ctx, cli, "volume", "ls", "-q", "--filter", "label=com.docker.compose.project="+ref).Output()
+	if err != nil {
+		return fmt.Errorf("list compose project volumes: %w", err)
+	}
+	for _, volume := range strings.Fields(string(output)) {
+		removeOutput, err := exec.CommandContext(ctx, cli, "volume", "rm", volume).CombinedOutput()
+		if err != nil && !strings.Contains(string(removeOutput), "No such volume") {
+			return fmt.Errorf("remove compose project volume %s: %w: %s", volume, err, strings.TrimSpace(string(removeOutput)))
+		}
+	}
+	return nil
+}
+
+func composeVolumeCLI(command string) string {
+	parts := strings.Fields(command)
+	if len(parts) >= 2 && parts[1] == "compose" {
+		return parts[0]
+	}
+	return ""
 }
 
 func (p *Provisioner) Status(ctx context.Context, ref string) (control.ProjectStatus, error) {
@@ -663,7 +836,10 @@ func requiredProjectFiles() []string {
 		".env",
 		"compose.yaml",
 		"kong.yml",
+		"kong-entrypoint.sh",
+		"pooler.exs",
 		"vector.yml",
+		"pg_hba.conf",
 		"00-supadupa-init.sql",
 		"auth-hooks.json",
 		"log-drains",
@@ -674,8 +850,10 @@ func requiredComposeFragments(services map[string]bool) []string {
 	fragments := []string{
 		"supabase/postgres:",
 		"supabase/postgres-meta:",
-		"./00-supadupa-init.sql:/docker-entrypoint-initdb.d/00-supadupa-init.sql:ro",
-		"./kong.yml:/etc/kong/kong.yml:ro",
+		"./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro",
+		"./00-supadupa-init.sql:/etc/postgresql.schema.sql:ro",
+		"./kong.yml:/home/kong/kong.yml:ro",
+		"./kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro",
 		"supadupa-ingress:",
 		"internal: true",
 	}
@@ -699,7 +877,7 @@ func requiredComposeFragments(services map[string]bool) []string {
 		}
 	}
 	if services["functions"] {
-		fragments = append(fragments, "./functions:/home/deno/functions:ro")
+		fragments = append(fragments, "./functions:/home/deno/functions")
 	}
 	if services["vector"] {
 		fragments = append(fragments, "./vector.yml:/etc/vector/vector.yml:ro", "./log-drains:/etc/vector/log-drains:ro")
@@ -716,16 +894,21 @@ func (p *Provisioner) Upgrade(ctx context.Context, ref string, version string) e
 	if _, err := os.Stat(filepath.Join(projectDir, "compose.yaml")); err != nil {
 		return err
 	}
-	spec := control.ProjectSpec{
-		Ref:          ref,
-		StackVersion: version,
-	}
 	if err := updateEnvValue(filepath.Join(projectDir, ".env"), "STACK_VERSION", version); err != nil {
 		return err
 	}
 	env, err := readEnvFile(filepath.Join(projectDir, ".env"))
 	if err != nil {
 		return err
+	}
+	services := map[string]control.ServiceSpec{}
+	for service, enabled := range serviceStatesFromEnv(env) {
+		services[service] = control.ServiceSpec{Enabled: enabled}
+	}
+	spec := control.ProjectSpec{
+		Ref:          ref,
+		StackVersion: version,
+		Services:     services,
 	}
 	postgresPassword := env["POSTGRES_PASSWORD"]
 	if postgresPassword == "" {
@@ -734,13 +917,28 @@ func (p *Provisioner) Upgrade(ctx context.Context, ref string, version string) e
 			return err
 		}
 	}
-	if err := writeKongConfigFile(filepath.Join(projectDir, "kong.yml"), spec.Services); err != nil {
+	if err := writeKongConfigFile(filepath.Join(projectDir, "kong.yml"), ref, spec.Services); err != nil {
+		return err
+	}
+	if err := writeKongEntrypointFile(filepath.Join(projectDir, "kong-entrypoint.sh")); err != nil {
 		return err
 	}
 	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), ref); err != nil {
 		return err
 	}
+	if err := writePoolerConfigFile(filepath.Join(projectDir, "pooler.exs")); err != nil {
+		return err
+	}
 	if err := writeDatabaseInitFile(filepath.Join(projectDir, "00-supadupa-init.sql"), postgresPassword); err != nil {
+		return err
+	}
+	if err := writePostgresHBAFile(filepath.Join(projectDir, "pg_hba.conf")); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(projectDir, "functions", "main"), 0o700); err != nil {
+		return err
+	}
+	if err := writeDefaultFunctionEntrypoint(filepath.Join(projectDir, "functions", "main", "index.ts")); err != nil {
 		return err
 	}
 	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec); err != nil {
@@ -749,7 +947,25 @@ func (p *Provisioner) Upgrade(ctx context.Context, ref string, version string) e
 	if !p.apply {
 		return nil
 	}
-	return p.runCompose(ctx, projectDir, ref, "up", "-d")
+	if control.ProjectServiceStates(spec.Services)["pooler"] {
+		if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--scale", "pooler=0"); err != nil {
+			return err
+		}
+		if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "kong"); err != nil {
+			return err
+		}
+		if err := p.applyDatabaseBootstrap(ctx, projectDir, ref); err != nil {
+			return err
+		}
+		return p.ensurePoolerStarted(ctx, projectDir, ref)
+	}
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d"); err != nil {
+		return err
+	}
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "kong"); err != nil {
+		return err
+	}
+	return p.applyDatabaseBootstrap(ctx, projectDir, ref)
 }
 
 func (p *Provisioner) Pause(ctx context.Context, ref string) error {
@@ -831,6 +1047,78 @@ func (p *Provisioner) AddReplica(ctx context.Context, ref string, opts control.R
 	return nil
 }
 
+func (p *Provisioner) SyncReplicas(ctx context.Context, ref string, replicas []control.ProjectReplica) error {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return fmt.Errorf("project ref is required")
+	}
+	projectDir := filepath.Join(p.rootDir, ref)
+	composePath := filepath.Join(projectDir, "compose.yaml")
+	if _, err := os.Stat(composePath); err != nil {
+		return err
+	}
+	replicaDir := filepath.Join(projectDir, "replicas")
+	if err := os.MkdirAll(replicaDir, 0o700); err != nil {
+		return err
+	}
+	if err := writePostgresHBAFile(filepath.Join(projectDir, "pg_hba.conf")); err != nil {
+		return err
+	}
+	if len(replicas) == 0 {
+		if err := os.Remove(filepath.Join(replicaDir, "compose.yaml")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := removeReplicaEnvFiles(replicaDir, map[string]struct{}{}); err != nil {
+			return err
+		}
+		if p.apply {
+			return p.runCompose(ctx, projectDir, ref, "up", "-d", "--remove-orphans")
+		}
+		return nil
+	}
+	envNames := map[string]struct{}{}
+	for _, replica := range replicas {
+		name := strings.TrimSpace(replica.Name)
+		if name == "" {
+			name = replica.ID
+		}
+		if err := writeReplicaEnv(filepath.Join(replicaDir, replica.ID+".env"), ref, name, control.ReplicaOpts{
+			ID:               replica.ID,
+			Name:             replica.Name,
+			HostID:           replica.HostID,
+			Region:           replica.Region,
+			Tier:             replica.Tier,
+			ReadWeight:       replica.ReadWeight,
+			FailoverPriority: replica.FailoverPriority,
+		}); err != nil {
+			return err
+		}
+		envNames[replica.ID+".env"] = struct{}{}
+	}
+	if err := removeReplicaEnvFiles(replicaDir, envNames); err != nil {
+		return err
+	}
+	overlayPath := filepath.Join(replicaDir, "compose.yaml")
+	if err := writeReplicasComposeFile(overlayPath, ref, replicas); err != nil {
+		return err
+	}
+	if !p.apply {
+		return nil
+	}
+	if err := p.runCompose(ctx, projectDir, ref, "exec", "-T", "db", "psql", "-U", "supabase_admin", "-d", "postgres", "-c", "SELECT pg_reload_conf()"); err != nil {
+		return err
+	}
+	if err := p.runComposeWithFiles(ctx, projectDir, ref, []string{composePath, overlayPath}, "up", "-d", "--remove-orphans"); err != nil {
+		return err
+	}
+	for _, replica := range replicas {
+		if err := p.waitForReplicaRecovery(ctx, projectDir, ref, overlayPath, replica); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (p *Provisioner) CloneBranch(ctx context.Context, opts control.BranchCloneOptions) (control.BranchCloneResult, error) {
 	sourceRef := strings.TrimSpace(opts.SourceRef)
 	branchRef := strings.TrimSpace(opts.BranchRef)
@@ -890,20 +1178,168 @@ func (p *Provisioner) runCompose(ctx context.Context, projectDir string, ref str
 	return err
 }
 
+func (p *Provisioner) runComposeWithFiles(ctx context.Context, projectDir string, ref string, composeFiles []string, args ...string) error {
+	_, err := p.runComposeOutputWithFiles(ctx, projectDir, ref, composeFiles, args...)
+	return err
+}
+
+func (p *Provisioner) ensurePoolerStarted(ctx context.Context, projectDir string, ref string) error {
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "pooler"); err != nil {
+		return err
+	}
+	if err := p.applyDatabaseBootstrap(ctx, projectDir, ref); err != nil {
+		return err
+	}
+	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "pooler"); err != nil {
+		return err
+	}
+	return p.waitForComposeServiceRunning(ctx, projectDir, ref, "pooler", poolerRestartStableDuration())
+}
+
+func poolerStartStableDuration() time.Duration {
+	return envDurationSeconds("SUPADUPA_POOLER_START_STABLE_SECONDS", 18*time.Second)
+}
+
+func poolerRestartStableDuration() time.Duration {
+	return envDurationSeconds("SUPADUPA_POOLER_RESTART_STABLE_SECONDS", 30*time.Second)
+}
+
+func envDurationSeconds(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds < 0 {
+		return fallback
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (p *Provisioner) waitForComposeServiceRunning(ctx context.Context, projectDir string, ref string, service string, stableFor time.Duration) error {
+	deadline := time.Now().Add(stableFor)
+	for {
+		output, err := p.runComposeOutput(ctx, projectDir, ref, "ps", "--format", "json", service)
+		if err != nil {
+			return err
+		}
+		services, err := parseComposePS(output)
+		if err != nil {
+			return err
+		}
+		row, ok := services[service]
+		if !ok {
+			return fmt.Errorf("compose service %s missing", service)
+		}
+		if row.State != "running" {
+			return fmt.Errorf("compose service %s is %s", service, row.State)
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+func (p *Provisioner) applyDatabaseBootstrap(ctx context.Context, projectDir string, ref string) error {
+	deadline := time.Now().Add(90 * time.Second)
+	var lastErr error
+	for {
+		err := p.runCompose(ctx, projectDir, ref, "exec", "-T", "db", "psql", "-v", "ON_ERROR_STOP=1", "-U", "supabase_admin", "-d", "postgres", "-f", "/etc/postgresql.schema.sql")
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("apply database runtime bootstrap: %w", lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
 func (p *Provisioner) runComposeOutput(ctx context.Context, projectDir string, ref string, args ...string) ([]byte, error) {
+	composeFile, err := filepath.Abs(filepath.Join(projectDir, "compose.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve compose file path: %w", err)
+	}
+	return p.runComposeOutputWithFiles(ctx, projectDir, ref, []string{composeFile}, args...)
+}
+
+func (p *Provisioner) runComposeOutputWithFiles(ctx context.Context, projectDir string, ref string, composeFiles []string, args ...string) ([]byte, error) {
 	parts := strings.Fields(p.command)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("compose command is empty")
 	}
-	commandArgs := append(parts[1:], append([]string{"-p", ref, "-f", filepath.Join(projectDir, "compose.yaml")}, args...)...)
+	commandArgs := append([]string{}, parts[1:]...)
+	commandArgs = append(commandArgs, "-p", ref)
+	for _, file := range composeFiles {
+		abs, err := filepath.Abs(file)
+		if err != nil {
+			return nil, fmt.Errorf("resolve compose file path: %w", err)
+		}
+		commandArgs = append(commandArgs, "-f", abs)
+	}
+	commandArgs = append(commandArgs, args...)
 	cmd := exec.CommandContext(ctx, parts[0], commandArgs...)
 	cmd.Dir = projectDir
 	cmd.Env = append(os.Environ(), "COMPOSE_PROJECT_NAME="+ref)
-	output, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("compose %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		details := strings.TrimSpace(stderr.String())
+		if details == "" {
+			details = strings.TrimSpace(string(output))
+		}
+		return nil, fmt.Errorf("compose %s failed: %w: %s", strings.Join(args, " "), err, details)
 	}
 	return output, nil
+}
+
+func (p *Provisioner) waitForReplicaRecovery(ctx context.Context, projectDir string, ref string, overlayPath string, replica control.ProjectReplica) error {
+	service := replicaComposeServiceName(replica.Name)
+	deadline := time.Now().Add(replicaRecoveryTimeout())
+	var lastErr error
+	for {
+		output, err := p.runComposeOutputWithFiles(ctx, projectDir, ref, []string{filepath.Join(projectDir, "compose.yaml"), overlayPath}, "exec", "-T", service, "psql", "-U", "postgres", "-d", "postgres", "-Atc", "select pg_is_in_recovery()")
+		if err == nil && strings.TrimSpace(string(output)) == "t" {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("replica %s is not in recovery: %s", replica.Name, strings.TrimSpace(string(output)))
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+func replicaRecoveryTimeout() time.Duration {
+	timeout := 240 * time.Second
+	raw := strings.TrimSpace(os.Getenv("SUPADUPA_REPLICA_READY_TIMEOUT_SECONDS"))
+	if raw == "" {
+		return timeout
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return timeout
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 type composeStatsRow struct {
@@ -1110,7 +1546,7 @@ func (p *Provisioner) runBranchCloneCommand(ctx context.Context, path string, op
 }
 
 func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
-	stackVersion := normalizeStackVersion(spec.StackVersion)
+	stackVersion := control.NormalizeStackReleaseVersion(spec.StackVersion)
 	projectDomain := strings.TrimSpace(spec.Domain)
 	if projectDomain == "" {
 		projectDomain = "supadupa.test"
@@ -1128,6 +1564,7 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 		orioleDBProfile = "preview"
 	}
 	apiExternalURL := fmt.Sprintf("https://%s.%s", spec.Ref, projectDomain)
+	storageExternalURL := fmt.Sprintf("https://storage-%s.%s", spec.Ref, projectDomain)
 	jwtSecret := randomHex(32)
 	if value := strings.TrimSpace(spec.Environment["JWT_SECRET"]); value != "" {
 		jwtSecret = value
@@ -1137,70 +1574,96 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 		postgresPassword = value
 	}
 	values := map[string]string{
-		"ANON_KEY":                        "generated-by-control-plane",
-		"API_EXTERNAL_URL":                apiExternalURL,
-		"DASHBOARD_USERNAME":              "supadupa",
-		"DASHBOARD_PASSWORD":              randomHex(18),
-		"EDGE_RUNTIME_POLICY":             "oneshot",
-		"FILE_SIZE_LIMIT":                 "52428800",
-		"FUNCTIONS_VERIFY_JWT":            "true",
-		"GOTRUE_API_HOST":                 "0.0.0.0",
-		"GOTRUE_API_PORT":                 "9999",
-		"GOTRUE_DB_DATABASE_URL":          fmt.Sprintf("postgres://supabase_auth_admin:%s@db:5432/postgres", postgresPassword),
-		"GOTRUE_JWT_ADMIN_ROLES":          "service_role",
-		"GOTRUE_JWT_AUD":                  "authenticated",
-		"GOTRUE_JWT_DEFAULT_GROUP_NAME":   "authenticated",
-		"GOTRUE_JWT_EXP":                  "3600",
-		"GOTRUE_JWT_SECRET":               jwtSecret,
-		"GOTRUE_SITE_URL":                 apiExternalURL,
-		"IMGPROXY_BIND":                   ":5001",
-		"JWT_SECRET":                      jwtSecret,
-		"LOGFLARE_API_KEY":                randomHex(24),
-		"LOGFLARE_LOGGER_BACKEND_API_KEY": randomHex(24),
-		"PGRST_DB_ANON_ROLE":              "anon",
-		"PGRST_DB_SCHEMAS":                "public,storage,graphql_public",
-		"PGRST_DB_URI":                    fmt.Sprintf("postgres://authenticator:%s@db:5432/postgres", postgresPassword),
-		"PGRST_JWT_SECRET":                jwtSecret,
-		"POSTGRES_DB":                     "postgres",
-		"POSTGRES_HOST":                   "db",
-		"POSTGRES_PASSWORD":               postgresPassword,
-		"POSTGRES_PORT":                   "5432",
-		"POSTGRES_USER":                   "postgres",
-		"PROJECT_DOMAIN":                  projectDomain,
-		"PROJECT_REF":                     spec.Ref,
-		"REALTIME_DB_HOST":                "db",
-		"REALTIME_DB_NAME":                "postgres",
-		"REALTIME_DB_PASSWORD":            postgresPassword,
-		"REALTIME_DB_PORT":                "5432",
-		"REALTIME_DB_USER":                "supabase_admin",
-		"REALTIME_JWT_SECRET":             jwtSecret,
-		"RESOURCE_TIER":                   resourceTier,
-		"SERVICE_ROLE_KEY":                "generated-by-control-plane",
-		"SITE_URL":                        apiExternalURL,
-		"SMTP_ADMIN_EMAIL":                "",
-		"SMTP_HOST":                       "",
-		"SMTP_PASS":                       "",
-		"SMTP_PORT":                       "587",
-		"SMTP_SENDER_NAME":                "",
-		"SMTP_TLS_MODE":                   "starttls",
-		"SMTP_USER":                       "",
-		"STACK_VERSION":                   stackVersion,
-		"STACK_PROFILE":                   stackProfile,
-		"STORAGE_BACKEND":                 "file",
-		"STORAGE_FILE_SIZE_LIMIT":         "52428800",
-		"STORAGE_IMGPROXY_URL":            "http://imgproxy:5001",
-		"STUDIO_DEFAULT_ORGANIZATION":     "supadupa",
-		"STUDIO_DEFAULT_PROJECT":          spec.Ref,
-		"STUDIO_PG_META_URL":              "http://meta:8080",
-		"SUPABASE_PUBLIC_URL":             apiExternalURL,
-		"SUPADUPA_DESIRED_STATE":          "running",
-		"SUPADUPA_ORIOLEDB_PROFILE":       orioleDBProfile,
-		"SUPADUPA_STACK_PROFILE":          stackProfile,
-		"SUPAVISOR_DB_HOST":               "db",
-		"SUPAVISOR_DB_NAME":               "postgres",
-		"SUPAVISOR_DB_PASSWORD":           postgresPassword,
-		"SUPAVISOR_DB_PORT":               "5432",
-		"SUPAVISOR_DB_USER":               "supabase_admin",
+		"ANON_KEY":                          "generated-by-control-plane",
+		"API_EXTERNAL_URL":                  apiExternalURL,
+		"DB_AFTER_CONNECT_QUERY":            "SET search_path TO _realtime",
+		"DB_ENC_KEY":                        randomHex(8),
+		"DB_HOST":                           "db",
+		"DB_NAME":                           "postgres",
+		"DB_PASSWORD":                       postgresPassword,
+		"DB_PORT":                           "5432",
+		"DB_USER":                           "supabase_admin",
+		"DASHBOARD_USERNAME":                "supadupa",
+		"DASHBOARD_PASSWORD":                randomHex(18),
+		"EDGE_RUNTIME_POLICY":               "oneshot",
+		"FILE_SIZE_LIMIT":                   "52428800",
+		"FUNCTIONS_VERIFY_JWT":              "true",
+		"FUNCTION_WORKER_TIMEOUT_MS":        "60000",
+		"GOTRUE_API_HOST":                   "0.0.0.0",
+		"GOTRUE_API_PORT":                   "9999",
+		"GOTRUE_DB_DATABASE_URL":            fmt.Sprintf("postgres://supabase_auth_admin:%s@db:5432/postgres", postgresPassword),
+		"GOTRUE_DB_DRIVER":                  "postgres",
+		"GOTRUE_JWT_ADMIN_ROLES":            "service_role",
+		"GOTRUE_JWT_AUD":                    "authenticated",
+		"GOTRUE_JWT_DEFAULT_GROUP_NAME":     "authenticated",
+		"GOTRUE_JWT_EXP":                    "3600",
+		"GOTRUE_JWT_SECRET":                 jwtSecret,
+		"GOTRUE_SITE_URL":                   apiExternalURL,
+		"IMGPROXY_AUTO_WEBP":                "true",
+		"IMGPROXY_BIND":                     ":5001",
+		"JWT_SECRET":                        jwtSecret,
+		"LOGFLARE_API_KEY":                  randomHex(24),
+		"LOGFLARE_LOGGER_BACKEND_API_KEY":   randomHex(24),
+		"LOGFLARE_PRIVATE_ACCESS_TOKEN":     randomHex(24),
+		"LOGFLARE_PUBLIC_ACCESS_TOKEN":      randomHex(24),
+		"PGRST_DB_ANON_ROLE":                "anon",
+		"PGRST_DB_SCHEMAS":                  "public,storage,graphql_public",
+		"PGRST_DB_URI":                      fmt.Sprintf("postgres://authenticator:%s@db:5432/postgres", postgresPassword),
+		"PGRST_JWT_SECRET":                  jwtSecret,
+		"POSTGRES_DB":                       "postgres",
+		"POSTGRES_HOST":                     "db",
+		"POSTGRES_PASSWORD":                 postgresPassword,
+		"POSTGRES_PORT":                     "5432",
+		"POSTGRES_USER":                     "supabase_admin",
+		"PROJECT_DOMAIN":                    projectDomain,
+		"PROJECT_REF":                       spec.Ref,
+		"REGION":                            "local",
+		"REQUEST_ALLOW_X_FORWARDED_PATH":    "true",
+		"REALTIME_DB_HOST":                  "db",
+		"REALTIME_DB_NAME":                  "postgres",
+		"REALTIME_DB_PASSWORD":              postgresPassword,
+		"REALTIME_DB_PORT":                  "5432",
+		"REALTIME_DB_USER":                  "supabase_admin",
+		"REALTIME_JWT_SECRET":               jwtSecret,
+		"RESOURCE_TIER":                     resourceTier,
+		"SECRET_KEY_BASE":                   randomHex(48),
+		"SERVICE_ROLE_KEY":                  "generated-by-control-plane",
+		"SITE_URL":                          apiExternalURL,
+		"SMTP_ADMIN_EMAIL":                  "",
+		"SMTP_HOST":                         "",
+		"SMTP_PASS":                         "",
+		"SMTP_PORT":                         "587",
+		"SMTP_SENDER_NAME":                  "",
+		"SMTP_TLS_MODE":                     "starttls",
+		"SMTP_USER":                         "",
+		"STACK_VERSION":                     stackVersion,
+		"STACK_PROFILE":                     stackProfile,
+		"STORAGE_BACKEND":                   "file",
+		"STORAGE_FILE_SIZE_LIMIT":           "52428800",
+		"STORAGE_IMGPROXY_URL":              "http://imgproxy:5001",
+		"STORAGE_PUBLIC_URL":                storageExternalURL,
+		"STORAGE_TENANT_ID":                 spec.Ref,
+		"TUS_URL_EXPIRY_MS":                 "3600000",
+		"TUS_URL_PATH":                      "/upload/resumable",
+		"UPLOAD_FILE_SIZE_LIMIT":            "524288000",
+		"UPLOAD_FILE_SIZE_LIMIT_STANDARD":   "52428800",
+		"UPLOAD_SIGNED_URL_EXPIRATION_TIME": "120",
+		"GLOBAL_S3_BUCKET":                  spec.Ref,
+		"S3_PROTOCOL_ACCESS_KEY_ID":         randomHex(24),
+		"S3_PROTOCOL_ACCESS_KEY_SECRET":     randomHex(32),
+		"STUDIO_DEFAULT_ORGANIZATION":       "supadupa",
+		"STUDIO_DEFAULT_PROJECT":            spec.Ref,
+		"STUDIO_PG_META_URL":                "http://meta:8080",
+		"SUPABASE_PUBLIC_URL":               apiExternalURL,
+		"SUPADUPA_DESIRED_STATE":            "running",
+		"SUPADUPA_ORIOLEDB_PROFILE":         orioleDBProfile,
+		"SUPADUPA_STACK_PROFILE":            stackProfile,
+		"SUPAVISOR_DB_HOST":                 "db",
+		"SUPAVISOR_DB_NAME":                 "postgres",
+		"SUPAVISOR_DB_PASSWORD":             postgresPassword,
+		"SUPAVISOR_DB_PORT":                 "5432",
+		"SUPAVISOR_DB_USER":                 "supabase_admin",
+		"VAULT_ENC_KEY":                     randomHex(16),
 	}
 	for key, value := range spec.Environment {
 		values[key] = value
@@ -1210,6 +1673,49 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 	applyAuthHookEnvValues(values, nil)
 
 	return values["POSTGRES_PASSWORD"], writeEnvValues(path, values)
+}
+
+func applyRuntimeDefaultEnvValues(values map[string]string, spec control.ProjectSpec) {
+	ref := strings.TrimSpace(spec.Ref)
+	if strings.TrimSpace(values["REQUEST_ALLOW_X_FORWARDED_PATH"]) == "" {
+		values["REQUEST_ALLOW_X_FORWARDED_PATH"] = "true"
+	}
+	if strings.TrimSpace(values["GLOBAL_S3_BUCKET"]) == "" {
+		values["GLOBAL_S3_BUCKET"] = ref
+	}
+	if strings.TrimSpace(values["STORAGE_PUBLIC_URL"]) == "" {
+		domain := strings.TrimSpace(spec.Domain)
+		if domain == "" {
+			domain = strings.TrimSpace(values["PROJECT_DOMAIN"])
+		}
+		if ref != "" && domain != "" {
+			values["STORAGE_PUBLIC_URL"] = fmt.Sprintf("https://storage-%s.%s", ref, domain)
+		}
+	}
+	if strings.TrimSpace(values["S3_PROTOCOL_ACCESS_KEY_ID"]) == "" {
+		values["S3_PROTOCOL_ACCESS_KEY_ID"] = randomHex(24)
+	}
+	if strings.TrimSpace(values["S3_PROTOCOL_ACCESS_KEY_SECRET"]) == "" {
+		values["S3_PROTOCOL_ACCESS_KEY_SECRET"] = randomHex(32)
+	}
+	if strings.TrimSpace(values["TUS_URL_PATH"]) == "" {
+		values["TUS_URL_PATH"] = "/upload/resumable"
+	}
+	if strings.TrimSpace(values["TUS_URL_EXPIRY_MS"]) == "" {
+		values["TUS_URL_EXPIRY_MS"] = "3600000"
+	}
+	if strings.TrimSpace(values["UPLOAD_FILE_SIZE_LIMIT"]) == "" {
+		values["UPLOAD_FILE_SIZE_LIMIT"] = "524288000"
+	}
+	if strings.TrimSpace(values["UPLOAD_FILE_SIZE_LIMIT_STANDARD"]) == "" {
+		values["UPLOAD_FILE_SIZE_LIMIT_STANDARD"] = "52428800"
+	}
+	if strings.TrimSpace(values["UPLOAD_SIGNED_URL_EXPIRATION_TIME"]) == "" {
+		values["UPLOAD_SIGNED_URL_EXPIRATION_TIME"] = "120"
+	}
+	if strings.TrimSpace(values["FUNCTION_WORKER_TIMEOUT_MS"]) == "" {
+		values["FUNCTION_WORKER_TIMEOUT_MS"] = "60000"
+	}
 }
 
 func applyServiceEnvValues(values map[string]string, services map[string]control.ServiceSpec) {
@@ -1256,6 +1762,7 @@ func applyAuthHookEnvValues(values map[string]string, hooks []control.ProjectAut
 		prefix := "GOTRUE_HOOK_" + envType
 		values[prefix+"_ENABLED"] = strconv.FormatBool(hook.Enabled)
 		values[prefix+"_URI"] = authHookRuntimeURI(values, hook)
+		values[prefix+"_SECRETS"] = strings.TrimSpace(hook.RuntimeSecret)
 		metadataPrefix := "SUPADUPA_AUTH_HOOK_" + envType
 		values[metadataPrefix+"_SECRET_HANDLE"] = strings.TrimSpace(hook.SecretHandle)
 		values[metadataPrefix+"_TIMEOUT_MS"] = strconv.Itoa(hook.TimeoutMS)
@@ -1314,8 +1821,7 @@ func applyConfigEnvValues(values map[string]string, config control.ProjectConfig
 		copyConfigValue(values, config.Config, "captcha_provider", "SUPADUPA_AUTH_CAPTCHA_PROVIDER")
 		copyConfigValue(values, config.Config, "captcha_site_key", "GOTRUE_SECURITY_CAPTCHA_SITE_KEY")
 		copyConfigValue(values, config.Config, "captcha_site_key", "SUPADUPA_AUTH_CAPTCHA_SITE_KEY")
-		copyConfigValue(values, config.Config, "captcha_secret_handle", "GOTRUE_SECURITY_CAPTCHA_SECRET")
-		copyConfigValue(values, config.Config, "captcha_secret_handle", "SUPADUPA_AUTH_CAPTCHA_SECRET_HANDLE")
+		copyConfigSecretValue(values, config.Config, "captcha_secret_handle", "GOTRUE_SECURITY_CAPTCHA_SECRET", "SUPADUPA_AUTH_CAPTCHA_SECRET_HANDLE")
 		if _, ok := config.Config["captcha_provider"]; ok {
 			values["GOTRUE_SECURITY_CAPTCHA_ENABLED"] = strconv.FormatBool(strings.TrimSpace(config.Config["captcha_provider"]) != "")
 		}
@@ -1326,19 +1832,19 @@ func applyConfigEnvValues(values map[string]string, config control.ProjectConfig
 	case "auth_providers":
 		copyConfigValue(values, config.Config, "oauth_google_enabled", "GOTRUE_EXTERNAL_GOOGLE_ENABLED")
 		copyConfigValue(values, config.Config, "oauth_google_client_id", "GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID")
-		copyConfigValue(values, config.Config, "oauth_google_client_secret_handle", "GOTRUE_EXTERNAL_GOOGLE_SECRET")
+		copyConfigSecretValue(values, config.Config, "oauth_google_client_secret_handle", "GOTRUE_EXTERNAL_GOOGLE_SECRET", "")
 		copyConfigValue(values, config.Config, "oauth_github_enabled", "GOTRUE_EXTERNAL_GITHUB_ENABLED")
 		copyConfigValue(values, config.Config, "oauth_github_client_id", "GOTRUE_EXTERNAL_GITHUB_CLIENT_ID")
-		copyConfigValue(values, config.Config, "oauth_github_client_secret_handle", "GOTRUE_EXTERNAL_GITHUB_SECRET")
+		copyConfigSecretValue(values, config.Config, "oauth_github_client_secret_handle", "GOTRUE_EXTERNAL_GITHUB_SECRET", "")
 		copyConfigValue(values, config.Config, "oauth_azure_enabled", "GOTRUE_EXTERNAL_AZURE_ENABLED")
 		copyConfigValue(values, config.Config, "oauth_azure_client_id", "GOTRUE_EXTERNAL_AZURE_CLIENT_ID")
-		copyConfigValue(values, config.Config, "oauth_azure_client_secret_handle", "GOTRUE_EXTERNAL_AZURE_SECRET")
+		copyConfigSecretValue(values, config.Config, "oauth_azure_client_secret_handle", "GOTRUE_EXTERNAL_AZURE_SECRET", "")
 		for provider, envProvider := range socialOAuthProviders {
 			prefix := "oauth_" + provider
 			envPrefix := "GOTRUE_EXTERNAL_" + envProvider
 			copyConfigValue(values, config.Config, prefix+"_enabled", envPrefix+"_ENABLED")
 			copyConfigValue(values, config.Config, prefix+"_client_id", envPrefix+"_CLIENT_ID")
-			copyConfigValue(values, config.Config, prefix+"_client_secret_handle", envPrefix+"_SECRET")
+			copyConfigSecretValue(values, config.Config, prefix+"_client_secret_handle", envPrefix+"_SECRET", "")
 			copyConfigValue(values, config.Config, prefix+"_url", envPrefix+"_URL")
 			copyConfigValue(values, config.Config, prefix+"_redirect_uri", envPrefix+"_REDIRECT_URI")
 			copyConfigValue(values, config.Config, prefix+"_skip_nonce_check", envPrefix+"_SKIP_NONCE_CHECK")
@@ -1350,16 +1856,22 @@ func applyConfigEnvValues(values map[string]string, config control.ProjectConfig
 		copyConfigValue(values, config.Config, "oauth_oidc_scopes", "SUPADUPA_AUTH_OIDC_SCOPES")
 		copyConfigValue(values, config.Config, "phone_enabled", "GOTRUE_EXTERNAL_PHONE_ENABLED")
 		copyConfigValue(values, config.Config, "sms_provider", "GOTRUE_SMS_PROVIDER")
+		copyConfigValue(values, config.Config, "sms_otp_exp", "GOTRUE_SMS_OTP_EXP")
+		copyConfigValue(values, config.Config, "sms_otp_length", "GOTRUE_SMS_OTP_LENGTH")
+		copyConfigValue(values, config.Config, "sms_max_frequency", "GOTRUE_SMS_MAX_FREQUENCY")
+		copyConfigValue(values, config.Config, "sms_template", "GOTRUE_SMS_TEMPLATE")
+		copyConfigSecretValue(values, config.Config, "sms_test_otp_handle", "GOTRUE_SMS_TEST_OTP", "SUPADUPA_SMS_TEST_OTP_HANDLE")
+		copyConfigValue(values, config.Config, "sms_test_otp_valid_until", "GOTRUE_SMS_TEST_OTP_VALID_UNTIL")
 		copyConfigValue(values, config.Config, "sms_twilio_account_sid", "GOTRUE_SMS_TWILIO_ACCOUNT_SID")
-		copyConfigValue(values, config.Config, "sms_twilio_auth_token_handle", "GOTRUE_SMS_TWILIO_AUTH_TOKEN")
+		copyConfigSecretValue(values, config.Config, "sms_twilio_auth_token_handle", "GOTRUE_SMS_TWILIO_AUTH_TOKEN", "")
 		copyConfigValue(values, config.Config, "sms_twilio_message_service_sid", "GOTRUE_SMS_TWILIO_MESSAGE_SERVICE_SID")
 		copyConfigValue(values, config.Config, "sms_messagebird_originator", "GOTRUE_SMS_MESSAGEBIRD_ORIGINATOR")
-		copyConfigValue(values, config.Config, "sms_messagebird_access_key_handle", "GOTRUE_SMS_MESSAGEBIRD_ACCESS_KEY")
+		copyConfigSecretValue(values, config.Config, "sms_messagebird_access_key_handle", "GOTRUE_SMS_MESSAGEBIRD_ACCESS_KEY", "")
 		copyConfigValue(values, config.Config, "sms_textlocal_sender", "GOTRUE_SMS_TEXTLOCAL_SENDER")
-		copyConfigValue(values, config.Config, "sms_textlocal_api_key_handle", "GOTRUE_SMS_TEXTLOCAL_API_KEY")
+		copyConfigSecretValue(values, config.Config, "sms_textlocal_api_key_handle", "GOTRUE_SMS_TEXTLOCAL_API_KEY", "")
 		copyConfigValue(values, config.Config, "sms_vonage_from", "GOTRUE_SMS_VONAGE_FROM")
 		copyConfigValue(values, config.Config, "sms_vonage_api_key", "GOTRUE_SMS_VONAGE_API_KEY")
-		copyConfigValue(values, config.Config, "sms_vonage_api_secret_handle", "GOTRUE_SMS_VONAGE_API_SECRET")
+		copyConfigSecretValue(values, config.Config, "sms_vonage_api_secret_handle", "GOTRUE_SMS_VONAGE_API_SECRET", "")
 		copyConfigValue(values, config.Config, "saml_enabled", "GOTRUE_SAML_ENABLED")
 		copyConfigValue(values, config.Config, "saml_metadata_url", "GOTRUE_SAML_METADATA_URL")
 		copyConfigValue(values, config.Config, "saml_entity_id", "GOTRUE_SAML_ENTITY_ID")
@@ -1378,6 +1890,7 @@ func applyConfigEnvValues(values map[string]string, config control.ProjectConfig
 		copyConfigValue(values, config.Config, "invite_body", "GOTRUE_MAILER_TEMPLATES_INVITE")
 		copyConfigValue(values, config.Config, "email_change_subject", "GOTRUE_MAILER_SUBJECTS_EMAIL_CHANGE")
 		copyConfigValue(values, config.Config, "email_change_body", "GOTRUE_MAILER_TEMPLATES_EMAIL_CHANGE")
+		copyConfigValue(values, config.Config, "sms_otp_message", "GOTRUE_SMS_TEMPLATE")
 		copyConfigValue(values, config.Config, "sms_otp_message", "GOTRUE_SMS_OTP_MESSAGE")
 		for _, notification := range []string{
 			"password_changed",
@@ -1410,6 +1923,7 @@ func applyConfigEnvValues(values map[string]string, config control.ProjectConfig
 	case "functions":
 		copyConfigValue(values, config.Config, "runtime_enabled", "EDGE_RUNTIME_ENABLED")
 		copyConfigValue(values, config.Config, "verify_jwt_by_default", "FUNCTIONS_VERIFY_JWT")
+		copyConfigValue(values, config.Config, "worker_timeout_ms", "FUNCTION_WORKER_TIMEOUT_MS")
 		copyConfigValue(values, config.Config, "import_map", "EDGE_RUNTIME_IMPORT_MAP")
 		copyConfigValue(values, config.Config, "deployment_policy", "SUPADUPA_FUNCTION_DEPLOYMENT_POLICY")
 		copyConfigValue(values, config.Config, "secret_sync_enabled", "SUPADUPA_FUNCTION_SECRET_SYNC_ENABLED")
@@ -1425,8 +1939,6 @@ func applyConfigEnvValues(values map[string]string, config control.ProjectConfig
 		copyConfigValue(values, config.Config, "pool_mode", "SUPADUPA_POOLER_MODE")
 		copyConfigValue(values, config.Config, "default_pool_size", "SUPADUPA_POOLER_DEFAULT_POOL_SIZE")
 		copyConfigValue(values, config.Config, "max_client_connections", "SUPADUPA_POOLER_MAX_CLIENT_CONNECTIONS")
-		copyConfigValue(values, config.Config, "transaction_port", "SUPADUPA_POOLER_TRANSACTION_PORT")
-		copyConfigValue(values, config.Config, "session_port", "SUPADUPA_POOLER_SESSION_PORT")
 	case "database":
 		copyConfigValue(values, config.Config, "pg_graphql_enabled", "SUPADUPA_PG_GRAPHQL_ENABLED")
 		copyConfigValue(values, config.Config, "database_webhooks", "SUPADUPA_DATABASE_WEBHOOKS_ENABLED")
@@ -1452,8 +1964,8 @@ func applyConfigEnvValues(values map[string]string, config control.ProjectConfig
 		copyConfigValue(values, config.Config, "sender_email", "GOTRUE_SMTP_ADMIN_EMAIL")
 		copyConfigValue(values, config.Config, "username", "SMTP_USER")
 		copyConfigValue(values, config.Config, "username", "GOTRUE_SMTP_USER")
-		copyConfigValue(values, config.Config, "password_handle", "SMTP_PASS")
-		copyConfigValue(values, config.Config, "password_handle", "GOTRUE_SMTP_PASS")
+		copyConfigSecretValue(values, config.Config, "password_handle", "SMTP_PASS", "SUPADUPA_SMTP_PASSWORD_HANDLE")
+		copyConfigSecretValue(values, config.Config, "password_handle", "GOTRUE_SMTP_PASS", "")
 		copyConfigValue(values, config.Config, "tls_mode", "SMTP_TLS_MODE")
 		copyConfigValue(values, config.Config, "tls_mode", "GOTRUE_SMTP_TLS_MODE")
 	case "ai":
@@ -1478,6 +1990,54 @@ func copyConfigValue(values map[string]string, config map[string]string, configK
 	}
 }
 
+func materializeFunctionImportMap(projectDir string, values map[string]string, importMap string) error {
+	importMap = strings.TrimSpace(importMap)
+	importMapPath := filepath.Join(projectDir, "functions", "import_map.json")
+	if importMap == "" {
+		delete(values, "EDGE_RUNTIME_IMPORT_MAP")
+		if err := os.Remove(importMapPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if !strings.HasPrefix(importMap, "{") && !strings.HasPrefix(importMap, "[") {
+		return nil
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(importMap), &parsed); err != nil {
+		return fmt.Errorf("functions import_map must be valid JSON: %w", err)
+	}
+	payload, err := json.MarshalIndent(parsed, "", "  ")
+	if err != nil {
+		return err
+	}
+	functionsDir := filepath.Join(projectDir, "functions")
+	if err := os.MkdirAll(functionsDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(importMapPath, append(payload, '\n'), bindMountFileMode); err != nil {
+		return err
+	}
+	values["EDGE_RUNTIME_IMPORT_MAP"] = "/home/deno/functions/import_map.json"
+	return nil
+}
+
+func copyConfigSecretValue(values map[string]string, config map[string]string, handleKey string, runtimeEnvKey string, handleEnvKey string) {
+	handle, ok := config[handleKey]
+	if !ok {
+		return
+	}
+	resolved := strings.TrimSpace(config[runtimeResolvedSecretKey(handleKey)])
+	values[runtimeEnvKey] = resolved
+	if handleEnvKey != "" {
+		values[handleEnvKey] = strings.TrimSpace(handle)
+	}
+}
+
+func runtimeResolvedSecretKey(handleKey string) string {
+	return "__resolved_" + handleKey
+}
+
 func writeEnvValues(path string, values map[string]string) error {
 	var builder strings.Builder
 	keys := make([]string, 0, len(values))
@@ -1492,7 +2052,7 @@ func writeEnvValues(path string, values map[string]string) error {
 		builder.WriteString(envFileValue(value))
 		builder.WriteString("\n")
 	}
-	return os.WriteFile(path, []byte(builder.String()), 0o600)
+	return os.WriteFile(path, []byte(builder.String()), bindMountFileMode)
 }
 
 func envFileValue(value string) string {
@@ -1504,12 +2064,16 @@ func envFileValue(value string) string {
 func applyDerivedSecretEnvValues(values map[string]string) {
 	jwtSecret := strings.TrimSpace(values["JWT_SECRET"])
 	if jwtSecret != "" {
+		values["API_JWT_SECRET"] = jwtSecret
+		values["AUTH_JWT_SECRET"] = jwtSecret
 		values["GOTRUE_JWT_SECRET"] = jwtSecret
+		values["METRICS_JWT_SECRET"] = jwtSecret
 		values["PGRST_JWT_SECRET"] = jwtSecret
 		values["REALTIME_JWT_SECRET"] = jwtSecret
 	}
 	postgresPassword := strings.TrimSpace(values["POSTGRES_PASSWORD"])
 	if postgresPassword != "" {
+		values["DB_PASSWORD"] = postgresPassword
 		values["GOTRUE_DB_DATABASE_URL"] = fmt.Sprintf("postgres://supabase_auth_admin:%s@db:5432/postgres", postgresPassword)
 		values["PGRST_DB_URI"] = fmt.Sprintf("postgres://authenticator:%s@db:5432/postgres", postgresPassword)
 		values["REALTIME_DB_PASSWORD"] = postgresPassword
@@ -1533,7 +2097,7 @@ func updateEnvValue(path string, key string, value string) error {
 	if !found {
 		lines = append(lines, key+"="+value)
 	}
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600)
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), bindMountFileMode)
 }
 
 func readEnvFile(path string) (map[string]string, error) {
@@ -1557,7 +2121,7 @@ func readEnvFile(path string) (map[string]string, error) {
 }
 
 func writeComposeFile(path string, spec control.ProjectSpec) error {
-	stackVersion := normalizeStackVersion(spec.StackVersion)
+	release := composeStackReleaseManifest(spec.StackVersion)
 	services := control.ProjectServiceStates(spec.Services)
 	depends := kongDependencies(services)
 
@@ -1569,48 +2133,72 @@ services:
     env_file: .env
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: /var/run/postgresql
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_USER: ${POSTGRES_USER}
-    networks: [internal]
+    networks:
+      internal: {}
+      supadupa-ingress:
+        aliases:
+          - %s-db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     volumes:
       - db-data:/var/lib/postgresql/data
-      - ./00-supadupa-init.sql:/docker-entrypoint-initdb.d/00-supadupa-init.sql:ro
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./00-supadupa-init.sql:/etc/postgresql.schema.sql:ro
   kong:
-    image: kong:2.8.1
+    image: kong/kong:%s
     env_file: .env
     environment:
       KONG_DATABASE: "off"
-      KONG_DECLARATIVE_CONFIG: /etc/kong/kong.yml
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
       KONG_DNS_ORDER: LAST,A,CNAME,AAAA
+      KONG_DNS_NOT_FOUND_TTL: 1
       KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
       KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
-      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,post-function
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY}
+      ANON_KEY_ASYMMETRIC: ${ANON_KEY}
+      SERVICE_ROLE_KEY_ASYMMETRIC: ${SERVICE_ROLE_KEY}
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+    entrypoint: /home/kong/kong-entrypoint.sh
     networks:
       internal: {}
       supadupa-ingress:
         aliases:
           - %s-kong
     volumes:
-      - ./kong.yml:/etc/kong/kong.yml:ro
+      - ./kong.yml:/home/kong/kong.yml:ro
+      - ./kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro
     depends_on:
-`, spec.Ref, stackVersion, spec.Ref))
+`, spec.Ref, release.Postgres, spec.Ref, release.Kong, spec.Ref))
 	for _, dependency := range depends {
 		builder.WriteString(fmt.Sprintf("      - %s\n", dependency))
 	}
 	if services["studio"] {
 		builder.WriteString(fmt.Sprintf(`  studio:
-    image: supabase/studio:latest
+    image: supabase/studio:%s
     env_file: .env
+    environment:
+      HOSTNAME: "0.0.0.0"
     networks:
       internal: {}
       supadupa-ingress:
         aliases:
           - %s-studio
     depends_on: [meta]
-`, spec.Ref))
+`, release.Studio, spec.Ref))
 	}
-	builder.WriteString(`  meta:
-    image: supabase/postgres-meta:latest
+	builder.WriteString(fmt.Sprintf(`  meta:
+    image: supabase/postgres-meta:%s
     env_file: .env
     environment:
       PG_META_DB_HOST: db
@@ -1619,101 +2207,223 @@ services:
       PG_META_DB_PORT: ${POSTGRES_PORT}
       PG_META_DB_USER: ${POSTGRES_USER}
     networks: [internal]
-    depends_on: [db]
-`)
+    depends_on:
+      db:
+        condition: service_healthy
+`, release.PostgresMeta))
 	if services["auth"] {
-		builder.WriteString(`  auth:
-    image: supabase/gotrue:latest
+		builder.WriteString(fmt.Sprintf(`  auth:
+    image: supabase/gotrue:%s
     env_file: .env
-    networks: [internal]
-    depends_on: [db]
-`)
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+    networks: [internal, egress]
+    depends_on:
+      db:
+        condition: service_healthy
+`, release.Auth))
 	}
 	if services["rest"] {
-		builder.WriteString(`  rest:
-    image: postgrest/postgrest:latest
+		builder.WriteString(fmt.Sprintf(`  rest:
+    image: postgrest/postgrest:%s
     env_file: .env
     networks: [internal]
-    depends_on: [db]
-`)
+    depends_on:
+      db:
+        condition: service_healthy
+`, release.REST))
 	}
 	if services["realtime"] {
-		builder.WriteString(`  realtime:
-    image: supabase/realtime:latest
+		builder.WriteString(fmt.Sprintf(`  realtime:
+    image: supabase/realtime:%s
     env_file: .env
-    networks: [internal]
-    depends_on: [db]
-`)
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: ${POSTGRES_PORT}
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${DB_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      ERL_AFLAGS: "-proto_dist inet_tcp"
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      SELF_HOST_TENANT_NAME: ${PROJECT_REF}
+      RUN_JANITOR: "true"
+      DISABLE_HEALTHCHECK_LOGGING: "true"
+    networks:
+      internal:
+        aliases:
+          - %s.supabase-realtime
+    depends_on:
+      db:
+        condition: service_healthy
+`, release.Realtime, spec.Ref))
 	}
 	if services["storage"] {
-		builder.WriteString(`  storage:
-    image: supabase/storage-api:latest
+		builder.WriteString(fmt.Sprintf(`  storage:
+    image: supabase/storage-api:%s
     env_file: .env
-    networks: [internal]
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      STORAGE_PUBLIC_URL: ${STORAGE_PUBLIC_URL}
+      FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT}
+      STORAGE_BACKEND: ${STORAGE_BACKEND}
+      GLOBAL_S3_BUCKET: ${GLOBAL_S3_BUCKET}
+      REQUEST_ALLOW_X_FORWARDED_PATH: ${REQUEST_ALLOW_X_FORWARDED_PATH}
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: ${STORAGE_TENANT_ID}
+      REGION: ${REGION}
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: ${STORAGE_IMGPROXY_URL}
+      UPLOAD_FILE_SIZE_LIMIT: ${UPLOAD_FILE_SIZE_LIMIT}
+      UPLOAD_FILE_SIZE_LIMIT_STANDARD: ${UPLOAD_FILE_SIZE_LIMIT_STANDARD}
+      UPLOAD_SIGNED_URL_EXPIRATION_TIME: ${UPLOAD_SIGNED_URL_EXPIRATION_TIME}
+      TUS_URL_PATH: ${TUS_URL_PATH}
+      TUS_URL_EXPIRY_MS: ${TUS_URL_EXPIRY_MS}
+      S3_PROTOCOL_ACCESS_KEY_ID: ${S3_PROTOCOL_ACCESS_KEY_ID}
+      S3_PROTOCOL_ACCESS_KEY_SECRET: ${S3_PROTOCOL_ACCESS_KEY_SECRET}
+    networks: [internal, egress]
     volumes:
       - storage-data:/var/lib/storage
     depends_on:
-      - db
-`)
+      db:
+        condition: service_healthy
+`, release.Storage))
+		if services["rest"] {
+			builder.WriteString("      rest:\n        condition: service_started\n")
+		}
 		if services["imgproxy"] {
-			builder.WriteString("      - imgproxy\n")
+			builder.WriteString("      imgproxy:\n        condition: service_started\n")
 		}
 	}
 	if services["imgproxy"] {
-		builder.WriteString(`  imgproxy:
-    image: darthsim/imgproxy:latest
+		builder.WriteString(fmt.Sprintf(`  imgproxy:
+    image: darthsim/imgproxy:%s
     env_file: .env
-    networks: [internal]
-`)
-	}
-	if services["functions"] {
-		builder.WriteString(`  edge-runtime:
-    image: supabase/edge-runtime:latest
-    env_file: .env
+    environment:
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
     networks: [internal]
     volumes:
-      - ./functions:/home/deno/functions:ro
-`)
+      - storage-data:/var/lib/storage:ro
+`, release.Imgproxy))
+	}
+	if services["functions"] {
+		builder.WriteString(fmt.Sprintf(`  edge-runtime:
+    image: supabase/edge-runtime:%s
+    env_file: .env
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_PUBLISHABLE_KEYS: "{\"default\":\"${SUPABASE_PUBLISHABLE_KEY}\"}"
+      SUPABASE_SECRET_KEYS: "{\"default\":\"${SUPABASE_SECRET_KEY}\"}"
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      VERIFY_JWT: ${FUNCTIONS_VERIFY_JWT}
+      SUPADUPA_FUNCTION_STORAGE_ROOT: /mnt/.supadupa-storage/${STORAGE_TENANT_ID}/${GLOBAL_S3_BUCKET}
+    networks: [internal, egress]
+    volumes:
+      - ./functions:/home/deno/functions
+      - storage-data:/mnt/.supadupa-storage:ro
+    command: ["start", "--main-service", "/home/deno/functions/main"]
+`, release.EdgeRuntime))
 	}
 	if services["pooler"] {
-		builder.WriteString(`  pooler:
-    image: supabase/supavisor:latest
+		builder.WriteString(fmt.Sprintf(`  pooler:
+    image: supabase/supavisor:%s
+    restart: unless-stopped
     env_file: .env
-    networks: [internal]
-    depends_on: [db]
-`)
+    environment:
+      PORT: 4000
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_HOST: db
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@db:5432/_supabase
+      CLUSTER_POSTGRES: "true"
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      VAULT_ENC_KEY: ${VAULT_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      REGION: ${REGION}
+      POOLER_TENANT_ID: ${PROJECT_REF}
+      POOLER_DEFAULT_POOL_SIZE: "20"
+      POOLER_MAX_CLIENT_CONN: "200"
+      POOLER_POOL_MODE: transaction
+      DB_POOL_SIZE: "5"
+    networks:
+      internal: {}
+      supadupa-ingress:
+        aliases:
+          - %s-pooler
+    volumes:
+      - ./pooler.exs:/etc/pooler/pooler.exs:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["/bin/sh", "-c", "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"]
+`, release.Pooler, spec.Ref))
 	}
 	if services["analytics"] {
-		builder.WriteString(`  analytics:
-    image: supabase/logflare:latest
+		builder.WriteString(fmt.Sprintf(`  analytics:
+    image: supabase/logflare:%s
     env_file: .env
-    networks: [internal]
-    depends_on: [db]
-`)
+    environment:
+      LOGFLARE_NODE_HOST: 127.0.0.1
+      DB_USERNAME: supabase_admin
+      DB_DATABASE: ${POSTGRES_DB}
+      DB_HOSTNAME: db
+      DB_PORT: ${POSTGRES_PORT}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_SCHEMA: _analytics
+      LOGFLARE_SINGLE_TENANT: "true"
+      LOGFLARE_SUPABASE_MODE: "true"
+      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+      LOGFLARE_FEATURE_FLAG_OVERRIDE: multibackend=true
+      POSTGRES_BACKEND_URL: postgresql://supabase_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      POSTGRES_BACKEND_SCHEMA: _analytics
+    networks: [internal, egress]
+    depends_on:
+      db:
+        condition: service_healthy
+`, release.Analytics))
 	}
 	if services["vector"] {
-		builder.WriteString(`  vector:
-    image: timberio/vector:latest-alpine
+		builder.WriteString(fmt.Sprintf(`  vector:
+    image: timberio/vector:%s
     env_file: .env
-    networks: [internal]
+    networks: [internal, egress]
     volumes:
       - ./vector.yml:/etc/vector/vector.yml:ro
       - ./log-drains:/etc/vector/log-drains:ro
-      - logs:/var/log/supadupa
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     command: ["--config", "/etc/vector/vector.yml", "--config-dir", "/etc/vector/log-drains"]
-`)
+`, release.Vector))
 	}
 	builder.WriteString(`networks:
   internal:
     internal: true
+  egress: {}
   supadupa-ingress:
     external: true
 volumes:
   db-data:
   storage-data:
-  logs:
 `)
-	return os.WriteFile(path, []byte(builder.String()), 0o600)
+	return os.WriteFile(path, []byte(builder.String()), bindMountFileMode)
 }
 
 func kongDependencies(services map[string]bool) []string {
@@ -1734,26 +2444,124 @@ func kongDependencies(services map[string]bool) []string {
 	return depends
 }
 
-func writeKongConfigFile(path string, services map[string]control.ServiceSpec) error {
+func writeKongConfigFile(path string, ref string, services map[string]control.ServiceSpec) error {
 	states := control.ProjectServiceStates(services)
 	var builder strings.Builder
-	builder.WriteString("_format_version: \"2.1\"\n_transform: true\n\nservices:\n")
+	builder.WriteString(`_format_version: "2.1"
+_transform: true
+
+consumers:
+  - username: anon
+    keyauth_credentials:
+      - key: $SUPABASE_ANON_KEY
+      - key: $SUPABASE_PUBLISHABLE_KEY
+  - username: service_role
+    keyauth_credentials:
+      - key: $SUPABASE_SERVICE_KEY
+      - key: $SUPABASE_SECRET_KEY
+
+acls:
+  - consumer: anon
+    group: anon
+  - consumer: service_role
+    group: admin
+
+services:
+`)
 	if states["auth"] {
-		builder.WriteString(`  - name: auth-v1
-    url: http://auth:9999
+		builder.WriteString(`  - name: auth-v1-health
+    url: http://auth:9999/health
+    routes:
+      - name: auth-v1-health
+        strip_path: true
+        paths: [/auth/v1/health]
+    plugins:
+      - name: cors
+  - name: auth-v1-open-verify
+    url: http://auth:9999/verify
+    routes:
+      - name: auth-v1-open-verify
+        strip_path: true
+        paths: [/auth/v1/verify]
+    plugins:
+      - name: cors
+  - name: auth-v1-open-callback
+    url: http://auth:9999/callback
+    routes:
+      - name: auth-v1-open-callback
+        strip_path: true
+        paths: [/auth/v1/callback]
+    plugins:
+      - name: cors
+  - name: auth-v1-open-authorize
+    url: http://auth:9999/authorize
+    routes:
+      - name: auth-v1-open-authorize
+        strip_path: true
+        paths: [/auth/v1/authorize]
+    plugins:
+      - name: cors
+  - name: auth-v1-open-jwks
+    url: http://auth:9999/.well-known/jwks.json
+    routes:
+      - name: auth-v1-open-jwks
+        strip_path: true
+        paths: [/auth/v1/.well-known/jwks.json]
+    plugins:
+      - name: cors
+  - name: auth-v1
+    url: http://auth:9999/
     routes:
       - name: auth-v1
         strip_path: true
-        paths: [/auth/v1]
+        paths: [/auth/v1/]
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+          replace:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
 `)
 	}
 	if states["rest"] {
 		builder.WriteString(`  - name: rest-v1
-    url: http://rest:3000
+    url: http://rest:3000/
     routes:
       - name: rest-v1
         strip_path: true
-        paths: [/rest/v1]
+        paths: [/rest/v1/]
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+          replace:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
 `)
 	}
 	if states["graphql"] && states["rest"] {
@@ -1763,42 +2571,120 @@ func writeKongConfigFile(path string, services map[string]control.ServiceSpec) e
       - name: graphql-v1
         strip_path: true
         paths: [/graphql/v1]
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Content-Profile: graphql_public"
+              - "Authorization: $LUA_AUTH_EXPR"
+          replace:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
 `)
 	}
 	if states["realtime"] {
-		builder.WriteString(`  - name: realtime-v1
-    url: http://realtime:4000/socket/
+		realtimeHost := fmt.Sprintf("%s.supabase-realtime", ref)
+		builder.WriteString(fmt.Sprintf(`  - name: realtime-v1-ws
+    url: http://%s:4000/socket
+    protocol: ws
     routes:
-      - name: realtime-v1
+      - name: realtime-v1-ws
         strip_path: true
-        paths: [/realtime/v1]
-`)
+        paths: [/realtime/v1/]
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "x-api-key:$LUA_RT_WS_EXPR"
+          replace:
+            querystring:
+              - "apikey:$LUA_RT_WS_EXPR"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+  - name: realtime-v1-rest
+    url: http://%s:4000/api
+    protocol: http
+    routes:
+      - name: realtime-v1-rest
+        strip_path: true
+        paths: [/realtime/v1/api]
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+          replace:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+`, realtimeHost, realtimeHost))
 	}
 	if states["storage"] {
 		builder.WriteString(`  - name: storage-v1
-    url: http://storage:5000
+    url: http://storage:5000/
     routes:
       - name: storage-v1
         strip_path: true
-        paths: [/storage/v1]
+        paths: [/storage/v1/]
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+          replace:
+            headers:
+              - "Authorization: $LUA_AUTH_EXPR"
+      - name: post-function
+        config:
+          access:
+            - |
+              local auth = kong.request.get_header("authorization")
+              if auth == nil or auth == "" or auth:find("^%s*$") then
+                kong.service.request.clear_header("authorization")
+              end
 `)
 	}
 	if states["functions"] {
 		builder.WriteString(`  - name: functions-v1
-    url: http://edge-runtime:9000
+    url: http://edge-runtime:9000/
     routes:
       - name: functions-v1
         strip_path: true
-        paths: [/functions/v1]
-`)
-	}
-	if states["studio"] {
-		builder.WriteString(`  - name: studio
-    url: http://studio:3000
-    routes:
-      - name: studio
-        strip_path: true
-        paths: [/studio]
+        paths: [/functions/v1/]
+    plugins:
+      - name: cors
 `)
 	}
 	if states["analytics"] {
@@ -1810,15 +2696,53 @@ func writeKongConfigFile(path string, services map[string]control.ServiceSpec) e
         paths: [/analytics/v1]
 `)
 	}
-	return os.WriteFile(path, []byte(builder.String()), 0o600)
+	return os.WriteFile(path, []byte(builder.String()), bindMountFileMode)
+}
+
+func writeKongEntrypointFile(path string) error {
+	body := `#!/bin/sh
+set -eu
+
+if [ -n "${SUPABASE_SECRET_KEY:-}" ] && [ -n "${SUPABASE_PUBLISHABLE_KEY:-}" ]; then
+  export LUA_AUTH_EXPR="\$((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '$SUPABASE_SECRET_KEY' and 'Bearer $SERVICE_ROLE_KEY_ASYMMETRIC') or (headers.apikey == '$SUPABASE_PUBLISHABLE_KEY' and 'Bearer $ANON_KEY_ASYMMETRIC') or (headers.apikey ~= nil and 'Bearer ' .. headers.apikey))"
+  export LUA_RT_WS_EXPR="\$((query_params.apikey == '$SUPABASE_SECRET_KEY' and '$SERVICE_ROLE_KEY_ASYMMETRIC') or (query_params.apikey == '$SUPABASE_PUBLISHABLE_KEY' and '$ANON_KEY_ASYMMETRIC') or query_params.apikey)"
+else
+  export LUA_AUTH_EXPR="\$((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey ~= nil and 'Bearer ' .. headers.apikey))"
+  export LUA_RT_WS_EXPR="\$(query_params.apikey)"
+fi
+
+awk '{
+  result = ""
+  rest = $0
+  while (match(rest, /\$[A-Za-z_][A-Za-z_0-9]*/)) {
+    varname = substr(rest, RSTART + 1, RLENGTH - 1)
+    if (varname in ENVIRON) {
+      result = result substr(rest, 1, RSTART - 1) ENVIRON[varname]
+    } else {
+      result = result substr(rest, 1, RSTART + RLENGTH - 1)
+    }
+    rest = substr(rest, RSTART + RLENGTH)
+  }
+  print result rest
+}' /home/kong/kong.yml > "$KONG_DECLARATIVE_CONFIG"
+
+sed -i '/^[[:space:]]*- key:[[:space:]]*$/d' "$KONG_DECLARATIVE_CONFIG"
+
+exec /entrypoint.sh kong docker-start
+`
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o755)
 }
 
 func writeVectorConfigFile(path string, ref string) error {
 	body := fmt.Sprintf(`sources:
   project_logs:
-    type: file
-    include:
-      - /var/log/supadupa/*.log
+    type: docker_logs
+    docker_host: unix:///var/run/docker.sock
+    include_labels:
+      - com.docker.compose.project=%s
 
 transforms:
   add_project:
@@ -1833,31 +2757,599 @@ sinks:
     inputs: [add_project]
     encoding:
       codec: json
-`, ref)
-	return os.WriteFile(path, []byte(body), 0o600)
+`, ref, ref)
+	return os.WriteFile(path, []byte(body), bindMountFileMode)
+}
+
+func writePoolerConfigFile(path string) error {
+	body := `{:ok, _} = Application.ensure_all_started(:supavisor)
+
+{:ok, version} =
+  case Supavisor.Repo.query!("select version()") do
+    %{rows: [[ver]]} -> Supavisor.Helpers.parse_pg_version(ver)
+    _ -> nil
+  end
+
+params = %{
+  "external_id" => System.get_env("POOLER_TENANT_ID"),
+  "db_host" => System.get_env("POSTGRES_HOST") || "db",
+  "db_port" => System.get_env("POSTGRES_PORT"),
+  "db_database" => System.get_env("POSTGRES_DB"),
+  "require_user" => true,
+  "default_max_clients" => System.get_env("POOLER_MAX_CLIENT_CONN"),
+  "default_pool_size" => System.get_env("POOLER_DEFAULT_POOL_SIZE"),
+  "default_parameter_status" => %{"server_version" => version},
+  "users" => [
+    %{
+      "db_user" => "postgres",
+      "db_password" => System.get_env("POSTGRES_PASSWORD"),
+      "mode_type" => "transaction",
+      "pool_size" => System.get_env("POOLER_DEFAULT_POOL_SIZE")
+    }
+  ]
+}
+
+if Supavisor.Tenants.get_tenant_by_external_id(params["external_id"]) do
+  _ = Supavisor.Tenants.delete_tenant_by_external_id(params["external_id"])
+end
+
+{:ok, _} = Supavisor.Tenants.create_tenant(params)
+`
+	return os.WriteFile(path, []byte(body), bindMountFileMode)
+}
+
+func writeDefaultFunctionEntrypoint(path string) error {
+	body := `const FUNCTION_NAME_RE = /^[A-Za-z0-9_-]+$/;
+
+function functionNameFromPath(pathname: string): string {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts[0] === "functions" && parts[1] === "v1") {
+    return parts[2] ?? "";
+  }
+  return parts[0] ?? "";
+}
+
+function json(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function base64URLDecode(value: string): Uint8Array {
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+}
+
+async function verifyHS256JWT(jwt: string, secret: string): Promise<boolean> {
+  const parts = jwt.split(".");
+  if (parts.length !== 3) {
+    return false;
+  }
+  try {
+    const header = JSON.parse(new TextDecoder().decode(base64URLDecode(parts[0])));
+    if (header.alg !== "HS256") {
+      return false;
+    }
+    const payload = JSON.parse(new TextDecoder().decode(base64URLDecode(parts[1])));
+    const now = Math.floor(Date.now() / 1000);
+    if (typeof payload.exp === "number" && payload.exp <= now) {
+      return false;
+    }
+    if (typeof payload.nbf === "number" && payload.nbf > now) {
+      return false;
+    }
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    return await crypto.subtle.verify(
+      "HMAC",
+      key,
+      base64URLDecode(parts[2]),
+      new TextEncoder().encode(parts[0] + "." + parts[1]),
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+function bearerToken(req: Request): string {
+  const header = req.headers.get("authorization") ?? "";
+  const [scheme, token] = header.split(" ");
+  if (scheme.toLowerCase() !== "bearer" || !token) {
+    return "";
+  }
+  return token;
+}
+
+function parseOpaqueKeys(value: string | undefined): Set<string> {
+  const keys = new Set<string>();
+  if (!value) {
+    return keys;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    for (const candidate of Object.values(parsed)) {
+      if (typeof candidate === "string" && candidate !== "") {
+        keys.add(candidate);
+      }
+    }
+  } catch (_error) {
+    if (value !== "") {
+      keys.add(value);
+    }
+  }
+  return keys;
+}
+
+async function loadFunctionEnv(servicePath: string): Promise<Record<string, string>> {
+  try {
+    const env = await Deno.readTextFile(servicePath + "/.env");
+    const values: Record<string, string> = {};
+    for (const line of env.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        continue;
+      }
+      const separator = trimmed.indexOf("=");
+      if (separator <= 0) {
+        continue;
+      }
+      values[trimmed.slice(0, separator)] = trimmed.slice(separator + 1);
+    }
+    return values;
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      console.error("failed to read function env", error);
+    }
+    return {};
+  }
+}
+
+async function loadFunctionEntrypoint(servicePath: string): Promise<string> {
+  try {
+    const metadata = JSON.parse(await Deno.readTextFile(servicePath + "/metadata.json"));
+    const entrypoint = String(metadata.entrypoint ?? "").replaceAll("\\", "/");
+    if (entrypoint && !entrypoint.startsWith("/") && !entrypoint.includes("..")) {
+      return cleanRelativePath(entrypoint) || "index.ts";
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      console.error("failed to read function metadata", error);
+    }
+  }
+  return "index.ts";
+}
+
+type StorageMount = {
+  id?: string;
+  bucket_name?: string;
+  mount_path?: string;
+  read_only?: boolean;
+  prefix?: string;
+  env_alias?: string;
+};
+
+type FunctionRegion = {
+  region?: string;
+  routing_policy?: string;
+};
+
+type PreparedStorageMounts = {
+  env: Record<string, string>;
+  servicePath: string;
+  staticPatterns: string[];
+};
+
+function cleanRelativePath(value: string): string {
+  return value.split("/").filter((part) => part !== "" && part !== ".").join("/");
+}
+
+function joinPath(...parts: string[]): string {
+  const cleaned = parts
+    .map((part, index) => {
+      const value = part.replaceAll("\\", "/");
+      if (index === 0) {
+        return value.replace(/\/+$/, "");
+      }
+      return value.replace(/^\/+|\/+$/g, "");
+    })
+    .filter((part) => part !== "");
+  if (cleaned.length === 0) {
+    return "/";
+  }
+  return cleaned.join("/");
+}
+
+function defaultStorageRoot(): string {
+  const configured = Deno.env.get("SUPADUPA_FUNCTION_STORAGE_ROOT");
+  if (configured) {
+    return configured.replace(/\/+$/, "");
+  }
+  const tenant = Deno.env.get("STORAGE_TENANT_ID") ?? Deno.env.get("PROJECT_REF") ?? "";
+  const globalBucket = Deno.env.get("GLOBAL_S3_BUCKET") ?? tenant;
+  return joinPath("/mnt/.supadupa-storage", tenant, globalBucket);
+}
+
+async function removePathIfExists(path: string): Promise<void> {
+  try {
+    await Deno.remove(path, { recursive: true });
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      throw error;
+    }
+  }
+}
+
+async function makeReadablePath(path: string): Promise<void> {
+  const normalized = path.replaceAll("\\", "/");
+  const parts = normalized.split("/").filter((part) => part !== "");
+  let current = normalized.startsWith("/") ? "" : ".";
+  for (const part of parts) {
+    current = current === "" ? "/" + part : joinPath(current, part);
+    if (!current.startsWith("/home/deno/functions") && !current.startsWith("/tmp")) {
+      continue;
+    }
+    try {
+      await Deno.chmod(current, 0o755);
+    } catch (_error) {
+      // Some runtime filesystems do not support chmod; keep going and rely on existing permissions.
+    }
+  }
+}
+
+async function ensureReadableDirectory(path: string): Promise<void> {
+  await Deno.mkdir(path, { recursive: true });
+  await makeReadablePath(path);
+}
+
+async function copyFileIntoView(targetPath: string, sourcePath: string): Promise<void> {
+  await ensureReadableDirectory(targetPath.substring(0, targetPath.lastIndexOf("/")));
+  await Deno.writeFile(targetPath, await Deno.readFile(sourcePath));
+  try {
+    await Deno.chmod(targetPath, 0o644);
+  } catch (_error) {
+    // chmod is best-effort for runtime filesystems.
+  }
+}
+
+async function makeReadOnlyPath(path: string): Promise<void> {
+  try {
+    const stat = await Deno.stat(path);
+    if (stat.isDirectory) {
+      for await (const entry of Deno.readDir(path)) {
+        await makeReadOnlyPath(joinPath(path, entry.name));
+      }
+      await Deno.chmod(path, 0o555);
+      return;
+    }
+    await Deno.chmod(path, 0o444);
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      throw error;
+    }
+  }
+}
+
+async function latestFileInDirectory(path: string): Promise<string> {
+  let latestPath = "";
+  let latestTime = 0;
+  try {
+    for await (const entry of Deno.readDir(path)) {
+      if (!entry.isFile || entry.name.endsWith(".json")) {
+        continue;
+      }
+      const candidate = joinPath(path, entry.name);
+      const stat = await Deno.stat(candidate);
+      const modified = stat.mtime?.getTime() ?? 0;
+      if (!latestPath || modified >= latestTime) {
+        latestPath = candidate;
+        latestTime = modified;
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      throw error;
+    }
+  }
+  return latestPath;
+}
+
+async function materializeStorageObjectLinks(sourceRoot: string, targetRoot: string, currentPath = sourceRoot): Promise<string[]> {
+  const copiedFiles: string[] = [];
+  const latest = await latestFileInDirectory(currentPath);
+  if (latest) {
+    const relative = currentPath.slice(sourceRoot.length).replace(/^\/+/, "");
+    if (relative) {
+      const targetPath = joinPath(targetRoot, relative);
+      await copyFileIntoView(targetPath, latest);
+      copiedFiles.push(targetPath);
+    }
+    return copiedFiles;
+  }
+  try {
+    for await (const entry of Deno.readDir(currentPath)) {
+      if (entry.isDirectory) {
+        copiedFiles.push(...await materializeStorageObjectLinks(sourceRoot, targetRoot, joinPath(currentPath, entry.name)));
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      throw error;
+    }
+  }
+  return copiedFiles;
+}
+
+async function prepareStorageMountView(mountPath: string, sourcePath: string, readOnly: boolean): Promise<string[]> {
+  await removePathIfExists(mountPath);
+  await ensureReadableDirectory(mountPath);
+  const copiedFiles = await materializeStorageObjectLinks(sourcePath, mountPath);
+  if (readOnly) {
+    await makeReadOnlyPath(mountPath);
+  }
+  return copiedFiles;
+}
+
+function mountWorkDirName(mount: StorageMount): string {
+  const alias = String(mount.env_alias ?? "").toLowerCase().replaceAll("_", "-");
+  if (/^[a-z0-9][a-z0-9-]*$/.test(alias)) {
+    return alias;
+  }
+  return String(mount.bucket_name ?? "mount");
+}
+
+async function prepareStorageMounts(manifestServicePath: string, workerSourcePath: string): Promise<PreparedStorageMounts> {
+  let mounts: StorageMount[] = [];
+  try {
+    mounts = JSON.parse(await Deno.readTextFile(manifestServicePath + "/storage-mounts.json"));
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      console.error("failed to read function storage mounts", error);
+    }
+    return { env: {}, servicePath: workerSourcePath, staticPatterns: [] };
+  }
+  if (mounts.length === 0) {
+    return { env: {}, servicePath: workerSourcePath, staticPatterns: [] };
+  }
+  const workerServicePath = workerSourcePath;
+  const storageEnv: Record<string, string> = {};
+  const staticPatterns: string[] = [];
+  const storageRoot = defaultStorageRoot();
+  await makeReadablePath(workerServicePath);
+  for (const mount of mounts) {
+    const bucketName = String(mount.bucket_name ?? "");
+    const mountPath = String(mount.mount_path ?? "");
+    const envAlias = String(mount.env_alias ?? "");
+    if (!/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(bucketName)) {
+      continue;
+    }
+    if (!mountPath.startsWith("/mnt/") || mountPath.startsWith("/mnt/.supadupa-storage/")) {
+      continue;
+    }
+    const prefix = cleanRelativePath(String(mount.prefix ?? ""));
+    const sourcePath = joinPath(storageRoot, bucketName, prefix);
+    const preparedMountRelativePath = joinPath(".supadupa-mounts", mountWorkDirName(mount));
+    const preparedMountPath = joinPath(workerServicePath, preparedMountRelativePath);
+    const copiedFiles = await prepareStorageMountView(preparedMountPath, sourcePath, mount.read_only === true);
+    for (const copiedFile of copiedFiles) {
+      staticPatterns.push(copiedFile);
+    }
+    staticPatterns.push(preparedMountPath + "/*");
+    staticPatterns.push(preparedMountPath + "/**/*");
+    if (/^[A-Z_][A-Z0-9_]*$/.test(envAlias)) {
+      storageEnv[envAlias] = preparedMountRelativePath;
+    }
+  }
+  return { env: storageEnv, servicePath: workerServicePath, staticPatterns };
+}
+
+async function resolveFunctionServicePath(functionName: string, servicePath: string, env: Record<string, string>): Promise<string> {
+  const version = env.SUPABASE_FUNCTION_VERSION ?? "";
+  if (!/^[0-9]+$/.test(version)) {
+    return servicePath;
+  }
+  const runtimeServicePath = "/home/deno/functions/.supadupa-runtime/" + functionName + "-v" + version;
+  try {
+    const stat = await Deno.stat(runtimeServicePath);
+    if (stat.isDirectory) {
+      return runtimeServicePath;
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      console.error("failed to stat versioned function runtime", error);
+    }
+  }
+  return servicePath;
+}
+
+async function requestIsAuthorized(req: Request, env: Record<string, string>): Promise<boolean> {
+  if (req.method === "OPTIONS") {
+    return true;
+  }
+  const verifyJWT = (env.VERIFY_JWT ?? Deno.env.get("VERIFY_JWT") ?? "true") === "true";
+  if (!verifyJWT) {
+    return true;
+  }
+  const token = bearerToken(req);
+  if (!token) {
+    return false;
+  }
+  const opaqueKeys = new Set<string>([
+    ...parseOpaqueKeys(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS")),
+    ...parseOpaqueKeys(Deno.env.get("SUPABASE_SECRET_KEYS")),
+  ]);
+  if (opaqueKeys.has(token)) {
+    return true;
+  }
+  const jwtSecret = Deno.env.get("JWT_SECRET");
+  return jwtSecret ? await verifyHS256JWT(token, jwtSecret) : false;
+}
+
+function positiveIntegerValue(value: string | undefined, fallback: number, min: number, max: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function requestTimeoutMs(env: Record<string, string>): number {
+  return positiveIntegerValue(env.FUNCTION_WORKER_TIMEOUT_MS ?? Deno.env.get("FUNCTION_WORKER_TIMEOUT_MS"), 60000, 100, 300000);
+}
+
+function normalizeRequestedRegion(value: string | null): string {
+  const region = (value ?? "").trim().toLowerCase();
+  if (!region || region.length > 64 || /[\s/\\]/.test(region)) {
+    return "";
+  }
+  return region;
+}
+
+async function loadFunctionRegions(servicePath: string): Promise<FunctionRegion[]> {
+  try {
+    const regions = JSON.parse(await Deno.readTextFile(servicePath + "/regions.json"));
+    return Array.isArray(regions) ? regions : [];
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      console.error("failed to read function regions", error);
+    }
+    return [];
+  }
+}
+
+async function resolveFunctionRegion(req: Request, servicePath: string): Promise<string> {
+  const url = new URL(req.url);
+  const requested = normalizeRequestedRegion(url.searchParams.get("forceFunctionRegion") ?? req.headers.get("x-region"));
+  const configured = await loadFunctionRegions(servicePath);
+  const configuredRegions = new Set(
+    configured
+      .map((item) => normalizeRequestedRegion(String(item.region ?? "")))
+      .filter((region) => region !== ""),
+  );
+  if (requested !== "" && (configuredRegions.size === 0 || configuredRegions.has(requested))) {
+    return requested;
+  }
+  const defaultRegion = normalizeRequestedRegion(Deno.env.get("REGION"));
+  return defaultRegion || "local";
+}
+
+async function fetchWithTimeout(worker: { fetch: (req: Request) => Promise<Response> }, req: Request, timeoutMs: number): Promise<Response> {
+  let timer: number | undefined;
+  try {
+    const timeout = new Promise<Response>((resolve) => {
+      timer = setTimeout(() => resolve(json(504, { msg: "function timed out", timeout_ms: timeoutMs })), timeoutMs);
+    });
+    return await Promise.race([worker.fetch(req), timeout]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+Deno.serve(async (req: Request) => {
+  const url = new URL(req.url);
+  const functionName = functionNameFromPath(url.pathname);
+  if (!functionName) {
+    return json(400, { msg: "missing function name in request" });
+  }
+  if (!FUNCTION_NAME_RE.test(functionName)) {
+    return json(400, { msg: "invalid function name in request" });
+  }
+
+  const servicePath = "/home/deno/functions/" + functionName;
+  try {
+    const stat = await Deno.stat(servicePath);
+    if (!stat.isDirectory) {
+      return json(404, { msg: "function not found" });
+    }
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) {
+      return json(404, { msg: "function not found" });
+    }
+    throw error;
+  }
+
+  const functionEnv = await loadFunctionEnv(servicePath);
+  if (!(await requestIsAuthorized(req, functionEnv))) {
+    return json(401, { msg: "Invalid JWT" });
+  }
+  const resolvedRegion = await resolveFunctionRegion(req, servicePath);
+  const runtimeServicePath = await resolveFunctionServicePath(functionName, servicePath, functionEnv);
+  const functionEntrypoint = await loadFunctionEntrypoint(runtimeServicePath);
+  let storageMounts: PreparedStorageMounts = { env: {}, servicePath: runtimeServicePath, staticPatterns: [] };
+  try {
+    storageMounts = await prepareStorageMounts(servicePath, runtimeServicePath);
+  } catch (error) {
+    console.error("failed to prepare function storage mounts", error);
+    return json(500, { msg: "function storage mount prepare failed", error: String(error) });
+  }
+
+  const env = { ...Deno.env.toObject(), ...functionEnv, ...storageMounts.env, SB_REGION: resolvedRegion };
+  const envVars = Object.entries(env);
+  const timeoutMs = requestTimeoutMs(env);
+  try {
+    const worker = await EdgeRuntime.userWorkers.create({
+      servicePath: storageMounts.servicePath,
+      memoryLimitMb: Number(Deno.env.get("FUNCTION_MEMORY_LIMIT_MB") ?? "150"),
+      workerTimeoutMs: timeoutMs,
+      noModuleCache: Deno.env.get("EDGE_RUNTIME_DISABLE_MODULE_CACHE") !== "false",
+      forceCreate: Deno.env.get("EDGE_RUNTIME_FORCE_CREATE") !== "false",
+      staticPatterns: storageMounts.staticPatterns,
+      maybeEntrypoint: "file://" + joinPath(storageMounts.servicePath, functionEntrypoint),
+      context: {
+        importMapPath: Deno.env.get("EDGE_RUNTIME_IMPORT_MAP") || null,
+        useReadSyncFileAPI: true,
+      },
+      envVars,
+    });
+    const response = await fetchWithTimeout(worker, req, timeoutMs);
+    const headers = new Headers(response.headers);
+    headers.set("x-sb-edge-region", resolvedRegion);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  } catch (error) {
+    return json(500, { msg: String(error) });
+  }
+});
+`
+	return os.WriteFile(path, []byte(body), bindMountFileMode)
 }
 
 func writeDatabaseInitFile(path string, postgresPassword string) error {
 	passwordLiteral := sqlQuoteLiteral(postgresPassword)
-	body := fmt.Sprintf(`-- supadupa per-project database bootstrap.
--- This runs once when the project Postgres volume is first initialized.
+	body := fmt.Sprintf(`-- supadupa per-project database post-bootstrap.
+-- The Supabase Postgres image runs this after its bundled init scripts and migrations.
 
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE SCHEMA IF NOT EXISTS storage;
 CREATE SCHEMA IF NOT EXISTS graphql;
 CREATE SCHEMA IF NOT EXISTS graphql_public;
 CREATE SCHEMA IF NOT EXISTS realtime;
+CREATE SCHEMA IF NOT EXISTS _realtime;
 CREATE SCHEMA IF NOT EXISTS vault;
 CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE SCHEMA IF NOT EXISTS pgmq;
+CREATE SCHEMA IF NOT EXISTS _analytics;
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS pg_graphql WITH SCHEMA graphql;
-CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS pgmq WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
+SELECT 'CREATE DATABASE _supabase'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '_supabase')\gexec
+
+\c _supabase
+CREATE SCHEMA IF NOT EXISTS _supavisor;
+ALTER SCHEMA _supavisor OWNER TO supabase_admin;
+\c postgres
 
 DO $$
 BEGIN
@@ -1871,30 +3363,87 @@ BEGIN
     CREATE ROLE service_role NOLOGIN NOINHERIT BYPASSRLS;
   END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN
-    CREATE ROLE authenticator NOINHERIT LOGIN PASSWORD %s;
+    CREATE ROLE authenticator NOINHERIT LOGIN;
   END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_auth_admin') THEN
-    CREATE ROLE supabase_auth_admin LOGIN PASSWORD %s;
+    CREATE ROLE supabase_auth_admin LOGIN;
   END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_storage_admin') THEN
-    CREATE ROLE supabase_storage_admin LOGIN PASSWORD %s;
+    CREATE ROLE supabase_storage_admin LOGIN;
   END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_admin') THEN
-    CREATE ROLE supabase_admin LOGIN PASSWORD %s;
+    CREATE ROLE supabase_admin LOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_replication_admin') THEN
+    CREATE ROLE supabase_replication_admin LOGIN REPLICATION;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_read_only_user') THEN
+    CREATE ROLE supabase_read_only_user LOGIN BYPASSRLS;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dashboard_user') THEN
+    CREATE ROLE dashboard_user NOSUPERUSER CREATEDB CREATEROLE REPLICATION;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgbouncer') THEN
+    CREATE ROLE pgbouncer LOGIN;
+  END IF;
+END
+$$;
+
+ALTER ROLE authenticator WITH PASSWORD %s;
+ALTER ROLE supabase_auth_admin WITH PASSWORD %s;
+ALTER ROLE supabase_storage_admin WITH PASSWORD %s;
+ALTER ROLE supabase_admin WITH LOGIN SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS PASSWORD %s;
+ALTER ROLE supabase_replication_admin WITH PASSWORD %s;
+ALTER ROLE pgbouncer WITH PASSWORD %s;
+GRANT pg_read_all_data TO supabase_read_only_user;
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pg_graphql WITH SCHEMA graphql;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pgmq WITH SCHEMA pgmq;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    EXECUTE 'CREATE PUBLICATION supabase_realtime';
   END IF;
 END
 $$;
 
 GRANT anon, authenticated, service_role TO authenticator;
-GRANT USAGE ON SCHEMA public, auth, storage, graphql_public, realtime, extensions TO anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA public, auth, storage, graphql_public, realtime, _realtime, extensions TO anon, authenticated, service_role;
 GRANT ALL PRIVILEGES ON SCHEMA auth TO supabase_auth_admin;
 GRANT ALL PRIVILEGES ON SCHEMA storage TO supabase_storage_admin;
-GRANT ALL PRIVILEGES ON SCHEMA public, graphql_public, realtime, vault, extensions TO service_role;
+GRANT ALL PRIVILEGES ON SCHEMA public, graphql_public, realtime, _realtime, vault, extensions TO service_role;
+GRANT ALL PRIVILEGES ON SCHEMA _realtime TO supabase_admin;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO authenticated, service_role;
-`, passwordLiteral, passwordLiteral, passwordLiteral, passwordLiteral)
-	return os.WriteFile(path, []byte(body), 0o600)
+	`, passwordLiteral, passwordLiteral, passwordLiteral, passwordLiteral, passwordLiteral, passwordLiteral)
+	return os.WriteFile(path, []byte(body), bindMountFileMode)
+}
+
+func writePostgresHBAFile(path string) error {
+	body := `# supadupa per-project PostgreSQL client authentication.
+# Local socket and loopback are for container-local bootstrap/admin tooling.
+local all all trust
+host all all 127.0.0.1/32 trust
+host all all ::1/128 trust
+local replication supabase_replication_admin scram-sha-256
+host replication supabase_replication_admin 127.0.0.1/32 scram-sha-256
+host replication supabase_replication_admin ::1/128 scram-sha-256
+host replication supabase_replication_admin 0.0.0.0/0 scram-sha-256
+host replication supabase_replication_admin ::/0 scram-sha-256
+
+# Docker-network, Traefik-routed public DB, and pooler clients must authenticate.
+host all all 0.0.0.0/0 scram-sha-256
+host all all ::/0 scram-sha-256
+`
+	return os.WriteFile(path, []byte(body), bindMountFileMode)
 }
 
 func writeReplicaManifest(path string, ref string, replicaID string, name string, opts control.ReplicaOpts) error {
@@ -1915,6 +3464,108 @@ volumes:
   db-replica-%s-data:
 `, ref, name, name, replicaID, name, name)
 	return os.WriteFile(path, []byte(body), 0o600)
+}
+
+func writeReplicasComposeFile(path string, ref string, replicas []control.ProjectReplica) error {
+	var builder strings.Builder
+	builder.WriteString("services:\n")
+	for _, replica := range replicas {
+		name := strings.TrimSpace(replica.Name)
+		if name == "" {
+			name = replica.ID
+		}
+		service := replicaComposeServiceName(name)
+		volume := service + "-data"
+		fmt.Fprintf(&builder, `  %s:
+    image: supabase/postgres:${STACK_VERSION}
+    env_file:
+      - .env
+      - replicas/%s.env
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    networks:
+      internal: {}
+      supadupa-ingress:
+        aliases:
+          - %s-%s
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - %s:/var/lib/postgresql/data
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        export PGPASSWORD="$${POSTGRES_PASSWORD}"
+        if [ ! -s "$${PGDATA}/standby.signal" ]; then
+          rm -rf "$${PGDATA:?}"/*
+          until pg_basebackup -h db -p 5432 -U supabase_replication_admin -D "$${PGDATA}" -Fp -Xs -P -R; do
+            sleep 5
+          done
+        fi
+        exec docker-entrypoint.sh postgres -c hot_standby=on
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U postgres -d postgres -Atc 'select pg_is_in_recovery()' | grep -q '^t$'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+`, service, replica.ID, ref, service, volume)
+	}
+	builder.WriteString("volumes:\n")
+	for _, replica := range replicas {
+		name := strings.TrimSpace(replica.Name)
+		if name == "" {
+			name = replica.ID
+		}
+		fmt.Fprintf(&builder, "  %s-data:\n", replicaComposeServiceName(name))
+	}
+	builder.WriteString("networks:\n")
+	builder.WriteString("  internal:\n")
+	builder.WriteString("    internal: true\n")
+	builder.WriteString("  supadupa-ingress:\n")
+	builder.WriteString("    external: true\n")
+	return os.WriteFile(path, []byte(builder.String()), 0o600)
+}
+
+func replicaComposeServiceName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "replica"
+	}
+	var builder strings.Builder
+	builder.WriteString("db-replica-")
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			builder.WriteRune(r)
+			continue
+		}
+		builder.WriteRune('-')
+	}
+	return strings.TrimRight(builder.String(), "-")
+}
+
+func removeReplicaEnvFiles(replicaDir string, keep map[string]struct{}) error {
+	entries, err := os.ReadDir(replicaDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".env") {
+			continue
+		}
+		if _, ok := keep[entry.Name()]; ok {
+			continue
+		}
+		if err := os.Remove(filepath.Join(replicaDir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeScaleManifest(path string, ref string, tier control.ResourceTier) error {
@@ -2032,12 +3683,16 @@ func minInt(left int, right int) int {
 	return right
 }
 
-func normalizeStackVersion(version string) string {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return "latest"
+func composeStackReleaseManifest(version string) control.StackReleaseManifest {
+	manifest, ok := control.ResolveStackReleaseManifestFromEnv(os.Getenv, version)
+	if ok {
+		return manifest
 	}
-	return version
+	manifest, _ = control.ResolveStackReleaseManifestFromEnv(os.Getenv, control.DefaultStackReleaseVersion)
+	normalized := control.NormalizeStackReleaseVersion(version)
+	manifest.Version = normalized
+	manifest.Postgres = normalized
+	return manifest
 }
 
 func sqlQuoteLiteral(value string) string {

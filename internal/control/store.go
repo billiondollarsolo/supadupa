@@ -3,9 +3,11 @@ package control
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -13,6 +15,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"sort"
@@ -28,10 +31,13 @@ var (
 )
 
 var refPattern = regexp.MustCompile(`^[a-z0-9-]{3,64}$`)
+var projectRefPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,53}[a-z0-9])$`)
+var replicaNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$`)
 var domainPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 var teamSlugPattern = regexp.MustCompile(`^[a-z0-9-]{2,64}$`)
 var identifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 var extensionNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
+var secretKindPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 var envAliasPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,62}$`)
 
 var allowedConfigAreas = map[string]map[string]string{
@@ -84,6 +90,12 @@ var allowedConfigAreas = map[string]map[string]string{
 		"oauth_oidc_scopes":                 "openid email profile",
 		"phone_enabled":                     "false",
 		"sms_provider":                      "",
+		"sms_otp_exp":                       "60",
+		"sms_otp_length":                    "6",
+		"sms_max_frequency":                 "60s",
+		"sms_template":                      "",
+		"sms_test_otp_handle":               "",
+		"sms_test_otp_valid_until":          "",
 		"sms_twilio_account_sid":            "",
 		"sms_twilio_auth_token_handle":      "",
 		"sms_twilio_message_service_sid":    "",
@@ -145,6 +157,7 @@ var allowedConfigAreas = map[string]map[string]string{
 	"functions": {
 		"runtime_enabled":       "true",
 		"verify_jwt_by_default": "true",
+		"worker_timeout_ms":     "60000",
 		"import_map":            "",
 		"deployment_policy":     "manual",
 		"secret_sync_enabled":   "true",
@@ -200,11 +213,13 @@ var socialOAuthProviderIDs = []string{
 	"bitbucket",
 	"discord",
 	"facebook",
+	"figma",
 	"gitlab",
 	"kakao",
 	"keycloak",
 	"linkedin_oidc",
 	"notion",
+	"snapchat",
 	"slack_oidc",
 	"spotify",
 	"twitch",
@@ -511,8 +526,10 @@ type Store interface {
 	ListProjectDomains(ctx context.Context, ref string) ([]ProjectDomain, error)
 	AddProjectDomain(ctx context.Context, ref string, input ProjectDomainInput) (ProjectDomain, error)
 	UpdateProjectDomainCertStatus(ctx context.Context, ref string, fqdn string, status string) (ProjectDomain, error)
+	UpdateProjectDomainCertificate(ctx context.Context, ref string, fqdn string, metadata ProjectDomainCertificateMetadata) (ProjectDomain, error)
 	DeleteProjectDomain(ctx context.Context, ref string, fqdn string) error
 	GetProjectConfig(ctx context.Context, ref string, area string) (ProjectConfig, error)
+	ListProjectConfigs(ctx context.Context, ref string) ([]ProjectConfig, error)
 	UpdateProjectConfig(ctx context.Context, ref string, area string, input ProjectConfigInput) (ProjectConfig, error)
 	ListProjectAuthClients(ctx context.Context, ref string) ([]ProjectAuthClient, error)
 	CreateProjectAuthClient(ctx context.Context, ref string, input ProjectAuthClientInput) (ProjectAuthClient, error)
@@ -574,11 +591,22 @@ type Store interface {
 	DeleteProjectLogDrain(ctx context.Context, ref string, id string) error
 	EnsureProjectSecrets(ctx context.Context, ref string) ([]ProjectSecret, error)
 	ListProjectSecrets(ctx context.Context, ref string) ([]ProjectSecret, error)
+	UpsertProjectSecret(ctx context.Context, ref string, kind string, input ProjectSecretInput) (ProjectSecret, error)
+	DeleteProjectSecret(ctx context.Context, ref string, kind string) error
 	RevealProjectSecret(ctx context.Context, ref string, kind string) (ProjectSecret, error)
 	RotateProjectSecret(ctx context.Context, ref string, kind string) (ProjectSecret, error)
 	CreateBackup(ctx context.Context, input BackupInput) (Backup, error)
 	ListBackups(ctx context.Context, ref string) ([]Backup, error)
 	GetBackup(ctx context.Context, ref string, backupID string) (Backup, error)
+	CreatePlatformBackup(ctx context.Context, input PlatformBackupInput) (PlatformBackup, error)
+	ListPlatformBackups(ctx context.Context) ([]PlatformBackup, error)
+	GetPlatformBackup(ctx context.Context, backupID string) (PlatformBackup, error)
+	ListBackupStorageTargets(ctx context.Context) ([]BackupStorageTarget, error)
+	GetBackupStorageTarget(ctx context.Context, id string) (BackupStorageTarget, error)
+	CreateBackupStorageTarget(ctx context.Context, input BackupStorageTargetInput) (BackupStorageTarget, error)
+	UpdateBackupStorageTarget(ctx context.Context, id string, input BackupStorageTargetInput) (BackupStorageTarget, error)
+	UpdateBackupStorageTargetTestResult(ctx context.Context, id string, testedAt time.Time, status string, message string) (BackupStorageTarget, error)
+	DeleteBackupStorageTarget(ctx context.Context, id string) error
 	GetBackupPolicy(ctx context.Context, ref string) (BackupPolicy, error)
 	UpdateBackupPolicy(ctx context.Context, ref string, input BackupPolicyInput) (BackupPolicy, error)
 	MarkBackupPolicyRun(ctx context.Context, ref string, runAt time.Time) (BackupPolicy, error)
@@ -1034,17 +1062,20 @@ type PlatformSMTP struct {
 }
 
 type PlatformSSOConfig struct {
-	Enabled       bool      `json:"enabled"`
-	Provider      string    `json:"provider"`
-	IDPEntityID   string    `json:"idp_entity_id"`
-	SSOURL        string    `json:"sso_url"`
-	Certificate   string    `json:"certificate_pem"`
-	ACSURL        string    `json:"acs_url"`
-	MetadataURL   string    `json:"metadata_url"`
-	EmailDomain   string    `json:"email_domain"`
-	AutoProvision bool      `json:"auto_provision"`
-	DefaultRole   string    `json:"default_role"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Enabled             bool      `json:"enabled"`
+	Provider            string    `json:"provider"`
+	IDPEntityID         string    `json:"idp_entity_id"`
+	SSOURL              string    `json:"sso_url"`
+	Certificate         string    `json:"certificate_pem"`
+	ACSURL              string    `json:"acs_url"`
+	MetadataURL         string    `json:"metadata_url"`
+	EmailDomain         string    `json:"email_domain"`
+	AutoProvision       bool      `json:"auto_provision"`
+	DefaultRole         string    `json:"default_role"`
+	SCIMEnabled         bool      `json:"scim_enabled"`
+	SCIMTokenHash       string    `json:"-"`
+	SCIMTokenConfigured bool      `json:"scim_token_configured"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type PlatformSSOConfigInput struct {
@@ -1057,6 +1088,8 @@ type PlatformSSOConfigInput struct {
 	EmailDomain   string `json:"email_domain"`
 	AutoProvision bool   `json:"auto_provision"`
 	DefaultRole   string `json:"default_role"`
+	SCIMEnabled   bool   `json:"scim_enabled"`
+	SCIMToken     string `json:"scim_token,omitempty"`
 }
 
 type PlatformSSOInitiation struct {
@@ -1131,41 +1164,116 @@ type AuditIntegrity struct {
 }
 
 type Backup struct {
-	ID             string     `json:"id"`
-	ProjectRef     string     `json:"project_ref"`
-	Kind           string     `json:"kind"`
-	Location       string     `json:"location"`
-	SizeBytes      int64      `json:"size_bytes"`
-	ChecksumSHA256 string     `json:"checksum_sha256"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	VerifiedAt     *time.Time `json:"verified_at,omitempty"`
+	ID              string     `json:"id"`
+	ProjectRef      string     `json:"project_ref"`
+	Kind            string     `json:"kind"`
+	Location        string     `json:"location"`
+	RemoteLocation  string     `json:"remote_location,omitempty"`
+	StorageTargetID string     `json:"storage_target_id,omitempty"`
+	SizeBytes       int64      `json:"size_bytes"`
+	ChecksumSHA256  string     `json:"checksum_sha256"`
+	Status          string     `json:"status"`
+	StartedAt       time.Time  `json:"started_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	VerifiedAt      *time.Time `json:"verified_at,omitempty"`
 }
 
 type BackupInput struct {
-	ProjectRef     string
-	Kind           string
-	Location       string
-	SizeBytes      int64
-	ChecksumSHA256 string
-	Status         string
-	VerifiedAt     *time.Time
+	ProjectRef      string
+	Kind            string
+	Location        string
+	RemoteLocation  string
+	StorageTargetID string
+	SizeBytes       int64
+	ChecksumSHA256  string
+	Status          string
+	StartedAt       time.Time
+	FinishedAt      *time.Time
+	VerifiedAt      *time.Time
+}
+
+type PlatformBackup struct {
+	ID              string     `json:"id"`
+	Kind            string     `json:"kind"`
+	Location        string     `json:"location"`
+	RemoteLocation  string     `json:"remote_location,omitempty"`
+	StorageTargetID string     `json:"storage_target_id,omitempty"`
+	SizeBytes       int64      `json:"size_bytes"`
+	ChecksumSHA256  string     `json:"checksum_sha256"`
+	Status          string     `json:"status"`
+	StartedAt       time.Time  `json:"started_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	VerifiedAt      *time.Time `json:"verified_at,omitempty"`
+}
+
+type PlatformBackupInput struct {
+	Kind            string
+	Location        string
+	RemoteLocation  string
+	StorageTargetID string
+	SizeBytes       int64
+	ChecksumSHA256  string
+	Status          string
+	StartedAt       time.Time
+	FinishedAt      *time.Time
+	VerifiedAt      *time.Time
+}
+
+type BackupStorageTarget struct {
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Type             string     `json:"type"`
+	Endpoint         string     `json:"endpoint"`
+	Region           string     `json:"region"`
+	Bucket           string     `json:"bucket"`
+	Prefix           string     `json:"prefix,omitempty"`
+	AccessKeyID      string     `json:"access_key_id,omitempty"`
+	SecretAccessKey  string     `json:"-"`
+	SecretConfigured bool       `json:"secret_configured"`
+	ForcePathStyle   bool       `json:"force_path_style"`
+	Default          bool       `json:"default"`
+	DurableOffHost   bool       `json:"durable_off_host"`
+	RecoveryReady    bool       `json:"recovery_ready"`
+	ReadinessStatus  string     `json:"readiness_status"`
+	ReadinessMessage string     `json:"readiness_message,omitempty"`
+	LastTestedAt     *time.Time `json:"last_tested_at,omitempty"`
+	LastTestStatus   string     `json:"last_test_status,omitempty"`
+	LastTestError    string     `json:"last_test_error,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+type BackupStorageTargetInput struct {
+	Name            string `json:"name"`
+	Type            string `json:"type"`
+	Endpoint        string `json:"endpoint"`
+	Region          string `json:"region"`
+	Bucket          string `json:"bucket"`
+	Prefix          string `json:"prefix"`
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	ForcePathStyle  bool   `json:"force_path_style"`
+	Default         bool   `json:"default"`
 }
 
 type BackupPolicy struct {
-	ProjectRef string     `json:"project_ref"`
-	Enabled    bool       `json:"enabled"`
-	Schedule   string     `json:"schedule"`
-	Kind       string     `json:"kind"`
-	LastRunAt  *time.Time `json:"last_run_at,omitempty"`
-	NextRunAt  *time.Time `json:"next_run_at,omitempty"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ProjectRef      string     `json:"project_ref"`
+	Enabled         bool       `json:"enabled"`
+	Schedule        string     `json:"schedule"`
+	Kind            string     `json:"kind"`
+	StorageTargetID string     `json:"storage_target_id,omitempty"`
+	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt       *time.Time `json:"next_run_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type BackupPolicyInput struct {
-	Enabled  bool   `json:"enabled"`
-	Schedule string `json:"schedule"`
-	Kind     string `json:"kind"`
+	Enabled         bool   `json:"enabled"`
+	Schedule        string `json:"schedule"`
+	Kind            string `json:"kind"`
+	StorageTargetID string `json:"storage_target_id"`
 }
 
 type PITRPolicy struct {
@@ -1184,25 +1292,52 @@ type PITRPolicyInput struct {
 }
 
 type WALArchive struct {
-	ID             string     `json:"id"`
-	ProjectRef     string     `json:"project_ref"`
-	Segment        string     `json:"segment"`
-	Location       string     `json:"location"`
-	SizeBytes      int64      `json:"size_bytes"`
-	ChecksumSHA256 string     `json:"checksum_sha256"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	VerifiedAt     *time.Time `json:"verified_at,omitempty"`
+	ID              string     `json:"id"`
+	ProjectRef      string     `json:"project_ref"`
+	Segment         string     `json:"segment"`
+	SegmentSource   string     `json:"segment_source"`
+	Location        string     `json:"location"`
+	RemoteLocation  string     `json:"remote_location"`
+	StorageTargetID string     `json:"storage_target_id"`
+	SizeBytes       int64      `json:"size_bytes"`
+	ChecksumSHA256  string     `json:"checksum_sha256"`
+	Status          string     `json:"status"`
+	CreatedAt       time.Time  `json:"created_at"`
+	VerifiedAt      *time.Time `json:"verified_at,omitempty"`
 }
 
 type WALArchiveInput struct {
-	ProjectRef     string
-	Segment        string
-	Location       string
-	SizeBytes      int64
-	ChecksumSHA256 string
-	Status         string
-	VerifiedAt     *time.Time
+	ProjectRef      string
+	Segment         string
+	SegmentSource   string
+	Location        string
+	RemoteLocation  string
+	StorageTargetID string
+	SizeBytes       int64
+	ChecksumSHA256  string
+	Status          string
+	VerifiedAt      *time.Time
+}
+
+type ProjectRecoverabilityStatus struct {
+	ProjectRef                string      `json:"project_ref"`
+	Status                    string      `json:"status"`
+	BackupPolicyEnabled       bool        `json:"backup_policy_enabled"`
+	OffHostBackupConfigured   bool        `json:"off_host_backup_configured"`
+	OffHostBackupVerified     bool        `json:"off_host_backup_verified"`
+	LatestBackup              *Backup     `json:"latest_backup,omitempty"`
+	LatestVerifiedBackup      *Backup     `json:"latest_verified_backup,omitempty"`
+	PITREnabled               bool        `json:"pitr_enabled"`
+	LatestWALArchive          *WALArchive `json:"latest_wal_archive,omitempty"`
+	WALArchiveOffHostVerified bool        `json:"wal_archive_off_host_verified"`
+	RecoveryWindowStart       *time.Time  `json:"recovery_window_start,omitempty"`
+	RecoveryWindowEnd         *time.Time  `json:"recovery_window_end,omitempty"`
+	PhysicalBackupAvailable   bool        `json:"physical_backup_available"`
+	RestoreToTimeConfigured   bool        `json:"restore_to_time_configured"`
+	RestoreToTimeAvailable    bool        `json:"restore_to_time_available"`
+	RestoreToTimeUnavailable  string      `json:"restore_to_time_unavailable,omitempty"`
+	Warnings                  []string    `json:"warnings"`
+	Recommendations           []string    `json:"recommendations"`
 }
 
 type ProjectLog struct {
@@ -1232,21 +1367,40 @@ type ProjectRoute struct {
 	TLS          bool      `json:"tls"`
 	SSLEnforced  bool      `json:"ssl_enforced"`
 	IPAllowlist  []string  `json:"ip_allowlist,omitempty"`
+	SSORequired  bool      `json:"sso_required,omitempty"`
 	CacheControl string    `json:"cache_control,omitempty"`
 	SmartCDN     bool      `json:"smart_cdn,omitempty"`
+	CertMode     string    `json:"cert_mode,omitempty"`
+	CertFile     string    `json:"cert_file,omitempty"`
+	KeyFile      string    `json:"key_file,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
 type ProjectDomain struct {
-	ProjectRef string    `json:"project_ref"`
-	FQDN       string    `json:"fqdn"`
-	CertStatus string    `json:"cert_status"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ProjectRef      string     `json:"project_ref"`
+	FQDN            string     `json:"fqdn"`
+	CertStatus      string     `json:"cert_status"`
+	CertMode        string     `json:"cert_mode"`
+	CertFingerprint string     `json:"cert_fingerprint,omitempty"`
+	CertNotAfter    *time.Time `json:"cert_not_after,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type ProjectDomainInput struct {
 	FQDN string `json:"fqdn"`
+}
+
+type ProjectDomainCertificateInput struct {
+	CertificatePEM string `json:"certificate_pem"`
+	PrivateKeyPEM  string `json:"private_key_pem"`
+}
+
+type ProjectDomainCertificateMetadata struct {
+	Status      string     `json:"status"`
+	Mode        string     `json:"mode"`
+	Fingerprint string     `json:"fingerprint,omitempty"`
+	NotAfter    *time.Time `json:"not_after,omitempty"`
 }
 
 type ProjectConfig struct {
@@ -1287,20 +1441,22 @@ type ProjectAuthClientInput struct {
 }
 
 type ProjectAuthHook struct {
-	ID            string            `json:"id"`
-	ProjectRef    string            `json:"project_ref"`
-	HookType      string            `json:"hook_type"`
-	Enabled       bool              `json:"enabled"`
-	TargetURI     string            `json:"target_uri,omitempty"`
-	EdgeFunction  string            `json:"edge_function,omitempty"`
-	SecretHandle  string            `json:"secret_handle,omitempty"`
-	Headers       map[string]string `json:"headers"`
-	TimeoutMS     int               `json:"timeout_ms"`
-	RetryAttempts int               `json:"retry_attempts"`
-	Status        string            `json:"status"`
-	Message       string            `json:"message,omitempty"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
+	ID             string            `json:"id"`
+	ProjectRef     string            `json:"project_ref"`
+	HookType       string            `json:"hook_type"`
+	Enabled        bool              `json:"enabled"`
+	TargetURI      string            `json:"target_uri,omitempty"`
+	EdgeFunction   string            `json:"edge_function,omitempty"`
+	SecretHandle   string            `json:"secret_handle,omitempty"`
+	Headers        map[string]string `json:"headers"`
+	RuntimeSecret  string            `json:"-"`
+	RuntimeHeaders map[string]string `json:"-"`
+	TimeoutMS      int               `json:"timeout_ms"`
+	RetryAttempts  int               `json:"retry_attempts"`
+	Status         string            `json:"status"`
+	Message        string            `json:"message,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 type ProjectAuthHookInput struct {
@@ -1776,6 +1932,7 @@ type ProjectBranch struct {
 	SourceProjectRef string     `json:"source_project_ref"`
 	ProjectRef       string     `json:"project_ref"`
 	Name             string     `json:"name"`
+	WithData         bool       `json:"with_data"`
 	Status           string     `json:"status"`
 	CreatedAt        time.Time  `json:"created_at"`
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
@@ -1785,6 +1942,7 @@ type ProjectBranchInput struct {
 	Ref      string `json:"ref"`
 	Name     string `json:"name"`
 	TTLHours int    `json:"ttl_hours"`
+	WithData bool   `json:"with_data"`
 }
 
 type ProjectReplica struct {
@@ -1798,6 +1956,8 @@ type ProjectReplica struct {
 	Role                  string       `json:"role"`
 	Message               string       `json:"message,omitempty"`
 	ReadURI               string       `json:"read_uri"`
+	PublicReadURI         string       `json:"public_read_uri,omitempty"`
+	InternalReadURI       string       `json:"internal_read_uri,omitempty"`
 	ReadWeight            int          `json:"read_weight"`
 	FailoverPriority      int          `json:"failover_priority"`
 	ReplicationLagBytes   int64        `json:"replication_lag_bytes"`
@@ -1870,6 +2030,10 @@ type ProjectSecretReveal struct {
 	RotatedAt *time.Time `json:"rotated_at,omitempty"`
 }
 
+type ProjectSecretInput struct {
+	Value string `json:"value"`
+}
+
 type JWTSigningKeyMaterial struct {
 	KID        string `json:"kid"`
 	Alg        string `json:"alg"`
@@ -1934,9 +2098,11 @@ type MemoryStore struct {
 	replicas              map[string][]ProjectReplica
 	logDrains             map[string][]LogDrain
 	secrets               map[string]map[string]ProjectSecret
+	backupStorageTargets  map[string]BackupStorageTarget
 	policies              map[string]BackupPolicy
 	pitrPolicies          map[string]PITRPolicy
 	backups               []Backup
+	platformBackups       []PlatformBackup
 	walArchives           []WALArchive
 	projectLogs           []ProjectLog
 	telemetry             map[string]TelemetrySample
@@ -1984,8 +2150,10 @@ func NewMemoryStore() *MemoryStore {
 		replicas:              map[string][]ProjectReplica{},
 		logDrains:             map[string][]LogDrain{},
 		secrets:               map[string]map[string]ProjectSecret{},
+		backupStorageTargets:  map[string]BackupStorageTarget{},
 		policies:              map[string]BackupPolicy{},
 		pitrPolicies:          map[string]PITRPolicy{},
+		platformBackups:       []PlatformBackup{},
 		telemetry:             map[string]TelemetrySample{},
 	}
 }
@@ -2022,8 +2190,12 @@ func (s *MemoryStore) UpdatePlatformSSOConfig(ctx context.Context, input Platfor
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strings.TrimSpace(input.SCIMToken) == "" {
+		config.SCIMTokenHash = s.platformSSO.SCIMTokenHash
+		config.SCIMTokenConfigured = config.SCIMTokenHash != ""
+	}
 	s.platformSSO = config
-	return config, nil
+	return normalizedPlatformSSOConfig(config), nil
 }
 
 func (s *MemoryStore) CreateUser(ctx context.Context, req CreateUserRequest) (User, error) {
@@ -3336,6 +3508,35 @@ func (s *MemoryStore) CreateProject(ctx context.Context, req CreateProjectReques
 	}
 
 	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.orgs[req.OrgID]; !ok {
+		return Project{}, fmt.Errorf("%w: org %s", ErrNotFound, req.OrgID)
+	}
+	if _, ok := s.projects[req.Ref]; ok {
+		return Project{}, fmt.Errorf("%w: project ref %s already exists", ErrConflict, req.Ref)
+	}
+	if err := s.validateGeneratedProjectHostReservationsLocked(req.Ref, req.Domain); err != nil {
+		return Project{}, err
+	}
+	reservation := resourceReservationForTier(req.ResourceTier)
+	if err := s.validateOrgQuotaLocked(req.OrgID, reservation); err != nil {
+		return Project{}, err
+	}
+	if req.HostID == "" {
+		req.HostID = s.defaultHostForReservationLocked(reservation)
+	}
+	if req.HostID != "" {
+		host, ok := s.hosts[req.HostID]
+		if !ok {
+			return Project{}, fmt.Errorf("%w: host %s", ErrNotFound, req.HostID)
+		}
+		if !hostHasCapacity(host, reservation) {
+			return Project{}, fmt.Errorf("%w: host %s has insufficient capacity for %s tier", ErrConflict, req.HostID, req.ResourceTier)
+		}
+		host.Used = addHostCapacity(host.Used, reservation)
+		s.hosts[host.ID] = host
+	}
 	spec := req.toSpec()
 	project := Project{
 		ID:        newID(),
@@ -3347,30 +3548,6 @@ func (s *MemoryStore) CreateProject(ctx context.Context, req CreateProjectReques
 		Spec:      spec,
 		CreatedAt: now,
 		UpdatedAt: now,
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.orgs[req.OrgID]; !ok {
-		return Project{}, fmt.Errorf("%w: org %s", ErrNotFound, req.OrgID)
-	}
-	if _, ok := s.projects[req.Ref]; ok {
-		return Project{}, fmt.Errorf("%w: project ref %s already exists", ErrConflict, req.Ref)
-	}
-	reservation := resourceReservationForTier(spec.ResourceTier)
-	if err := s.validateOrgQuotaLocked(req.OrgID, reservation); err != nil {
-		return Project{}, err
-	}
-	if req.HostID != "" {
-		host, ok := s.hosts[req.HostID]
-		if !ok {
-			return Project{}, fmt.Errorf("%w: host %s", ErrNotFound, req.HostID)
-		}
-		if !hostHasCapacity(host, reservation) {
-			return Project{}, fmt.Errorf("%w: host %s has insufficient capacity for %s tier", ErrConflict, req.HostID, spec.ResourceTier)
-		}
-		host.Used = addHostCapacity(host.Used, reservation)
-		s.hosts[host.ID] = host
 	}
 	s.projects[project.Ref] = project
 	if project.Spec.Profile == StackProfileOrioleDB {
@@ -3388,6 +3565,33 @@ func (s *MemoryStore) CreateProject(ctx context.Context, req CreateProjectReques
 	return project, nil
 }
 
+func (s *MemoryStore) defaultHostForReservationLocked(reservation HostCapacity) string {
+	type candidate struct {
+		id       string
+		projects int
+		cpu      int
+	}
+	candidates := make([]candidate, 0, len(s.hosts))
+	for _, host := range s.hosts {
+		if hostHasCapacity(host, reservation) {
+			candidates = append(candidates, candidate{id: host.ID, projects: host.Used.Project, cpu: host.Used.CPU})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].projects != candidates[j].projects {
+			return candidates[i].projects < candidates[j].projects
+		}
+		if candidates[i].cpu != candidates[j].cpu {
+			return candidates[i].cpu < candidates[j].cpu
+		}
+		return candidates[i].id < candidates[j].id
+	})
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0].id
+}
+
 func (s *MemoryStore) createProjectRequestWithDefaults(req CreateProjectRequest) CreateProjectRequest {
 	s.mu.RLock()
 	defaults := normalizedPlatformDefaults(s.platformDefaults)
@@ -3398,6 +3602,7 @@ func (s *MemoryStore) createProjectRequestWithDefaults(req CreateProjectRequest)
 	if strings.TrimSpace(req.StackVersion) == "" {
 		req.StackVersion = defaults.StackVersion
 	}
+	req.StackVersion = NormalizeStackReleaseVersion(req.StackVersion)
 	if req.Profile == "" {
 		req.Profile = defaults.Profile
 	}
@@ -3410,8 +3615,8 @@ func (s *MemoryStore) createProjectRequestWithDefaults(req CreateProjectRequest)
 func (s *MemoryStore) CreateProjectBranch(ctx context.Context, sourceRef string, input ProjectBranchInput) (ProjectBranch, Project, error) {
 	sourceRef = strings.ToLower(strings.TrimSpace(sourceRef))
 	branchRef := strings.ToLower(strings.TrimSpace(input.Ref))
-	if !refPattern.MatchString(branchRef) {
-		return ProjectBranch{}, Project{}, fmt.Errorf("branch ref must be 3-64 lowercase letters, numbers, or hyphens")
+	if !projectRefPattern.MatchString(branchRef) {
+		return ProjectBranch{}, Project{}, fmt.Errorf("branch ref must be 3-55 lowercase letters, numbers, or hyphens, and cannot start or end with a hyphen")
 	}
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
@@ -3455,6 +3660,9 @@ func (s *MemoryStore) CreateProjectBranch(ctx context.Context, sourceRef string,
 	if err := validateCreateProject(req); err != nil {
 		return ProjectBranch{}, Project{}, err
 	}
+	if err := s.validateGeneratedProjectHostReservationsLocked(req.Ref, req.Domain); err != nil {
+		return ProjectBranch{}, Project{}, err
+	}
 
 	project := Project{
 		ID:        newID(),
@@ -3488,6 +3696,7 @@ func (s *MemoryStore) CreateProjectBranch(ctx context.Context, sourceRef string,
 		SourceProjectRef: source.Ref,
 		ProjectRef:       project.Ref,
 		Name:             name,
+		WithData:         input.WithData,
 		Status:           string(project.Status),
 		CreatedAt:        now,
 		ExpiresAt:        expiresAt,
@@ -3575,6 +3784,9 @@ func (s *MemoryStore) CreateProjectReplica(ctx context.Context, ref string, inpu
 	if err != nil {
 		return ProjectReplica{}, err
 	}
+	if err := validateReplicaPublicDNSHost(ref, normalizedName, project.Spec.Domain); err != nil {
+		return ProjectReplica{}, err
+	}
 	for _, replica := range s.replicas[ref] {
 		if replica.Name == normalizedName {
 			return ProjectReplica{}, fmt.Errorf("%w: replica %s for project %s already exists", ErrConflict, normalizedName, ref)
@@ -3596,6 +3808,8 @@ func (s *MemoryStore) CreateProjectReplica(ctx context.Context, ref string, inpu
 		s.hosts[host.ID] = host
 	}
 	now := time.Now().UTC()
+	internalReadURI := fmt.Sprintf("postgres://postgres:${DB_PASSWORD}@%s.%s.replica.internal:5432/postgres", normalizedName, ref)
+	publicReadURI := postgresURIWithSSLMode(fmt.Sprintf("postgres://postgres:${DB_PASSWORD}@%s:5432/postgres", replicaDatabaseHost(ref, normalizedName, project.Spec.Domain)), "require")
 	replica := ProjectReplica{
 		ID:               newID(),
 		ProjectRef:       ref,
@@ -3606,7 +3820,9 @@ func (s *MemoryStore) CreateProjectReplica(ctx context.Context, ref string, inpu
 		Status:           "provisioning",
 		Role:             "read",
 		Message:          "replica accepted for provisioning",
-		ReadURI:          fmt.Sprintf("postgres://postgres:${DB_PASSWORD}@%s.%s.replica.internal:5432/postgres", normalizedName, ref),
+		ReadURI:          publicReadURI,
+		PublicReadURI:    publicReadURI,
+		InternalReadURI:  internalReadURI,
 		ReadWeight:       readWeight,
 		FailoverPriority: failoverPriority,
 		CreatedAt:        now,
@@ -4028,6 +4244,7 @@ func (s *MemoryStore) deleteProjectLocked(ref string) error {
 	delete(s.policies, ref)
 	delete(s.pitrPolicies, ref)
 	delete(s.projectAccess, ref)
+	delete(s.telemetry, ref)
 	return nil
 }
 
@@ -4091,7 +4308,7 @@ func (s *MemoryStore) ListProjectDomains(ctx context.Context, ref string) ([]Pro
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	domains := append([]ProjectDomain(nil), s.domains[ref]...)
+	domains := cloneProjectDomains(s.domains[ref])
 	sort.Slice(domains, func(i, j int) bool {
 		return domains[i].CreatedAt.Before(domains[j].CreatedAt)
 	})
@@ -4106,24 +4323,130 @@ func (s *MemoryStore) AddProjectDomain(ctx context.Context, ref string, input Pr
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.projects[ref]; !ok {
+	project, ok := s.projects[ref]
+	if !ok {
 		return ProjectDomain{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	for _, existing := range s.domains[ref] {
-		if existing.FQDN == fqdn {
-			return ProjectDomain{}, fmt.Errorf("%w: domain %s already exists for project %s", ErrConflict, fqdn, ref)
+	if owner := s.reservedCustomDomainHostLocked(fqdn); owner != "" {
+		return ProjectDomain{}, fmt.Errorf("%w: domain %s is reserved by %s", ErrConflict, fqdn, owner)
+	}
+	candidateRouteName := routeName(fqdn)
+	for projectRef, domains := range s.domains {
+		for _, existing := range domains {
+			if existing.FQDN == fqdn {
+				return ProjectDomain{}, fmt.Errorf("%w: domain %s already exists for project %s", ErrConflict, fqdn, projectRef)
+			}
+			if projectRef == ref && routeName(existing.FQDN) == candidateRouteName {
+				return ProjectDomain{}, fmt.Errorf("%w: domain %s conflicts with route name for existing domain %s in project %s", ErrConflict, fqdn, existing.FQDN, ref)
+			}
 		}
 	}
 	now := time.Now().UTC()
 	domain := ProjectDomain{
-		ProjectRef: ref,
+		ProjectRef: project.Ref,
 		FQDN:       fqdn,
 		CertStatus: "pending",
+		CertMode:   "acme",
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
 	s.domains[ref] = append(s.domains[ref], domain)
 	return domain, nil
+}
+
+func (s *MemoryStore) reservedCustomDomainHostLocked(fqdn string) string {
+	reserved := map[string]string{}
+	for _, project := range s.projects {
+		domain := strings.TrimSpace(project.Spec.Domain)
+		addReservedDomainHost(reserved, domain, "project domain "+domain)
+		addReservedDomainHost(reserved, projectHost(project.Ref, domain), "project API "+project.Ref)
+		addReservedDomainHost(reserved, studioHost(project.Ref, domain), "project Studio "+project.Ref)
+		addReservedDomainHost(reserved, storageHost(project.Ref, domain), "project storage "+project.Ref)
+		addReservedDomainHost(reserved, databaseHost(project.Ref, domain), "project database "+project.Ref)
+		addReservedDomainHost(reserved, poolerHost(project.Ref, domain), "project pooler "+project.Ref)
+		for _, replica := range s.replicas[project.Ref] {
+			addReservedDomainHost(reserved, replicaDatabaseHost(project.Ref, replica.Name, domain), "project replica "+project.Ref+"/"+replica.Name)
+		}
+		for _, host := range inferredPlatformHostsForProjectDomain(domain) {
+			addReservedDomainHost(reserved, host, "platform host")
+		}
+	}
+	for projectRef, domains := range s.domains {
+		for _, domain := range domains {
+			addReservedDomainHost(reserved, domain.FQDN, "project custom domain "+projectRef)
+		}
+	}
+	addReservedDomainHost(reserved, os.Getenv("SUPADUPA_ADMIN_HOST"), "platform admin")
+	addReservedDomainHost(reserved, os.Getenv("SUPADUPA_API_HOST"), "platform API")
+	addReservedDomainHost(reserved, os.Getenv("SUPADUPA_ADMIN_URL"), "platform admin")
+	addReservedDomainHost(reserved, os.Getenv("SUPADUPA_API_URL"), "platform API")
+	return reserved[fqdn]
+}
+
+func (s *MemoryStore) validateGeneratedProjectHostReservationsLocked(ref string, domain string) error {
+	domain = strings.Trim(strings.ToLower(strings.TrimSpace(domain)), ".")
+	for label, host := range generatedProjectHosts(ref, domain) {
+		if owner := s.reservedCustomDomainHostLocked(host); owner != "" {
+			return fmt.Errorf("%w: generated %s host %s is reserved by %s", ErrConflict, label, host, owner)
+		}
+	}
+	inferredPlatformHosts := map[string]struct{}{}
+	for _, host := range inferredPlatformHostsForProjectDomain(domain) {
+		normalized, ok := normalizedHostForDomainReservation(host)
+		if ok {
+			inferredPlatformHosts[normalized] = struct{}{}
+		}
+	}
+	for label, host := range generatedProjectHosts(ref, domain) {
+		normalized, ok := normalizedHostForDomainReservation(host)
+		if !ok {
+			continue
+		}
+		if _, reserved := inferredPlatformHosts[normalized]; reserved {
+			return fmt.Errorf("%w: generated %s host %s is reserved by platform host topology for %s", ErrConflict, label, host, domain)
+		}
+	}
+	return nil
+}
+
+func addReservedDomainHost(out map[string]string, value string, owner string) {
+	host, ok := normalizedHostForDomainReservation(value)
+	if !ok {
+		return
+	}
+	if _, exists := out[host]; !exists {
+		out[host] = owner
+	}
+}
+
+func inferredPlatformHostsForProjectDomain(domain string) []string {
+	domain = strings.Trim(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if domain == "" {
+		return nil
+	}
+	suffix := domain
+	if strings.HasPrefix(domain, "apps.") {
+		suffix = strings.TrimPrefix(domain, "apps.")
+	}
+	return []string{"admin." + suffix, "api." + suffix}
+}
+
+func normalizedHostForDomainReservation(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Hostname() != "" {
+		value = parsed.Hostname()
+	} else {
+		value = strings.Split(strings.TrimPrefix(strings.TrimPrefix(value, "https://"), "http://"), "/")[0]
+		value = strings.Split(value, ":")[0]
+	}
+	host, err := normalizeDomain(value)
+	if err != nil {
+		return "", false
+	}
+	return host, true
 }
 
 func (s *MemoryStore) UpdateProjectDomainCertStatus(ctx context.Context, ref string, fqdn string, status string) (ProjectDomain, error) {
@@ -4136,7 +4459,7 @@ func (s *MemoryStore) UpdateProjectDomainCertStatus(ctx context.Context, ref str
 		return ProjectDomain{}, fmt.Errorf("cert status is required")
 	}
 	switch status {
-	case "pending", "issued", "failed":
+	case "pending", "issued", "failed", "uploaded":
 	default:
 		return ProjectDomain{}, fmt.Errorf("unsupported cert status %q", status)
 	}
@@ -4150,6 +4473,51 @@ func (s *MemoryStore) UpdateProjectDomainCertStatus(ctx context.Context, ref str
 	for index, domain := range domains {
 		if domain.FQDN == normalized {
 			domain.CertStatus = status
+			domain.UpdatedAt = time.Now().UTC()
+			domains[index] = domain
+			s.domains[ref] = domains
+			return domain, nil
+		}
+	}
+	return ProjectDomain{}, fmt.Errorf("%w: domain %s for project %s", ErrNotFound, normalized, ref)
+}
+
+func (s *MemoryStore) UpdateProjectDomainCertificate(ctx context.Context, ref string, fqdn string, metadata ProjectDomainCertificateMetadata) (ProjectDomain, error) {
+	normalized, err := normalizeDomain(fqdn)
+	if err != nil {
+		return ProjectDomain{}, err
+	}
+	status := strings.ToLower(strings.TrimSpace(metadata.Status))
+	if status == "" {
+		status = "uploaded"
+	}
+	switch status {
+	case "pending", "issued", "failed", "uploaded":
+	default:
+		return ProjectDomain{}, fmt.Errorf("unsupported cert status %q", status)
+	}
+	mode := strings.ToLower(strings.TrimSpace(metadata.Mode))
+	if mode == "" {
+		mode = "byo"
+	}
+	switch mode {
+	case "acme", "manual", "command", "byo":
+	default:
+		return ProjectDomain{}, fmt.Errorf("unsupported cert mode %q", mode)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.projects[ref]; !ok {
+		return ProjectDomain{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+	domains := s.domains[ref]
+	for index, domain := range domains {
+		if domain.FQDN == normalized {
+			domain.CertStatus = status
+			domain.CertMode = mode
+			domain.CertFingerprint = strings.TrimSpace(metadata.Fingerprint)
+			domain.CertNotAfter = cloneTimePtr(metadata.NotAfter)
 			domain.UpdatedAt = time.Now().UTC()
 			domains[index] = domain
 			s.domains[ref] = domains
@@ -4192,9 +4560,29 @@ func (s *MemoryStore) GetProjectConfig(ctx context.Context, ref string, area str
 		return ProjectConfig{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
 	if config, ok := s.configs[ref][normalizedArea]; ok {
-		return cloneProjectConfig(config), nil
+		return mergeProjectConfigWithDefaults(ref, normalizedArea, config), nil
 	}
 	return defaultProjectConfig(ref, normalizedArea), nil
+}
+
+func (s *MemoryStore) ListProjectConfigs(ctx context.Context, ref string) ([]ProjectConfig, error) {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.projects[ref]; !ok {
+		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+	configs := make([]ProjectConfig, 0, len(s.configs[ref]))
+	for _, config := range s.configs[ref] {
+		configs = append(configs, mergeProjectConfigWithDefaults(ref, config.Area, config))
+	}
+	sort.Slice(configs, func(i, j int) bool {
+		return configs[i].Area < configs[j].Area
+	})
+	if configs == nil {
+		configs = []ProjectConfig{}
+	}
+	return configs, nil
 }
 
 func (s *MemoryStore) UpdateProjectConfig(ctx context.Context, ref string, area string, input ProjectConfigInput) (ProjectConfig, error) {
@@ -4217,7 +4605,9 @@ func (s *MemoryStore) UpdateProjectConfig(ctx context.Context, ref string, area 
 	}
 	base := defaultProjectConfig(ref, normalizedArea).Config
 	if existing, ok := s.configs[ref][normalizedArea]; ok {
-		base = cloneStringMap(existing.Config)
+		for key, value := range existing.Config {
+			base[key] = value
+		}
 	}
 	for key, value := range configMap {
 		base[key] = value
@@ -4244,6 +4634,11 @@ func (s *MemoryStore) UpdateProjectConfig(ctx context.Context, ref string, area 
 	}
 	if normalizedArea == "pooler" {
 		if err := validatePoolerConfig(base); err != nil {
+			return ProjectConfig{}, err
+		}
+	}
+	if normalizedArea == "functions" {
+		if err := validateFunctionsConfig(base); err != nil {
 			return ProjectConfig{}, err
 		}
 	}
@@ -4418,7 +4813,7 @@ func (s *MemoryStore) DeployProjectFunction(ctx context.Context, ref string, inp
 	if err != nil {
 		return ProjectFunction{}, err
 	}
-	secrets, err := normalizeConfigValues(input.Secrets)
+	secrets, err := normalizeFunctionSecretValues(input.Secrets)
 	if err != nil {
 		return ProjectFunction{}, err
 	}
@@ -5573,6 +5968,7 @@ func (s *MemoryStore) EnsureProjectSecrets(ctx context.Context, ref string) ([]P
 		s.secrets[ref] = generateProjectSecrets(ref)
 	} else {
 		ensureProjectSigningKeys(ref, s.secrets[ref])
+		ensureSupabaseAPIKeys(ref, s.secrets[ref], time.Now().UTC())
 	}
 	return secretsToSlice(s.secrets[ref]), nil
 }
@@ -5587,7 +5983,7 @@ func (s *MemoryStore) ListProjectSecrets(ctx context.Context, ref string) ([]Pro
 }
 
 func (s *MemoryStore) RevealProjectSecret(ctx context.Context, ref string, kind string) (ProjectSecret, error) {
-	normalizedKind, err := normalizeSecretKind(kind)
+	normalizedKind, err := normalizeProjectSecretKind(kind)
 	if err != nil {
 		return ProjectSecret{}, err
 	}
@@ -5604,8 +6000,62 @@ func (s *MemoryStore) RevealProjectSecret(ctx context.Context, ref string, kind 
 	return secret, nil
 }
 
+func (s *MemoryStore) UpsertProjectSecret(ctx context.Context, ref string, kind string, input ProjectSecretInput) (ProjectSecret, error) {
+	normalizedKind, err := normalizeCustomProjectSecretKind(kind)
+	if err != nil {
+		return ProjectSecret{}, err
+	}
+	value := strings.TrimSpace(input.Value)
+	if value == "" {
+		return ProjectSecret{}, fmt.Errorf("secret value is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.projects[ref]; !ok {
+		return ProjectSecret{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+	if s.secrets[ref] == nil {
+		s.secrets[ref] = map[string]ProjectSecret{}
+	}
+	now := time.Now().UTC()
+	secret, ok := s.secrets[ref][normalizedKind]
+	if !ok {
+		secret = ProjectSecret{
+			ID:         newID(),
+			ProjectRef: ref,
+			Kind:       normalizedKind,
+			CreatedAt:  now,
+		}
+	} else {
+		secret.RotatedAt = &now
+	}
+	secret.Value = value
+	secret.Masked = maskSecret(value)
+	s.secrets[ref][normalizedKind] = secret
+	return secret, nil
+}
+
+func (s *MemoryStore) DeleteProjectSecret(ctx context.Context, ref string, kind string) error {
+	normalizedKind, err := normalizeCustomProjectSecretKind(kind)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.projects[ref]; !ok {
+		return fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+	if _, ok := s.secrets[ref][normalizedKind]; !ok {
+		return fmt.Errorf("%w: secret %s for project %s", ErrNotFound, normalizedKind, ref)
+	}
+	delete(s.secrets[ref], normalizedKind)
+	return nil
+}
+
 func (s *MemoryStore) RotateProjectSecret(ctx context.Context, ref string, kind string) (ProjectSecret, error) {
-	normalizedKind, err := normalizeSecretKind(kind)
+	normalizedKind, err := normalizeManagedProjectSecretKind(kind)
 	if err != nil {
 		return ProjectSecret{}, err
 	}
@@ -5627,10 +6077,21 @@ func (s *MemoryStore) RotateProjectSecret(ctx context.Context, ref string, kind 
 	}
 	now := time.Now().UTC()
 	value := randomSecretValue(ref, normalizedKind)
+	switch normalizedKind {
+	case "anon_key":
+		ensureSupabaseAPIKeys(ref, s.secrets[ref], now)
+		value = supabaseRoleJWT(ref, "anon", s.secrets[ref]["jwt_secret"].Value)
+	case "service_role":
+		ensureSupabaseAPIKeys(ref, s.secrets[ref], now)
+		value = supabaseRoleJWT(ref, "service_role", s.secrets[ref]["jwt_secret"].Value)
+	}
 	secret.Value = value
 	secret.Masked = maskSecret(value)
 	secret.RotatedAt = &now
 	s.secrets[ref][normalizedKind] = secret
+	if normalizedKind == "jwt_secret" {
+		ensureSupabaseAPIKeys(ref, s.secrets[ref], now)
+	}
 	return secret, nil
 }
 
@@ -5663,7 +6124,7 @@ func (s *MemoryStore) CreateBackup(ctx context.Context, input BackupInput) (Back
 	if strings.TrimSpace(input.Location) == "" {
 		return Backup{}, fmt.Errorf("backup location is required")
 	}
-	kind := input.Kind
+	kind := strings.ToLower(strings.TrimSpace(input.Kind))
 	if kind == "" {
 		kind = "logical"
 	}
@@ -5671,22 +6132,45 @@ func (s *MemoryStore) CreateBackup(ctx context.Context, input BackupInput) (Back
 	if status == "" {
 		status = "completed"
 	}
+	now := time.Now().UTC()
+	startedAt := input.StartedAt
+	if startedAt.IsZero() {
+		startedAt = now
+	}
+	finishedAt := input.FinishedAt
+	if finishedAt == nil && input.VerifiedAt != nil {
+		verifiedAt := *input.VerifiedAt
+		finishedAt = &verifiedAt
+	}
+	if finishedAt == nil && status == "completed" {
+		completedAt := now
+		finishedAt = &completedAt
+	}
 	backup := Backup{
-		ID:             newID(),
-		ProjectRef:     input.ProjectRef,
-		Kind:           kind,
-		Location:       input.Location,
-		SizeBytes:      input.SizeBytes,
-		ChecksumSHA256: strings.TrimSpace(input.ChecksumSHA256),
-		Status:         status,
-		CreatedAt:      time.Now().UTC(),
-		VerifiedAt:     input.VerifiedAt,
+		ID:              newID(),
+		ProjectRef:      input.ProjectRef,
+		Kind:            kind,
+		Location:        input.Location,
+		RemoteLocation:  strings.TrimSpace(input.RemoteLocation),
+		StorageTargetID: strings.TrimSpace(input.StorageTargetID),
+		SizeBytes:       input.SizeBytes,
+		ChecksumSHA256:  strings.TrimSpace(input.ChecksumSHA256),
+		Status:          status,
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		CreatedAt:       now,
+		VerifiedAt:      input.VerifiedAt,
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.projects[input.ProjectRef]; !ok {
 		return Backup{}, fmt.Errorf("%w: project %s", ErrNotFound, input.ProjectRef)
+	}
+	if backup.StorageTargetID != "" {
+		if _, ok := s.backupStorageTargets[backup.StorageTargetID]; !ok {
+			return Backup{}, fmt.Errorf("%w: backup storage target %s", ErrNotFound, backup.StorageTargetID)
+		}
 	}
 	s.backups = append(s.backups, backup)
 	return backup, nil
@@ -5729,6 +6213,227 @@ func (s *MemoryStore) GetBackup(ctx context.Context, ref string, backupID string
 	return Backup{}, fmt.Errorf("%w: backup %s for project %s", ErrNotFound, backupID, ref)
 }
 
+func (s *MemoryStore) CreatePlatformBackup(ctx context.Context, input PlatformBackupInput) (PlatformBackup, error) {
+	if strings.TrimSpace(input.Location) == "" {
+		return PlatformBackup{}, fmt.Errorf("platform backup location is required")
+	}
+	kind := strings.TrimSpace(input.Kind)
+	if kind == "" {
+		kind = "control-plane"
+	}
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "completed"
+	}
+	now := time.Now().UTC()
+	startedAt := input.StartedAt
+	if startedAt.IsZero() {
+		startedAt = now
+	}
+	finishedAt := input.FinishedAt
+	if finishedAt == nil && input.VerifiedAt != nil {
+		verifiedAt := *input.VerifiedAt
+		finishedAt = &verifiedAt
+	}
+	if finishedAt == nil && status == "completed" {
+		completedAt := now
+		finishedAt = &completedAt
+	}
+	backup := PlatformBackup{
+		ID:              newID(),
+		Kind:            kind,
+		Location:        strings.TrimSpace(input.Location),
+		RemoteLocation:  strings.TrimSpace(input.RemoteLocation),
+		StorageTargetID: strings.TrimSpace(input.StorageTargetID),
+		SizeBytes:       input.SizeBytes,
+		ChecksumSHA256:  strings.TrimSpace(input.ChecksumSHA256),
+		Status:          status,
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		CreatedAt:       now,
+		VerifiedAt:      input.VerifiedAt,
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if backup.StorageTargetID != "" {
+		if _, ok := s.backupStorageTargets[backup.StorageTargetID]; !ok {
+			return PlatformBackup{}, fmt.Errorf("%w: backup storage target %s", ErrNotFound, backup.StorageTargetID)
+		}
+	}
+	s.platformBackups = append(s.platformBackups, backup)
+	return backup, nil
+}
+
+func (s *MemoryStore) ListPlatformBackups(ctx context.Context) ([]PlatformBackup, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	backups := append([]PlatformBackup(nil), s.platformBackups...)
+	sort.Slice(backups, func(i, j int) bool {
+		return backups[i].CreatedAt.After(backups[j].CreatedAt)
+	})
+	return backups, nil
+}
+
+func (s *MemoryStore) GetPlatformBackup(ctx context.Context, backupID string) (PlatformBackup, error) {
+	backupID = strings.TrimSpace(backupID)
+	if backupID == "" {
+		return PlatformBackup{}, fmt.Errorf("platform backup id is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, backup := range s.platformBackups {
+		if backup.ID == backupID {
+			return backup, nil
+		}
+	}
+	return PlatformBackup{}, fmt.Errorf("%w: platform backup %s", ErrNotFound, backupID)
+}
+
+func (s *MemoryStore) ListBackupStorageTargets(ctx context.Context) ([]BackupStorageTarget, error) {
+	s.mu.RLock()
+	rawTargets := make([]BackupStorageTarget, 0, len(s.backupStorageTargets))
+	for _, target := range s.backupStorageTargets {
+		rawTargets = append(rawTargets, target)
+	}
+	s.mu.RUnlock()
+
+	targets := make([]BackupStorageTarget, 0, len(rawTargets))
+	for _, target := range rawTargets {
+		targets = append(targets, redactBackupStorageTarget(target))
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].Default != targets[j].Default {
+			return targets[i].Default
+		}
+		if targets[i].Name != targets[j].Name {
+			return targets[i].Name < targets[j].Name
+		}
+		return targets[i].ID < targets[j].ID
+	})
+	return targets, nil
+}
+
+func (s *MemoryStore) GetBackupStorageTarget(ctx context.Context, id string) (BackupStorageTarget, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target id is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	target, ok := s.backupStorageTargets[id]
+	if !ok {
+		return BackupStorageTarget{}, fmt.Errorf("%w: backup storage target %s", ErrNotFound, id)
+	}
+	return target, nil
+}
+
+func (s *MemoryStore) CreateBackupStorageTarget(ctx context.Context, input BackupStorageTargetInput) (BackupStorageTarget, error) {
+	target, err := normalizeBackupStorageTargetInput("", BackupStorageTarget{}, input, true)
+	if err != nil {
+		return BackupStorageTarget{}, err
+	}
+	now := time.Now().UTC()
+	target.ID = newID()
+	target.CreatedAt = now
+	target.UpdatedAt = now
+
+	s.mu.Lock()
+	if target.Default {
+		s.clearDefaultBackupStorageTargetLocked("")
+	}
+	s.backupStorageTargets[target.ID] = target
+	s.mu.Unlock()
+	return redactBackupStorageTarget(target), nil
+}
+
+func (s *MemoryStore) UpdateBackupStorageTarget(ctx context.Context, id string, input BackupStorageTargetInput) (BackupStorageTarget, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target id is required")
+	}
+	s.mu.Lock()
+	existing, ok := s.backupStorageTargets[id]
+	if !ok {
+		s.mu.Unlock()
+		return BackupStorageTarget{}, fmt.Errorf("%w: backup storage target %s", ErrNotFound, id)
+	}
+	target, err := normalizeBackupStorageTargetInput(id, existing, input, false)
+	if err != nil {
+		s.mu.Unlock()
+		return BackupStorageTarget{}, err
+	}
+	if target.Default {
+		s.clearDefaultBackupStorageTargetLocked(id)
+	}
+	s.backupStorageTargets[id] = target
+	s.mu.Unlock()
+	return redactBackupStorageTarget(target), nil
+}
+
+func (s *MemoryStore) UpdateBackupStorageTargetTestResult(ctx context.Context, id string, testedAt time.Time, status string, message string) (BackupStorageTarget, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target id is required")
+	}
+	status = strings.TrimSpace(status)
+	if status != "passed" && status != "failed" {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target test status is invalid")
+	}
+	message = strings.TrimSpace(message)
+	if len(message) > 500 {
+		message = message[:500]
+	}
+	if testedAt.IsZero() {
+		testedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	target, ok := s.backupStorageTargets[id]
+	if !ok {
+		s.mu.Unlock()
+		return BackupStorageTarget{}, fmt.Errorf("%w: backup storage target %s", ErrNotFound, id)
+	}
+	target.LastTestedAt = &testedAt
+	target.LastTestStatus = status
+	target.LastTestError = message
+	target.UpdatedAt = time.Now().UTC()
+	s.backupStorageTargets[id] = target
+	s.mu.Unlock()
+	return redactBackupStorageTarget(target), nil
+}
+
+func (s *MemoryStore) DeleteBackupStorageTarget(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("backup storage target id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.backupStorageTargets[id]; !ok {
+		return fmt.Errorf("%w: backup storage target %s", ErrNotFound, id)
+	}
+	for ref, policy := range s.policies {
+		if policy.StorageTargetID == id {
+			policy.StorageTargetID = ""
+			policy.UpdatedAt = time.Now().UTC()
+			s.policies[ref] = policy
+		}
+	}
+	delete(s.backupStorageTargets, id)
+	return nil
+}
+
+func (s *MemoryStore) clearDefaultBackupStorageTargetLocked(exceptID string) {
+	for id, target := range s.backupStorageTargets {
+		if id == exceptID || !target.Default {
+			continue
+		}
+		target.Default = false
+		target.UpdatedAt = time.Now().UTC()
+		s.backupStorageTargets[id] = target
+	}
+}
+
 func (s *MemoryStore) GetBackupPolicy(ctx context.Context, ref string) (BackupPolicy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5750,18 +6455,24 @@ func (s *MemoryStore) UpdateBackupPolicy(ctx context.Context, ref string, input 
 	if err := validateBackupSchedule(schedule); err != nil {
 		return BackupPolicy{}, err
 	}
-	kind := strings.TrimSpace(input.Kind)
+	kind := strings.ToLower(strings.TrimSpace(input.Kind))
 	if kind == "" {
 		kind = "logical"
 	}
-	if kind != "logical" {
+	if kind != "logical" && kind != "physical" {
 		return BackupPolicy{}, fmt.Errorf("unsupported backup kind %q", kind)
 	}
+	targetID := strings.TrimSpace(input.StorageTargetID)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.projects[ref]; !ok {
 		return BackupPolicy{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+	if targetID != "" {
+		if _, ok := s.backupStorageTargets[targetID]; !ok {
+			return BackupPolicy{}, fmt.Errorf("%w: backup storage target %s", ErrNotFound, targetID)
+		}
 	}
 	now := time.Now().UTC()
 	policy := s.policies[ref]
@@ -5769,6 +6480,7 @@ func (s *MemoryStore) UpdateBackupPolicy(ctx context.Context, ref string, input 
 	policy.Enabled = input.Enabled
 	policy.Schedule = schedule
 	policy.Kind = kind
+	policy.StorageTargetID = targetID
 	policy.UpdatedAt = now
 	if input.Enabled {
 		next := nextBackupRun(now, schedule)
@@ -5821,14 +6533,18 @@ func (s *MemoryStore) UpdatePITRPolicy(ctx context.Context, ref string, input PI
 	if retentionDays < 1 || retentionDays > 35 {
 		return PITRPolicy{}, fmt.Errorf("retention_days must be between 1 and 35")
 	}
-	if input.Enabled && bucket == "" {
-		return PITRPolicy{}, fmt.Errorf("archive_bucket is required when PITR is enabled")
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.projects[ref]; !ok {
 		return PITRPolicy{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+	if input.Enabled && bucket == "" {
+		var ok bool
+		bucket, ok = s.defaultWALArchiveBucketLocked(ref)
+		if !ok {
+			return PITRPolicy{}, fmt.Errorf("archive_bucket is required when PITR is enabled and no backup storage target is selected or configured as platform default")
+		}
 	}
 	now := time.Now().UTC()
 	policy := s.pitrPolicies[ref]
@@ -5841,12 +6557,36 @@ func (s *MemoryStore) UpdatePITRPolicy(ctx context.Context, ref string, input PI
 	return policy, nil
 }
 
+func (s *MemoryStore) defaultWALArchiveBucketLocked(ref string) (string, bool) {
+	targetID := strings.TrimSpace(s.policies[ref].StorageTargetID)
+	for _, target := range s.backupStorageTargets {
+		if targetID != "" {
+			if target.ID != targetID {
+				continue
+			}
+		} else if !target.Default {
+			continue
+		}
+		if !target.SecretConfigured {
+			continue
+		}
+		if requireRecoveryReadyBackupTargets() && !backupStorageTargetIsReadyOffHost(target) {
+			continue
+		}
+		return walArchiveBucketForTarget(target, ref), true
+	}
+	return "", false
+}
+
 func (s *MemoryStore) CreateWALArchive(ctx context.Context, input WALArchiveInput) (WALArchive, error) {
 	if strings.TrimSpace(input.ProjectRef) == "" {
 		return WALArchive{}, fmt.Errorf("project ref is required")
 	}
 	if strings.TrimSpace(input.Segment) == "" {
 		return WALArchive{}, fmt.Errorf("wal segment is required")
+	}
+	if !isPostgresWALSegment(input.Segment) {
+		return WALArchive{}, fmt.Errorf("wal segment must be a 24-character Postgres WAL filename")
 	}
 	if strings.TrimSpace(input.Location) == "" {
 		return WALArchive{}, fmt.Errorf("wal archive location is required")
@@ -5855,22 +6595,34 @@ func (s *MemoryStore) CreateWALArchive(ctx context.Context, input WALArchiveInpu
 	if status == "" {
 		status = "archived"
 	}
+	segmentSource := strings.TrimSpace(input.SegmentSource)
+	if segmentSource == "" {
+		segmentSource = "unknown"
+	}
 	archive := WALArchive{
-		ID:             newID(),
-		ProjectRef:     input.ProjectRef,
-		Segment:        input.Segment,
-		Location:       input.Location,
-		SizeBytes:      input.SizeBytes,
-		ChecksumSHA256: strings.TrimSpace(input.ChecksumSHA256),
-		Status:         status,
-		CreatedAt:      time.Now().UTC(),
-		VerifiedAt:     input.VerifiedAt,
+		ID:              newID(),
+		ProjectRef:      input.ProjectRef,
+		Segment:         strings.ToUpper(strings.TrimSpace(input.Segment)),
+		SegmentSource:   segmentSource,
+		Location:        input.Location,
+		RemoteLocation:  strings.TrimSpace(input.RemoteLocation),
+		StorageTargetID: strings.TrimSpace(input.StorageTargetID),
+		SizeBytes:       input.SizeBytes,
+		ChecksumSHA256:  strings.TrimSpace(input.ChecksumSHA256),
+		Status:          status,
+		CreatedAt:       time.Now().UTC(),
+		VerifiedAt:      input.VerifiedAt,
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.projects[input.ProjectRef]; !ok {
 		return WALArchive{}, fmt.Errorf("%w: project %s", ErrNotFound, input.ProjectRef)
+	}
+	if archive.StorageTargetID != "" {
+		if _, ok := s.backupStorageTargets[archive.StorageTargetID]; !ok {
+			return WALArchive{}, fmt.Errorf("%w: backup storage target %s", ErrNotFound, archive.StorageTargetID)
+		}
 	}
 	s.walArchives = append(s.walArchives, archive)
 	policy := s.pitrPolicies[input.ProjectRef]
@@ -5964,7 +6716,6 @@ func (s *MemoryStore) RecordAuditEvent(ctx context.Context, input AuditEventInpu
 		return AuditEvent{}, fmt.Errorf("audit target is required")
 	}
 	event := AuditEvent{
-		ID:        newID(),
 		ActorID:   strings.TrimSpace(input.ActorID),
 		Action:    strings.TrimSpace(input.Action),
 		Target:    strings.TrimSpace(input.Target),
@@ -5977,6 +6728,7 @@ func (s *MemoryStore) RecordAuditEvent(ctx context.Context, input AuditEventInpu
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	event.ID = newID()
 	event.ChainIndex = len(s.auditEvents) + 1
 	if len(s.auditEvents) > 0 {
 		event.PreviousHash = s.auditEvents[len(s.auditEvents)-1].Hash
@@ -6114,7 +6866,7 @@ func (s *MemoryStore) GetFleetMetrics(ctx context.Context) (FleetMetrics, error)
 		metrics.HostCapacity = addHostCapacity(metrics.HostCapacity, host.Capacity)
 		metrics.HostUsed = addHostCapacity(metrics.HostUsed, host.Used)
 	}
-	metrics.Observed = telemetryRollup(s.telemetry, time.Now().UTC())
+	metrics.Observed = telemetryRollup(s.projects, s.telemetry, time.Now().UTC())
 	for _, routes := range s.routes {
 		metrics.Routes += len(routes)
 	}
@@ -6317,17 +7069,24 @@ func validateCreateProject(req CreateProjectRequest) error {
 	if req.OrgID == "" {
 		return fmt.Errorf("org id is required")
 	}
-	if !refPattern.MatchString(req.Ref) {
-		return fmt.Errorf("ref must be 3-64 lowercase letters, numbers, or hyphens")
+	if !projectRefPattern.MatchString(req.Ref) {
+		return fmt.Errorf("ref must be 3-55 lowercase letters, numbers, or hyphens, and cannot start or end with a hyphen")
 	}
 	if strings.TrimSpace(req.Name) == "" {
 		return fmt.Errorf("name is required")
 	}
-	if _, err := normalizeDomain(req.Domain); err != nil {
+	domain, err := normalizeDomain(req.Domain)
+	if err != nil {
 		return fmt.Errorf("domain %w", err)
+	}
+	if err := validateGeneratedProjectFQDNs(req.Ref, domain); err != nil {
+		return err
 	}
 	if strings.TrimSpace(req.StackVersion) == "" {
 		return fmt.Errorf("stack version is required")
+	}
+	if err := validateSupportedStackVersion(req.StackVersion); err != nil {
+		return err
 	}
 	if err := validateStackProfile(req.Profile); err != nil {
 		return err
@@ -6339,6 +7098,29 @@ func validateCreateProject(req CreateProjectRequest) error {
 		return err
 	}
 	return nil
+}
+
+func validateGeneratedProjectFQDNs(ref string, domain string) error {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	domain = strings.Trim(strings.ToLower(strings.TrimSpace(domain)), ".")
+	for label, host := range generatedProjectHosts(ref, domain) {
+		if len(host) > 253 {
+			return fmt.Errorf("%s host %s exceeds the 253-character DNS name limit; shorten the project ref or apps domain", label, host)
+		}
+	}
+	return nil
+}
+
+func generatedProjectHosts(ref string, domain string) map[string]string {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	domain = strings.Trim(strings.ToLower(strings.TrimSpace(domain)), ".")
+	return map[string]string{
+		"project API":      projectHost(ref, domain),
+		"project Studio":   studioHost(ref, domain),
+		"project Storage":  storageHost(ref, domain),
+		"project database": databaseHost(ref, domain),
+		"project pooler":   poolerHost(ref, domain),
+	}
 }
 
 func AllowedProjectServices() []string {
@@ -6464,7 +7246,7 @@ func validateAuthConfig(config map[string]string) error {
 
 func validateAuthProvidersConfig(config map[string]string) error {
 	for key, value := range config {
-		if strings.HasSuffix(key, "_secret_handle") || strings.HasSuffix(key, "_token_handle") || strings.HasSuffix(key, "_key_handle") {
+		if strings.HasSuffix(key, "_secret_handle") || strings.HasSuffix(key, "_token_handle") || strings.HasSuffix(key, "_key_handle") || key == "sms_test_otp_handle" {
 			if trimmed := strings.TrimSpace(value); trimmed != "" && !strings.HasPrefix(trimmed, "secret://") {
 				return fmt.Errorf("%s must be a secret:// handle", key)
 			}
@@ -6476,6 +7258,22 @@ func validateAuthProvidersConfig(config map[string]string) error {
 		case "twilio", "twilio_verify", "messagebird", "textlocal", "vonage":
 		default:
 			return fmt.Errorf("unsupported sms_provider %q", smsProvider)
+		}
+	}
+	if err := validateIntegerConfig(config, "sms_otp_exp", 1, 86400); err != nil {
+		return err
+	}
+	if err := validateIntegerConfig(config, "sms_otp_length", 4, 10); err != nil {
+		return err
+	}
+	if maxFrequency := strings.TrimSpace(config["sms_max_frequency"]); maxFrequency != "" {
+		if _, err := time.ParseDuration(maxFrequency); err != nil {
+			return fmt.Errorf("sms_max_frequency must be a duration")
+		}
+	}
+	if validUntil := strings.TrimSpace(config["sms_test_otp_valid_until"]); validUntil != "" {
+		if _, err := time.Parse(time.RFC3339, validUntil); err != nil {
+			return fmt.Errorf("sms_test_otp_valid_until must be an RFC3339 timestamp")
 		}
 	}
 	oidcIssuer := strings.TrimSpace(config["oauth_oidc_issuer_url"])
@@ -6544,13 +7342,29 @@ func validatePoolerConfig(config map[string]string) error {
 	if err := validateIntegerConfig(config, "max_client_connections", 1, 100000); err != nil {
 		return err
 	}
-	if err := validateIntegerConfig(config, "transaction_port", 1, 65535); err != nil {
+	if err := validateFixedIntegerConfig(config, "transaction_port", 6543); err != nil {
 		return err
 	}
-	if err := validateIntegerConfig(config, "session_port", 1, 65535); err != nil {
+	if err := validateFixedIntegerConfig(config, "session_port", 5432); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateFunctionsConfig(config map[string]string) error {
+	if err := validateIntegerConfig(config, "worker_timeout_ms", 100, 300000); err != nil {
+		return err
+	}
+	policy := strings.ToLower(strings.TrimSpace(config["deployment_policy"]))
+	if policy == "" {
+		return nil
+	}
+	switch policy {
+	case "manual", "ci", "locked":
+		return nil
+	default:
+		return fmt.Errorf("unsupported deployment_policy %q", policy)
+	}
 }
 
 func validateSMTPConfig(config map[string]string) error {
@@ -6581,6 +7395,18 @@ func validateIntegerConfig(config map[string]string, key string, min int, max in
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < min || value > max {
 		return fmt.Errorf("%s must be between %d and %d", key, min, max)
+	}
+	return nil
+}
+
+func validateFixedIntegerConfig(config map[string]string, key string, expected int) error {
+	raw := strings.TrimSpace(config[key])
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value != expected {
+		return fmt.Errorf("%s is fixed at %d for hosted-compatible public routing", key, expected)
 	}
 	return nil
 }
@@ -6971,18 +7797,14 @@ func subtractHostCapacity(left HostCapacity, right HostCapacity) HostCapacity {
 	}
 }
 
-func telemetryRollup(samples map[string]TelemetrySample, now time.Time) TelemetryRollup {
+func telemetryRollup(projects map[string]Project, samples map[string]TelemetrySample, now time.Time) TelemetryRollup {
 	const staleAfter = 5 * time.Minute
 	rollup := TelemetryRollup{StaleAfterSeconds: int(staleAfter.Seconds())}
-	for _, sample := range samples {
-		rollup.ProjectsSampled++
-		rollup.CPUPercent += sample.CPUPercent
-		rollup.MemoryBytes += sample.MemoryBytes
-		rollup.MemoryLimitBytes += sample.MemoryLimitBytes
-		rollup.DiskUsedBytes += sample.DiskUsedBytes
-		rollup.DiskLimitBytes += sample.DiskLimitBytes
-		rollup.NetworkRxBytes += sample.NetworkRxBytes
-		rollup.NetworkTxBytes += sample.NetworkTxBytes
+	for ref := range projects {
+		sample, ok := samples[ref]
+		if !ok {
+			continue
+		}
 		if rollup.LatestSampledAt.IsZero() || sample.SampledAt.After(rollup.LatestSampledAt) {
 			rollup.LatestSampledAt = sample.SampledAt
 		}
@@ -6991,7 +7813,16 @@ func telemetryRollup(samples map[string]TelemetrySample, now time.Time) Telemetr
 		}
 		if now.Sub(sample.SampledAt) > staleAfter {
 			rollup.StaleProjects++
+			continue
 		}
+		rollup.ProjectsSampled++
+		rollup.CPUPercent += sample.CPUPercent
+		rollup.MemoryBytes += sample.MemoryBytes
+		rollup.MemoryLimitBytes += sample.MemoryLimitBytes
+		rollup.DiskUsedBytes += sample.DiskUsedBytes
+		rollup.DiskLimitBytes += sample.DiskLimitBytes
+		rollup.NetworkRxBytes += sample.NetworkRxBytes
+		rollup.NetworkTxBytes += sample.NetworkTxBytes
 	}
 	return rollup
 }
@@ -7003,7 +7834,18 @@ func maxInt(left int, right int) int {
 	return right
 }
 
-func normalizeSecretKind(kind string) (string, error) {
+func normalizeProjectSecretKind(kind string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(kind))
+	if normalized == "" {
+		return "", fmt.Errorf("secret kind is required")
+	}
+	if strings.Contains(normalized, "/") || !secretKindPattern.MatchString(normalized) {
+		return "", fmt.Errorf("secret kind %q is invalid", normalized)
+	}
+	return normalized, nil
+}
+
+func normalizeManagedProjectSecretKind(kind string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(kind))
 	if normalized == "" {
 		return "", fmt.Errorf("secret kind is required")
@@ -7012,6 +7854,17 @@ func normalizeSecretKind(kind string) (string, error) {
 		if !strings.HasPrefix(normalized, "jwt_signing_key_previous_") {
 			return "", fmt.Errorf("unsupported secret kind %q", normalized)
 		}
+	}
+	return normalized, nil
+}
+
+func normalizeCustomProjectSecretKind(kind string) (string, error) {
+	normalized, err := normalizeProjectSecretKind(kind)
+	if err != nil {
+		return "", err
+	}
+	if _, managed := secretPrefixes[normalized]; managed || strings.HasPrefix(normalized, "jwt_signing_key_") {
+		return "", fmt.Errorf("secret kind %q is managed by the control plane", normalized)
 	}
 	return normalized, nil
 }
@@ -7165,10 +8018,26 @@ func normalizeReplicaName(name string) (string, error) {
 	if normalized == "" {
 		return "", fmt.Errorf("replica name is required")
 	}
-	if !refPattern.MatchString(normalized) {
-		return "", fmt.Errorf("replica name must be 3-64 lowercase letters, numbers, or dashes")
+	if !replicaNamePattern.MatchString(normalized) {
+		return "", fmt.Errorf("replica name must be 3-64 lowercase letters, numbers, or dashes, and cannot start or end with a dash")
 	}
 	return normalized, nil
+}
+
+func validateReplicaPublicDNSHost(ref string, replicaName string, domain string) error {
+	label := fmt.Sprintf("db-replica-%s-%s", routeName(replicaName), strings.ToLower(strings.TrimSpace(ref)))
+	if len(label) <= 63 {
+		host := replicaDatabaseHost(ref, replicaName, strings.Trim(strings.ToLower(strings.TrimSpace(domain)), "."))
+		if len(host) > 253 {
+			return fmt.Errorf("project replica host %s exceeds the 253-character DNS name limit; shorten the replica name, project ref, or apps domain", host)
+		}
+		return nil
+	}
+	maxReplicaNameLength := 63 - len("db-replica-") - 1 - len(strings.TrimSpace(ref))
+	if maxReplicaNameLength < 3 {
+		return fmt.Errorf("project ref %q is too long for public read-replica DNS labels; maximum ref length for replicas is 48 characters", ref)
+	}
+	return fmt.Errorf("replica name must be at most %d characters for project ref %q so public host %s stays within the 63-character DNS label limit", maxReplicaNameLength, ref, label)
 }
 
 func normalizeLogDrainTarget(target string) (string, error) {
@@ -8664,6 +9533,15 @@ func defaultProjectConfig(ref string, area string) ProjectConfig {
 	}
 }
 
+func mergeProjectConfigWithDefaults(ref string, area string, config ProjectConfig) ProjectConfig {
+	merged := defaultProjectConfig(ref, area)
+	merged.UpdatedAt = config.UpdatedAt
+	for key, value := range config.Config {
+		merged.Config[key] = value
+	}
+	return merged
+}
+
 func cloneProjectConfig(config ProjectConfig) ProjectConfig {
 	config.Config = cloneStringMap(config.Config)
 	return config
@@ -8694,6 +9572,7 @@ func cloneAuthHooks(hooks []ProjectAuthHook) []ProjectAuthHook {
 
 func cloneAuthHook(hook ProjectAuthHook) ProjectAuthHook {
 	hook.Headers = cloneStringMap(hook.Headers)
+	hook.RuntimeHeaders = cloneStringMap(hook.RuntimeHeaders)
 	return hook
 }
 
@@ -8706,8 +9585,8 @@ func cloneProjectRoutes(routes []ProjectRoute) []ProjectRoute {
 }
 
 func cloneProjectCDNPolicy(policy ProjectCDNPolicy) ProjectCDNPolicy {
-	policy.IncludedPaths = append([]string(nil), policy.IncludedPaths...)
-	policy.ExcludedPaths = append([]string(nil), policy.ExcludedPaths...)
+	policy.IncludedPaths = append([]string{}, policy.IncludedPaths...)
+	policy.ExcludedPaths = append([]string{}, policy.ExcludedPaths...)
 	return policy
 }
 
@@ -9061,9 +9940,15 @@ func normalizePlatformDefaults(input PlatformDefaultsInput) (PlatformDefaults, e
 	if err != nil {
 		return PlatformDefaults{}, fmt.Errorf("domain %w", err)
 	}
+	if err := validateGeneratedProjectFQDNs(strings.Repeat("a", 55), normalizedDomain); err != nil {
+		return PlatformDefaults{}, fmt.Errorf("domain %w", err)
+	}
 	stackVersion := strings.TrimSpace(input.StackVersion)
 	if stackVersion == "" {
 		stackVersion = "latest"
+	}
+	if err := validateSupportedStackVersion(stackVersion); err != nil {
+		return PlatformDefaults{}, err
 	}
 	profile := input.Profile
 	if profile == "" {
@@ -9104,6 +9989,14 @@ func normalizePlatformDefaults(input PlatformDefaultsInput) (PlatformDefaults, e
 		SMTP:           smtp,
 		UpdatedAt:      time.Now().UTC(),
 	}, nil
+}
+
+func validateSupportedStackVersion(version string) error {
+	normalized := NormalizeStackReleaseVersion(version)
+	if _, ok := ResolveStackReleaseManifestFromEnv(nil, normalized); ok {
+		return nil
+	}
+	return fmt.Errorf("unsupported stack version %q; supported stable versions: %s", version, strings.Join(SupportedStackReleaseVersionsFromEnv(nil), ", "))
 }
 
 func normalizePlatformFeatureFlags(input map[string]bool) (map[string]bool, error) {
@@ -9236,8 +10129,12 @@ func generateProjectSecrets(ref string) map[string]ProjectSecret {
 	now := time.Now().UTC()
 	secrets := map[string]ProjectSecret{}
 	for kind := range secretPrefixes {
+		if kind == "anon_key" || kind == "service_role" {
+			continue
+		}
 		secrets[kind] = newProjectSecret(ref, kind, now)
 	}
+	ensureSupabaseAPIKeys(ref, secrets, now)
 	return secrets
 }
 
@@ -9246,6 +10143,35 @@ func ensureProjectSigningKeys(ref string, secrets map[string]ProjectSecret) {
 	for _, kind := range []string{"jwt_signing_key_current", "jwt_signing_key_next"} {
 		if _, ok := secrets[kind]; !ok {
 			secrets[kind] = newProjectSecret(ref, kind, now)
+		}
+	}
+}
+
+func ensureSupabaseAPIKeys(ref string, secrets map[string]ProjectSecret, now time.Time) {
+	jwtSecret := strings.TrimSpace(secrets["jwt_secret"].Value)
+	if jwtSecret == "" {
+		secrets["jwt_secret"] = newProjectSecret(ref, "jwt_secret", now)
+		jwtSecret = secrets["jwt_secret"].Value
+	}
+	for _, role := range []string{"anon", "service_role"} {
+		kind := "anon_key"
+		if role == "service_role" {
+			kind = "service_role"
+		}
+		token := supabaseRoleJWT(ref, role, jwtSecret)
+		secret, ok := secrets[kind]
+		if !ok {
+			secret = ProjectSecret{
+				ID:         newID(),
+				ProjectRef: ref,
+				Kind:       kind,
+				CreatedAt:  now,
+			}
+		}
+		if !looksLikeJWT(secret.Value) || !verifySupabaseRoleJWT(secret.Value, role, jwtSecret) {
+			secret.Value = token
+			secret.Masked = maskSecret(token)
+			secrets[kind] = secret
 		}
 	}
 }
@@ -9273,7 +10199,57 @@ func randomSecretValue(ref string, kind string) string {
 		}
 		return randomJWTSigningKeyValue(ref, status)
 	}
+	if kind == "db_password" {
+		return randomHex(secretByteLengths[kind])
+	}
 	return randomToken(secretPrefixes[kind], secretByteLengths[kind])
+}
+
+func supabaseRoleJWT(ref string, role string, jwtSecret string) string {
+	now := time.Now().UTC().Unix()
+	header := map[string]string{"alg": "HS256", "typ": "JWT"}
+	claims := map[string]any{
+		"iss":  "supabase",
+		"ref":  ref,
+		"role": role,
+		"aud":  "authenticated",
+		"iat":  now,
+		"jti":  newID(),
+		"exp":  int64(4102444800), // 2100-01-01T00:00:00Z, matching long-lived self-hosted API keys.
+	}
+	headerPayload, _ := json.Marshal(header)
+	claimsPayload, _ := json.Marshal(claims)
+	unsigned := base64.RawURLEncoding.EncodeToString(headerPayload) + "." + base64.RawURLEncoding.EncodeToString(claimsPayload)
+	mac := hmac.New(sha256.New, []byte(jwtSecret))
+	_, _ = mac.Write([]byte(unsigned))
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func looksLikeJWT(value string) bool {
+	return len(strings.Split(strings.TrimSpace(value), ".")) == 3
+}
+
+func verifySupabaseRoleJWT(token string, role string, jwtSecret string) bool {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(jwtSecret))
+	_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
+	expected := mac.Sum(nil)
+	actual, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || !hmac.Equal(actual, expected) {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	claims := map[string]any{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return false
+	}
+	return claims["role"] == role && claims["aud"] == "authenticated"
 }
 
 func randomJWTSigningKeyValue(ref string, status string) string {
@@ -9336,6 +10312,119 @@ func defaultBackupPolicyForSchedule(ref string, schedule string) BackupPolicy {
 	}
 }
 
+func normalizeBackupStorageTargetInput(id string, existing BackupStorageTarget, input BackupStorageTargetInput, creating bool) (BackupStorageTarget, error) {
+	targetType := strings.ToLower(strings.TrimSpace(input.Type))
+	if targetType == "" {
+		targetType = "s3"
+	}
+	if targetType != "s3" {
+		return BackupStorageTarget{}, fmt.Errorf("unsupported backup storage target type %q", targetType)
+	}
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target name is required")
+	}
+	if len(name) > 120 || strings.ContainsAny(name, "\r\n\t") {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target name is invalid")
+	}
+	endpoint := strings.TrimSpace(input.Endpoint)
+	if endpoint != "" {
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return BackupStorageTarget{}, fmt.Errorf("backup storage target endpoint must be an absolute URL")
+		}
+		if parsed.User != nil {
+			return BackupStorageTarget{}, fmt.Errorf("backup storage target endpoint must not include credentials")
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			return BackupStorageTarget{}, fmt.Errorf("backup storage target endpoint scheme must be http or https")
+		}
+		endpoint = strings.TrimRight(endpoint, "/")
+	}
+	region := strings.TrimSpace(input.Region)
+	if region == "" {
+		region = "auto"
+	}
+	if len(region) > 80 || strings.ContainsAny(region, "\r\n\t /") {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target region is invalid")
+	}
+	bucket := strings.TrimSpace(input.Bucket)
+	if bucket == "" {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target bucket is required")
+	}
+	if len(bucket) > 255 || strings.ContainsAny(bucket, "\r\n\t/\\") {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target bucket is invalid")
+	}
+	prefix := strings.Trim(strings.TrimSpace(input.Prefix), "/")
+	if strings.ContainsAny(prefix, "\r\n\t\\") || strings.Contains(prefix, "..") {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target prefix is invalid")
+	}
+	accessKeyID := strings.TrimSpace(input.AccessKeyID)
+	secretAccessKey := strings.TrimSpace(input.SecretAccessKey)
+	if accessKeyID == "" && !creating {
+		accessKeyID = existing.AccessKeyID
+	}
+	if secretAccessKey == "" && !creating {
+		secretAccessKey = existing.SecretAccessKey
+	}
+	if accessKeyID == "" {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target access key id is required")
+	}
+	if secretAccessKey == "" {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target secret access key is required")
+	}
+	if strings.ContainsAny(accessKeyID, "\r\n\t") || strings.ContainsAny(secretAccessKey, "\r\n") {
+		return BackupStorageTarget{}, fmt.Errorf("backup storage target credentials are invalid")
+	}
+	now := time.Now().UTC()
+	createdAt := existing.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	target := BackupStorageTarget{
+		ID:               id,
+		Name:             name,
+		Type:             targetType,
+		Endpoint:         endpoint,
+		Region:           region,
+		Bucket:           bucket,
+		Prefix:           prefix,
+		AccessKeyID:      accessKeyID,
+		SecretAccessKey:  secretAccessKey,
+		SecretConfigured: secretAccessKey != "",
+		ForcePathStyle:   input.ForcePathStyle,
+		Default:          input.Default,
+		LastTestedAt:     existing.LastTestedAt,
+		LastTestStatus:   existing.LastTestStatus,
+		LastTestError:    existing.LastTestError,
+		CreatedAt:        createdAt,
+		UpdatedAt:        now,
+	}
+	if !creating && backupStorageTargetConnectionChanged(existing, target) {
+		target.LastTestedAt = nil
+		target.LastTestStatus = ""
+		target.LastTestError = ""
+	}
+	return target, nil
+}
+
+func redactBackupStorageTarget(target BackupStorageTarget) BackupStorageTarget {
+	target.SecretConfigured = strings.TrimSpace(target.SecretAccessKey) != ""
+	target.SecretAccessKey = ""
+	target.DurableOffHost, target.RecoveryReady, target.ReadinessStatus, target.ReadinessMessage = backupStorageTargetReadiness(target)
+	return target
+}
+
+func backupStorageTargetConnectionChanged(a BackupStorageTarget, b BackupStorageTarget) bool {
+	return a.Endpoint != b.Endpoint ||
+		a.Region != b.Region ||
+		a.Bucket != b.Bucket ||
+		a.Prefix != b.Prefix ||
+		a.AccessKeyID != b.AccessKeyID ||
+		a.SecretAccessKey != b.SecretAccessKey ||
+		a.ForcePathStyle != b.ForcePathStyle
+}
+
 func defaultPITRPolicy(ref string) PITRPolicy {
 	return PITRPolicy{
 		ProjectRef:    ref,
@@ -9344,6 +10433,22 @@ func defaultPITRPolicy(ref string) PITRPolicy {
 		RetentionDays: 7,
 		UpdatedAt:     time.Now().UTC(),
 	}
+}
+
+func cloneTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := value.UTC()
+	return &cloned
+}
+
+func cloneProjectDomains(domains []ProjectDomain) []ProjectDomain {
+	out := append([]ProjectDomain(nil), domains...)
+	for index := range out {
+		out[index].CertNotAfter = cloneTimePtr(out[index].CertNotAfter)
+	}
+	return out
 }
 
 func nextBackupRun(from time.Time, schedule string) time.Time {

@@ -19,10 +19,19 @@ type projectDomainResource struct {
 }
 
 type projectDomainResourceModel struct {
-	ID         types.String `tfsdk:"id"`
-	Ref        types.String `tfsdk:"ref"`
-	FQDN       types.String `tfsdk:"fqdn"`
-	CertStatus types.String `tfsdk:"cert_status"`
+	ID           types.String `tfsdk:"id"`
+	Ref          types.String `tfsdk:"ref"`
+	FQDN         types.String `tfsdk:"fqdn"`
+	CertStatus   types.String `tfsdk:"cert_status"`
+	CertMode     types.String `tfsdk:"cert_mode"`
+	APIURL       types.String `tfsdk:"api_url"`
+	ReadyAPIURL  types.String `tfsdk:"ready_api_url"`
+	RESTURL      types.String `tfsdk:"rest_url"`
+	AuthURL      types.String `tfsdk:"auth_url"`
+	GraphQLURL   types.String `tfsdk:"graphql_url"`
+	RealtimeURL  types.String `tfsdk:"realtime_url"`
+	FunctionsURL types.String `tfsdk:"functions_url"`
+	StorageURL   types.String `tfsdk:"storage_url"`
 }
 
 func NewProjectDomainResource() resource.Resource {
@@ -61,6 +70,45 @@ func (r *projectDomainResource) Schema(ctx context.Context, req resource.SchemaR
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
+			},
+			"cert_mode": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "Certificate mode reported by the control plane.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"api_url": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "Supabase-compatible API URL for this custom domain.",
+			},
+			"ready_api_url": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "Supabase-compatible API URL when the custom domain has an issued or uploaded certificate; empty while pending or failed.",
+			},
+			"rest_url": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "PostgREST URL for this custom domain.",
+			},
+			"auth_url": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "Auth URL for this custom domain.",
+			},
+			"graphql_url": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "GraphQL URL for this custom domain.",
+			},
+			"realtime_url": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "Realtime URL for this custom domain.",
+			},
+			"functions_url": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "Edge Functions URL for this custom domain.",
+			},
+			"storage_url": resourceschema.StringAttribute{
+				Computed:    true,
+				Description: "Storage REST URL for this custom domain.",
 			},
 		},
 	}
@@ -161,4 +209,27 @@ func setProjectDomainState(model *projectDomainResourceModel, domain ProjectDoma
 	model.Ref = types.StringValue(domain.ProjectRef)
 	model.FQDN = types.StringValue(domain.FQDN)
 	model.CertStatus = types.StringValue(domain.CertStatus)
+	model.CertMode = types.StringValue(domain.CertMode)
+	apiURL := "https://" + domain.FQDN
+	model.APIURL = types.StringValue(apiURL)
+	if projectDomainCertificateReady(domain.CertStatus) {
+		model.ReadyAPIURL = types.StringValue(apiURL)
+	} else {
+		model.ReadyAPIURL = types.StringValue("")
+	}
+	model.RESTURL = types.StringValue(apiURL + "/rest/v1")
+	model.AuthURL = types.StringValue(apiURL + "/auth/v1")
+	model.GraphQLURL = types.StringValue(apiURL + "/graphql/v1")
+	model.RealtimeURL = types.StringValue(apiURL + "/realtime/v1")
+	model.FunctionsURL = types.StringValue(apiURL + "/functions/v1")
+	model.StorageURL = types.StringValue(apiURL + "/storage/v1")
+}
+
+func projectDomainCertificateReady(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "issued", "uploaded":
+		return true
+	default:
+		return false
+	}
 }

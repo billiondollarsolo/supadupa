@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Activity, Boxes, Copy, Database, ExternalLink, Globe2, KeyRound, Network, Shield } from "lucide-react";
 import { RuntimeLink } from "../../components/runtime-link";
 import { useDashboardContext } from "../../lib/dashboard-context";
@@ -6,18 +7,43 @@ import { useUIStore } from "../../lib/ui-store";
 import type { ConnectPayload, Project, ProjectMetrics, TelemetrySample } from "../../types";
 import { ProjectPage } from "./layout";
 
+type ProjectTelemetryPoint = {
+  projectRef: string;
+  sampledAt: string;
+  cpuPercent: number;
+  memoryPercent: number;
+};
+
 export function ProjectOverviewPage() {
   const { activeProject, connect, projectMetrics, routeToProject } = useDashboardContext();
+  const [telemetryHistory, setTelemetryHistory] = useState<ProjectTelemetryPoint[]>([]);
+
+  useEffect(() => {
+    const point = telemetryPointFromMetrics(projectMetrics.data);
+    if (!point) {
+      return;
+    }
+    setTelemetryHistory((current) => {
+      if (current[0]?.projectRef && current[0].projectRef !== point.projectRef) {
+        return [point];
+      }
+      if (current[current.length - 1]?.sampledAt === point.sampledAt) {
+        return current;
+      }
+      return [...current.filter((item) => item.sampledAt !== point.sampledAt), point].slice(-24);
+    });
+  }, [projectMetrics.data]);
+
   return (
     <ProjectPage>
       <ProjectStatusStrip project={activeProject} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
       <div className="grid grid-cols-[minmax(0,1fr)_340px] gap-4 max-xl:grid-cols-1">
         <div className="grid gap-4">
-          <ObservedMetricsPanel metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
+          <ObservedMetricsPanel history={telemetryHistory} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
           <OperationalSurfacePanel metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
         </div>
         <div className="grid content-start gap-4">
-          <ConnectionBasicsPanel payload={connect.data} loading={connect.isLoading} onOpenConnect={() => activeProject && routeToProject(activeProject.ref, "connect")} />
+          <ConnectionBasicsPanel projectRef={activeProject?.ref} payload={connect.data} loading={connect.isLoading} onOpenConnect={() => activeProject && routeToProject(activeProject.ref, "connect")} />
         </div>
       </div>
     </ProjectPage>
@@ -46,7 +72,7 @@ function ProjectStatusStrip({ loading, metrics, project }: { project?: Project; 
   );
 }
 
-function ObservedMetricsPanel({ loading, metrics }: { metrics?: ProjectMetrics; loading: boolean }) {
+function ObservedMetricsPanel({ history, loading, metrics }: { history: ProjectTelemetryPoint[]; metrics?: ProjectMetrics; loading: boolean }) {
   const observed = metrics?.observed;
   const hasDiskSample = Boolean(observed && (observed.disk_used_bytes > 0 || observed.disk_limit_bytes > 0));
   return (
@@ -64,6 +90,7 @@ function ObservedMetricsPanel({ loading, metrics }: { metrics?: ProjectMetrics; 
         <TelemetryCard label="Memory" observed={observed} value={observed ? formatBytes(observed.memory_bytes) : "No sample"} detail={observed && observed.memory_limit_bytes > 0 ? `of ${formatBytes(observed.memory_limit_bytes)}` : "Collector pending"} percent={observed && observed.memory_limit_bytes > 0 ? (observed.memory_bytes / observed.memory_limit_bytes) * 100 : 0} />
         <TelemetryCard label="Disk" observed={hasDiskSample ? observed : undefined} value={hasDiskSample && observed ? formatBytes(observed.disk_used_bytes) : "No volume sample"} detail={hasDiskSample && observed && observed.disk_limit_bytes > 0 ? `of ${formatBytes(observed.disk_limit_bytes)}` : metrics ? `${formatBytes(metrics.db_allocated_bytes)} reserved` : "Collector pending"} percent={hasDiskSample && observed && observed.disk_limit_bytes > 0 ? (observed.disk_used_bytes / observed.disk_limit_bytes) * 100 : 0} />
       </div>
+      <ProjectTelemetryTrend points={history} />
       {!observed ? (
         <p className="mt-3 text-xs text-faint">
           Showing reserved capacity until a Compose or Kubernetes telemetry collector records live samples.
@@ -73,7 +100,7 @@ function ObservedMetricsPanel({ loading, metrics }: { metrics?: ProjectMetrics; 
   );
 }
 
-function ConnectionBasicsPanel({ loading, onOpenConnect, payload }: { payload?: ConnectPayload; loading: boolean; onOpenConnect: () => void }) {
+function ConnectionBasicsPanel({ loading, onOpenConnect, payload, projectRef }: { payload?: ConnectPayload; projectRef?: string; loading: boolean; onOpenConnect: () => void }) {
   return (
     <section className="panel">
       <div className="section-head">
@@ -92,7 +119,7 @@ function ConnectionBasicsPanel({ loading, onOpenConnect, payload }: { payload?: 
           {payload.local_api_url ? <CopyMiniRow label="Local API URL" value={payload.local_api_url} /> : null}
           <CopyMiniRow label="API URL" value={payload.api_url} />
           <CopyMiniRow label="Postgres direct" value={payload.postgres.uri ?? payload.postgres.direct ?? ""} />
-          <RuntimeLink className="button secondary mt-1 h-8 min-h-8 justify-center" label={payload.local_studio_url ? "Studio local" : "Studio"} url={payload.local_studio_url || payload.studio_url} />
+          <RuntimeLink className="button secondary mt-1 h-8 min-h-8 justify-center" label="Studio" projectRef={projectRef} url={payload.studio_url} />
         </div>
       ) : null}
     </section>
@@ -123,6 +150,34 @@ function OperationalSurfacePanel({ loading, metrics }: { metrics?: ProjectMetric
         </div>
       ) : null}
     </section>
+  );
+}
+
+function ProjectTelemetryTrend({ points }: { points: ProjectTelemetryPoint[] }) {
+  const cpuLine = trendPolyline(points.map((point) => point.cpuPercent));
+  const memoryLine = trendPolyline(points.map((point) => point.memoryPercent));
+  const latest = points[points.length - 1];
+  return (
+    <div className="usage-trend mt-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="label">Recent telemetry</p>
+          <p className="mt-1 text-sm font-medium">{points.length > 1 ? `${points.length} samples` : "Waiting for samples"}</p>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2 text-xs text-muted">
+          <span className="trend-legend cpu">CPU</span>
+          <span className="trend-legend memory">RAM</span>
+          {latest ? <span>{formatTime(latest.sampledAt)}</span> : null}
+        </div>
+      </div>
+      <svg aria-label="Recent project CPU and memory utilization" className="trend-chart mt-3" preserveAspectRatio="none" viewBox="0 0 100 48">
+        <line className="trend-grid-line" x1="0" x2="100" y1="12" y2="12" />
+        <line className="trend-grid-line" x1="0" x2="100" y1="24" y2="24" />
+        <line className="trend-grid-line" x1="0" x2="100" y1="36" y2="36" />
+        {points.length > 1 ? <polyline className="trend-line cpu" points={cpuLine} /> : null}
+        {points.length > 1 ? <polyline className="trend-line memory" points={memoryLine} /> : null}
+      </svg>
+    </div>
   );
 }
 
@@ -194,4 +249,33 @@ function httpURL(value: string) {
   } catch {
     return "";
   }
+}
+
+function telemetryPointFromMetrics(metrics?: ProjectMetrics): ProjectTelemetryPoint | null {
+  const observed = metrics?.observed;
+  if (!observed) {
+    return null;
+  }
+  return {
+    projectRef: metrics.project_ref,
+    sampledAt: observed.sampled_at,
+    cpuPercent: observed.cpu_percent,
+    memoryPercent: observed.memory_limit_bytes > 0 ? (observed.memory_bytes / observed.memory_limit_bytes) * 100 : 0,
+  };
+}
+
+function trendPolyline(values: number[]) {
+  if (values.length <= 1) {
+    return "";
+  }
+  const maxIndex = Math.max(1, values.length - 1);
+  return values.map((value, index) => {
+    const x = (index / maxIndex) * 100;
+    const y = 48 - (clampPercent(value) / 100) * 44 - 2;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function clampPercent(value: number) {
+  return Math.min(100, Math.max(0, Number.isFinite(value) ? value : 0));
 }

@@ -20,7 +20,7 @@ export type DatabaseSection =
   | "roles"
   | "ai";
 export type ProjectSettingsSection = "overview" | "runtime" | "services" | "domains" | "network" | "operations" | "danger";
-export type PlatformSettingsSection = "overview" | "defaults" | "features" | "smtp" | "sso" | "scim" | "hosts";
+export type PlatformSettingsSection = "overview" | "defaults" | "features" | "backups" | "smtp" | "sso" | "scim" | "hosts";
 export type OrganizationSection = "overview" | "members" | "teams" | "features" | "quotas" | "usage" | "billing";
 export type SecuritySection = "overview" | "mfa" | "access" | "advisor" | "compliance";
 
@@ -120,6 +120,12 @@ export const configSchemas: Record<ConfigArea, Array<{ key: string; label: strin
     { key: "oauth_oidc_scopes", label: "OIDC scopes" },
     { key: "phone_enabled", label: "Phone login", kind: "boolean" },
     { key: "sms_provider", label: "SMS provider" },
+    { key: "sms_otp_exp", label: "SMS OTP expiry", kind: "number" },
+    { key: "sms_otp_length", label: "SMS OTP length", kind: "number" },
+    { key: "sms_max_frequency", label: "SMS max frequency" },
+    { key: "sms_template", label: "SMS template", kind: "textarea" },
+    { key: "sms_test_otp_handle", label: "SMS test OTP handle" },
+    { key: "sms_test_otp_valid_until", label: "SMS test OTP valid until" },
     { key: "sms_twilio_account_sid", label: "Twilio account SID" },
     { key: "sms_twilio_auth_token_handle", label: "Twilio token handle" },
     { key: "sms_twilio_message_service_sid", label: "Twilio message SID" },
@@ -181,6 +187,7 @@ export const configSchemas: Record<ConfigArea, Array<{ key: string; label: strin
   functions: [
     { key: "runtime_enabled", label: "Runtime", kind: "boolean" },
     { key: "verify_jwt_by_default", label: "Verify JWT", kind: "boolean" },
+    { key: "worker_timeout_ms", label: "Worker timeout ms", kind: "number" },
     { key: "import_map", label: "Import map" },
     { key: "deployment_policy", label: "Deploy policy" },
     { key: "secret_sync_enabled", label: "Secret sync", kind: "boolean" },
@@ -198,8 +205,6 @@ export const configSchemas: Record<ConfigArea, Array<{ key: string; label: strin
     { key: "pool_mode", label: "Pool mode" },
     { key: "default_pool_size", label: "Pool size", kind: "number" },
     { key: "max_client_connections", label: "Max clients", kind: "number" },
-    { key: "transaction_port", label: "Transaction port", kind: "number" },
-    { key: "session_port", label: "Session port", kind: "number" },
   ],
   network: [
     { key: "ip_allowlist", label: "IP allowlist" },
@@ -313,6 +318,7 @@ export const platformSettingsSections: Array<ProjectSubnavItem<PlatformSettingsS
   { id: "overview", label: "Overview", description: "Platform defaults and enterprise configuration summary." },
   { id: "defaults", label: "Defaults", description: "New project domain, version, profile, tier, and backup defaults." },
   { id: "features", label: "Feature Flags", description: "Local, Compose, and enterprise feature availability." },
+  { id: "backups", label: "Backups", description: "S3-compatible backup targets for project and control-plane recovery." },
   { id: "smtp", label: "Platform SMTP", description: "Control-plane email delivery settings." },
   { id: "sso", label: "Platform SSO", description: "Global admin SAML SSO configuration." },
   { id: "scim", label: "SCIM", description: "Platform user and group provisioning status." },

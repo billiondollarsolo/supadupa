@@ -28,12 +28,44 @@ services:
       SUPADUPA_AUTH_SECRET: ${SUPADUPA_AUTH_SECRET:-}
       SUPADUPA_BOOTSTRAP_EMAIL: ${SUPADUPA_BOOTSTRAP_EMAIL:-}
       SUPADUPA_BOOTSTRAP_PASSWORD: ${SUPADUPA_BOOTSTRAP_PASSWORD:-}
-      SUPADUPA_CORS_ORIGINS: ${SUPADUPA_CORS_ORIGINS:-https://${SUPADUPA_ADMIN_HOST:-admin.supadupa.test},http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174}
+      SUPADUPA_CORS_ORIGINS: ${SUPADUPA_CORS_ORIGINS:-https://${SUPADUPA_ADMIN_HOST:-admin.supadupa.test}}
+      SUPADUPA_APPS_DOMAIN: ${SUPADUPA_APPS_DOMAIN:-}
+      SUPADUPA_PROJECT_DOMAIN: ${SUPADUPA_PROJECT_DOMAIN:-}
+      SUPADUPA_PLATFORM_DEFAULTS_FORCE: ${SUPADUPA_PLATFORM_DEFAULTS_FORCE:-}
+      SUPADUPA_DEFAULT_STACK_VERSION: ${SUPADUPA_DEFAULT_STACK_VERSION:-}
+      SUPADUPA_DEFAULT_PROFILE: ${SUPADUPA_DEFAULT_PROFILE:-}
+      SUPADUPA_DEFAULT_RESOURCE_TIER: ${SUPADUPA_DEFAULT_RESOURCE_TIER:-}
+      SUPADUPA_DEFAULT_BACKUP_SCHEDULE: ${SUPADUPA_DEFAULT_BACKUP_SCHEDULE:-}
       SUPADUPA_PROVISIONER: ${SUPADUPA_PROVISIONER:-compose}
       SUPADUPA_PROJECT_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/projects
       SUPADUPA_ROUTES_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/routes
       SUPADUPA_CERT_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/certs
       SUPADUPA_BACKUP_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/backups
+      SUPADUPA_BACKUP_TARGET_NAME: ${SUPADUPA_BACKUP_TARGET_NAME:-}
+      SUPADUPA_BACKUP_TARGET_TYPE: ${SUPADUPA_BACKUP_TARGET_TYPE:-}
+      SUPADUPA_BACKUP_TARGET_ENDPOINT: ${SUPADUPA_BACKUP_TARGET_ENDPOINT:-}
+      SUPADUPA_BACKUP_TARGET_REGION: ${SUPADUPA_BACKUP_TARGET_REGION:-}
+      SUPADUPA_BACKUP_TARGET_BUCKET: ${SUPADUPA_BACKUP_TARGET_BUCKET:-}
+      SUPADUPA_BACKUP_TARGET_PREFIX: ${SUPADUPA_BACKUP_TARGET_PREFIX:-}
+      SUPADUPA_BACKUP_TARGET_ACCESS_KEY_ID: ${SUPADUPA_BACKUP_TARGET_ACCESS_KEY_ID:-}
+      SUPADUPA_BACKUP_TARGET_SECRET_ACCESS_KEY: ${SUPADUPA_BACKUP_TARGET_SECRET_ACCESS_KEY:-}
+      SUPADUPA_BACKUP_TARGET_FORCE_PATH_STYLE: ${SUPADUPA_BACKUP_TARGET_FORCE_PATH_STYLE:-}
+      SUPADUPA_BACKUP_TARGET_AUTO_TEST: ${SUPADUPA_BACKUP_TARGET_AUTO_TEST:-}
+      SUPADUPA_BACKUP_TARGET_AUTO_TEST_TIMEOUT: ${SUPADUPA_BACKUP_TARGET_AUTO_TEST_TIMEOUT:-}
+      SUPADUPA_BACKUP_S3_NAME: ${SUPADUPA_BACKUP_S3_NAME:-}
+      SUPADUPA_BACKUP_S3_TYPE: ${SUPADUPA_BACKUP_S3_TYPE:-}
+      SUPADUPA_BACKUP_S3_ENDPOINT: ${SUPADUPA_BACKUP_S3_ENDPOINT:-}
+      SUPADUPA_BACKUP_S3_REGION: ${SUPADUPA_BACKUP_S3_REGION:-}
+      SUPADUPA_BACKUP_S3_BUCKET: ${SUPADUPA_BACKUP_S3_BUCKET:-}
+      SUPADUPA_BACKUP_S3_PREFIX: ${SUPADUPA_BACKUP_S3_PREFIX:-}
+      SUPADUPA_BACKUP_S3_ACCESS_KEY_ID: ${SUPADUPA_BACKUP_S3_ACCESS_KEY_ID:-}
+      SUPADUPA_BACKUP_S3_SECRET_ACCESS_KEY: ${SUPADUPA_BACKUP_S3_SECRET_ACCESS_KEY:-}
+      SUPADUPA_BACKUP_S3_FORCE_PATH_STYLE: ${SUPADUPA_BACKUP_S3_FORCE_PATH_STYLE:-}
+      SUPADUPA_BACKUP_S3_AUTO_TEST: ${SUPADUPA_BACKUP_S3_AUTO_TEST:-}
+      SUPADUPA_BACKUP_S3_AUTO_TEST_TIMEOUT: ${SUPADUPA_BACKUP_S3_AUTO_TEST_TIMEOUT:-}
+      SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS: ${SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS:-}
+      SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP: ${SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP:-}
+      SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE: ${SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE:-}
       SUPADUPA_COMPOSE_APPLY: ${SUPADUPA_COMPOSE_APPLY:-false}
       SUPADUPA_COMPOSE_COMMAND: ${SUPADUPA_COMPOSE_COMMAND:-docker compose}
     ports:
@@ -52,7 +84,8 @@ services:
       traefik.docker.network: supadupa-ingress
       traefik.http.routers.supadupa-api.rule: Host(`${SUPADUPA_API_HOST:-api.supadupa.test}`)
       traefik.http.routers.supadupa-api.entrypoints: websecure
-      traefik.http.routers.supadupa-api.tls.certresolver: letsencrypt
+      traefik.http.routers.supadupa-api.tls: "true"
+      traefik.http.routers.supadupa-api.tls.certresolver: ${SUPADUPA_TLS_CERT_RESOLVER-letsencrypt}
       traefik.http.routers.supadupa-api-http.rule: Host(`${SUPADUPA_API_HOST:-api.supadupa.test}`)
       traefik.http.routers.supadupa-api-http.entrypoints: web
       traefik.http.routers.supadupa-api-http.middlewares: supadupa-api-https
@@ -77,7 +110,8 @@ services:
       traefik.docker.network: supadupa-ingress
       traefik.http.routers.supadupa-admin.rule: Host(`${SUPADUPA_ADMIN_HOST:-admin.supadupa.test}`)
       traefik.http.routers.supadupa-admin.entrypoints: websecure
-      traefik.http.routers.supadupa-admin.tls.certresolver: letsencrypt
+      traefik.http.routers.supadupa-admin.tls: "true"
+      traefik.http.routers.supadupa-admin.tls.certresolver: ${SUPADUPA_TLS_CERT_RESOLVER-letsencrypt}
       traefik.http.routers.supadupa-admin-http.rule: Host(`${SUPADUPA_ADMIN_HOST:-admin.supadupa.test}`)
       traefik.http.routers.supadupa-admin-http.entrypoints: web
       traefik.http.routers.supadupa-admin-http.middlewares: supadupa-admin-https
@@ -92,24 +126,42 @@ services:
       - --api.insecure=${SUPADUPA_TRAEFIK_DASHBOARD_INSECURE:-false}
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
+      - --entrypoints.postgres.address=:5432
+      - --entrypoints.pooler.address=:6543
       - --providers.docker=true
-      - --providers.docker.endpoint=unix:///var/run/docker.sock
       - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=supadupa-ingress
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
       - --certificatesresolvers.letsencrypt.acme.email=${SUPADUPA_ACME_EMAIL:-admin@example.com}
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge.provider=${SUPADUPA_ACME_DNS_PROVIDER:-cloudflare}
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge.delaybeforecheck=${SUPADUPA_ACME_DNS_DELAY_BEFORE_CHECK:-10}
       - --log.level=${SUPADUPA_TRAEFIK_LOG_LEVEL:-INFO}
       - --accesslog=true
+    environment:
+      CF_DNS_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      AWS_SHARED_CREDENTIALS_FILE: ${AWS_SHARED_CREDENTIALS_FILE:-}
+      AWS_HOSTED_ZONE_ID: ${AWS_HOSTED_ZONE_ID:-}
     ports:
       - "${SUPADUPA_HTTP_ADDR:-0.0.0.0:80}:80"
       - "${SUPADUPA_HTTPS_ADDR:-0.0.0.0:443}:443"
+      - "${SUPADUPA_POSTGRES_ADDR:-0.0.0.0:5432}:5432"
+      - "${SUPADUPA_POOLER_ADDR:-0.0.0.0:6543}:6543"
       - "${SUPADUPA_TRAEFIK_DASHBOARD_ADDR:-127.0.0.1:8088}:8080"
     volumes:
       - ${SUPADUPA_ROUTES_HOST_DIR:-../runtime/routes}:/etc/traefik/dynamic:ro
+      - ${SUPADUPA_CERTS_HOST_DIR:-../runtime/certs}:/certs:ro
       - supadupa-letsencrypt:/letsencrypt
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - supadupa-ingress
 

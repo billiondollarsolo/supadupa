@@ -53,6 +53,10 @@ func FleetComplianceReport(ctx context.Context, store Store) (ComplianceReport, 
 	if err != nil {
 		return ComplianceReport{}, err
 	}
+	posture, err := fleetRecoveryPosture(ctx, store)
+	if err != nil {
+		return ComplianceReport{}, err
+	}
 
 	admins := 0
 	adminsWithMFA := 0
@@ -153,7 +157,15 @@ func FleetComplianceReport(ctx context.Context, store Store) (ComplianceReport, 
 		complianceControl("COM-008", "Secret rotation evidence", "secrets", []string{"SOC 2 CC6.1", "HIPAA 164.312(a)(2)(iv)"}, statusForFleet(totalProjects, counters.rotatedSecrets), []string{
 			fmt.Sprintf("%d/%d projects have rotated at least one secret", counters.rotatedSecrets, totalProjects),
 		}, "Rotate service-role, JWT, database, and storage keys on the operator's documented cadence."),
-		complianceControl("COM-009", "DPA/BAA and certification posture", "process", []string{"SOC 2", "HIPAA"}, "manual_review", []string{
+		complianceControl("COM-009", "Hosted-grade recovery guards", "recoverability", []string{"SOC 2 CC7.3", "HIPAA 164.308(a)(7)"}, statusForBool(posture.RecoveryGuardEnabled && posture.DurableUpgradeGuardEnabled), []string{
+			fmt.Sprintf("recovery-ready target guard enabled: %t", posture.RecoveryGuardEnabled),
+			fmt.Sprintf("durable upgrade backup guard enabled: %t", posture.DurableUpgradeGuardEnabled),
+		}, "Enable SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS and SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP for production control planes."),
+		complianceControl("COM-010", "Off-host recovery target readiness", "recoverability", []string{"SOC 2 CC7.3", "HIPAA 164.308(a)(7)"}, statusForBool(posture.RecoveryReadyTargets > 0 && posture.DefaultRecoveryReadyTarget), []string{
+			fmt.Sprintf("%d recovery-ready backup targets", posture.RecoveryReadyTargets),
+			fmt.Sprintf("default recovery-ready target: %t", posture.DefaultRecoveryReadyTarget),
+		}, "Configure and test a durable off-host S3/R2/remote-MinIO backup target, then mark it default or bind every policy explicitly."),
+		complianceControl("COM-011", "DPA/BAA and certification posture", "process", []string{"SOC 2", "HIPAA"}, "manual_review", []string{
 			report.DPAPosture,
 			report.Certification,
 		}, "Attach operator-owned DPA/BAA, risk assessment, incident response, and certification evidence outside the control plane."),

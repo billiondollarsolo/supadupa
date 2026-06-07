@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { clearToken, getToken, setToken } from "../api";
+import { clearToken, getToken, logoutSession, setToken } from "../api";
 
 type AuthSessionStore = {
   token: string | null;
@@ -14,6 +14,7 @@ export const useAuthSession = create<AuthSessionStore>((set) => ({
     set({ token });
   },
   logout: () => {
+    void logoutSession().catch(() => undefined);
     clearToken();
     set({ token: null });
   },

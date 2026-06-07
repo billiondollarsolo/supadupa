@@ -1,4 +1,6 @@
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { listStackReleases } from "../api";
 import { useDashboardContext } from "../lib/dashboard-context";
 import { CreateProjectPanel, ProjectCards, ProjectTable } from "./projects/panels";
 
@@ -33,12 +35,14 @@ export function ProjectsListPage() {
 
 export function CreateProjectPage() {
   const { activeOrgId, hosts, onProjectCreated, orgs, platformDefaults, setSelectedOrgId } = useDashboardContext();
+  const stackReleases = useQuery({ queryKey: ["stack-releases"], queryFn: listStackReleases });
   return (
     <CreateProjectPanel
       orgId={activeOrgId}
       orgs={orgs.data ?? []}
       hosts={hosts.data ?? []}
       defaults={platformDefaults.data}
+      stackReleases={stackReleases.data ?? []}
       onSelectOrg={setSelectedOrgId}
       onCreated={onProjectCreated}
     />

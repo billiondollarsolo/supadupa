@@ -27,6 +27,21 @@ func FleetAdvisorFindings(ctx context.Context, store Store) ([]AdvisorFinding, e
 	}
 	now := time.Now().UTC()
 	findings := []AdvisorFinding{}
+	posture, err := fleetRecoveryPosture(ctx, store)
+	if err != nil {
+		return nil, err
+	}
+	if !posture.RecoveryGuardEnabled {
+		findings = append(findings, advisorFinding(now, "platform", "high", "recoverability", "Recovery-ready target guard is disabled", "Physical backups and WAL archives can be written to local-only or untested targets.", "Set SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS=true and restart the control plane before production project traffic."))
+	}
+	if !posture.DurableUpgradeGuardEnabled {
+		findings = append(findings, advisorFinding(now, "platform", "medium", "recoverability", "Durable upgrade backup guard is disabled", "Project upgrades can proceed with local-only pre-upgrade backups.", "Set SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP=true so upgrades require a tested durable off-host backup artifact."))
+	}
+	if posture.RecoveryReadyTargets == 0 {
+		findings = append(findings, advisorFinding(now, "platform", "high", "recoverability", "No recovery-ready backup target", "No S3-compatible target is tested, durable off-host, and recovery-ready.", "Add an off-host S3/R2/remote-MinIO target, run the server-side target test, and make it the platform default."))
+	} else if !posture.DefaultRecoveryReadyTarget {
+		findings = append(findings, advisorFinding(now, "platform", "medium", "recoverability", "No default recovery-ready backup target", "At least one target is recovery-ready, but none is the platform default for control-plane and unbound project backup uploads.", "Mark a tested durable off-host target as default or bind every project backup policy explicitly."))
+	}
 	for _, project := range projects {
 		ref := project.Ref
 		if project.Status != ProjectHealthy && project.Status != ProjectPaused {

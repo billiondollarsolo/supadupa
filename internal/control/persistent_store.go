@@ -8,15 +8,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 )
 
-const controlStateCheckpointID = "default"
+const (
+	controlStateCheckpointID       = "default"
+	normalizedMetaSyncAdvisoryLock = int64(787403015222885991)
+)
 
 type PersistentStore struct {
 	*MemoryStore
 	db         *sql.DB
 	encryption persistentPayloadCipher
+	saveMu     sync.Mutex
 }
 
 type memoryStoreSnapshot struct {
@@ -59,9 +65,11 @@ type memoryStoreSnapshot struct {
 	Replicas              map[string][]ProjectReplica
 	LogDrains             map[string][]LogDrain
 	Secrets               map[string]map[string]ProjectSecret
+	BackupStorageTargets  map[string]BackupStorageTarget
 	Policies              map[string]BackupPolicy
 	PITRPolicies          map[string]PITRPolicy
 	Backups               []Backup
+	PlatformBackups       []PlatformBackup
 	WALArchives           []WALArchive
 	ProjectLogs           []ProjectLog
 	Telemetry             map[string]TelemetrySample
@@ -109,9 +117,11 @@ func emptySnapshot() memoryStoreSnapshot {
 		Replicas:              map[string][]ProjectReplica{},
 		LogDrains:             map[string][]LogDrain{},
 		Secrets:               map[string]map[string]ProjectSecret{},
+		BackupStorageTargets:  map[string]BackupStorageTarget{},
 		Policies:              map[string]BackupPolicy{},
 		PITRPolicies:          map[string]PITRPolicy{},
 		Backups:               []Backup{},
+		PlatformBackups:       []PlatformBackup{},
 		WALArchives:           []WALArchive{},
 		ProjectLogs:           []ProjectLog{},
 		Telemetry:             map[string]TelemetrySample{},
@@ -171,6 +181,10 @@ func (s *PersistentStore) load(ctx context.Context) error {
 func (s *PersistentStore) applySnapshot(snapshot memoryStoreSnapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.applySnapshotLocked(snapshot)
+}
+
+func (s *PersistentStore) applySnapshotLocked(snapshot memoryStoreSnapshot) {
 	s.platformDefaults = normalizedPlatformDefaults(snapshot.PlatformDefaults)
 	s.platformSSO = normalizedPlatformSSOConfig(snapshot.PlatformSSO)
 	s.users = nonNilMap(snapshot.Users)
@@ -210,9 +224,11 @@ func (s *PersistentStore) applySnapshot(snapshot memoryStoreSnapshot) {
 	s.replicas = nonNilSliceMap(snapshot.Replicas)
 	s.logDrains = nonNilSliceMap(snapshot.LogDrains)
 	s.secrets = nonNilNestedMap(snapshot.Secrets)
+	s.backupStorageTargets = nonNilMap(snapshot.BackupStorageTargets)
 	s.policies = nonNilMap(snapshot.Policies)
 	s.pitrPolicies = nonNilMap(snapshot.PITRPolicies)
 	s.backups = append([]Backup(nil), snapshot.Backups...)
+	s.platformBackups = append([]PlatformBackup(nil), snapshot.PlatformBackups...)
 	s.walArchives = append([]WALArchive(nil), snapshot.WALArchives...)
 	s.projectLogs = append([]ProjectLog(nil), snapshot.ProjectLogs...)
 	s.telemetry = nonNilMap(snapshot.Telemetry)
@@ -259,14 +275,14 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 		return snapshot, fmt.Errorf("iterate normalized platform defaults: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT enabled, provider, idp_entity_id, sso_url, certificate_pem, acs_url, metadata_url, email_domain, auto_provision, default_role, updated_at FROM platform_sso WHERE id = $1`, controlStateCheckpointID)
+	rows, err = s.db.QueryContext(ctx, `SELECT enabled, provider, idp_entity_id, sso_url, certificate_pem, acs_url, metadata_url, email_domain, auto_provision, default_role, COALESCE(scim_enabled, false), COALESCE(scim_token_hash, ''), updated_at FROM platform_sso WHERE id = $1`, controlStateCheckpointID)
 	if err != nil {
 		return snapshot, fmt.Errorf("load normalized platform sso: %w", err)
 	}
 	for rows.Next() {
 		var config PlatformSSOConfig
 		var certificate, metadataURL, emailDomain sql.NullString
-		if err := rows.Scan(&config.Enabled, &config.Provider, &config.IDPEntityID, &config.SSOURL, &certificate, &config.ACSURL, &metadataURL, &emailDomain, &config.AutoProvision, &config.DefaultRole, &config.UpdatedAt); err != nil {
+		if err := rows.Scan(&config.Enabled, &config.Provider, &config.IDPEntityID, &config.SSOURL, &certificate, &config.ACSURL, &metadataURL, &emailDomain, &config.AutoProvision, &config.DefaultRole, &config.SCIMEnabled, &config.SCIMTokenHash, &config.UpdatedAt); err != nil {
 			rows.Close()
 			return snapshot, fmt.Errorf("scan normalized platform sso: %w", err)
 		}
@@ -1361,16 +1377,23 @@ FROM network_connections`)
 		return fmt.Errorf("iterate normalized network connections: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT project_id, fqdn, cert_status, created_at, updated_at FROM domains`)
+	rows, err = s.db.QueryContext(ctx, `SELECT project_id, fqdn, cert_status, cert_mode, cert_fingerprint, cert_not_after, created_at, updated_at FROM domains`)
 	if err != nil {
 		return fmt.Errorf("load normalized domains: %w", err)
 	}
 	for rows.Next() {
 		var projectID string
 		var domain ProjectDomain
-		if err := rows.Scan(&projectID, &domain.FQDN, &domain.CertStatus, &domain.CreatedAt, &domain.UpdatedAt); err != nil {
+		var fingerprint sql.NullString
+		var notAfter sql.NullTime
+		if err := rows.Scan(&projectID, &domain.FQDN, &domain.CertStatus, &domain.CertMode, &fingerprint, &notAfter, &domain.CreatedAt, &domain.UpdatedAt); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan normalized domain: %w", err)
+		}
+		domain.CertFingerprint = fingerprint.String
+		if notAfter.Valid {
+			value := notAfter.Time.UTC()
+			domain.CertNotAfter = &value
 		}
 		ref, ok := projectRefs[projectID]
 		if !ok {
@@ -1458,7 +1481,7 @@ FROM network_connections`)
 	}
 
 	rows, err = s.db.QueryContext(ctx, `
-SELECT pb.id, source.ref, branch.ref, pb.name, pb.status, pb.created_at, pb.expires_at
+SELECT pb.id, source.ref, branch.ref, pb.name, pb.with_data, pb.status, pb.created_at, pb.expires_at
 FROM project_branches pb
 JOIN projects source ON source.id = pb.source_project_id
 JOIN projects branch ON branch.id = pb.branch_project_id`)
@@ -1468,7 +1491,7 @@ JOIN projects branch ON branch.id = pb.branch_project_id`)
 	for rows.Next() {
 		var branch ProjectBranch
 		var expiresAt sql.NullTime
-		if err := rows.Scan(&branch.ID, &branch.SourceProjectRef, &branch.ProjectRef, &branch.Name, &branch.Status, &branch.CreatedAt, &expiresAt); err != nil {
+		if err := rows.Scan(&branch.ID, &branch.SourceProjectRef, &branch.ProjectRef, &branch.Name, &branch.WithData, &branch.Status, &branch.CreatedAt, &expiresAt); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan normalized project branch: %w", err)
 		}
@@ -1570,15 +1593,15 @@ JOIN projects branch ON branch.id = pb.branch_project_id`)
 		return fmt.Errorf("iterate normalized pitr policies: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT project_id, id, kind, location, size_bytes, checksum_sha256, status, created_at, verified_at FROM backups`)
+	rows, err = s.db.QueryContext(ctx, `SELECT project_id, id, kind, location, remote_location, storage_target_id, size_bytes, checksum_sha256, status, started_at, finished_at, created_at, verified_at FROM backups`)
 	if err != nil {
 		return fmt.Errorf("load normalized backups: %w", err)
 	}
 	for rows.Next() {
 		var projectID string
 		var backup Backup
-		var verifiedAt sql.NullTime
-		if err := rows.Scan(&projectID, &backup.ID, &backup.Kind, &backup.Location, &backup.SizeBytes, &backup.ChecksumSHA256, &backup.Status, &backup.CreatedAt, &verifiedAt); err != nil {
+		var startedAt, finishedAt, verifiedAt sql.NullTime
+		if err := rows.Scan(&projectID, &backup.ID, &backup.Kind, &backup.Location, &backup.RemoteLocation, &backup.StorageTargetID, &backup.SizeBytes, &backup.ChecksumSHA256, &backup.Status, &startedAt, &finishedAt, &backup.CreatedAt, &verifiedAt); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan normalized backup: %w", err)
 		}
@@ -1587,6 +1610,12 @@ JOIN projects branch ON branch.id = pb.branch_project_id`)
 			continue
 		}
 		backup.ProjectRef = ref
+		if startedAt.Valid {
+			backup.StartedAt = startedAt.Time
+		} else {
+			backup.StartedAt = backup.CreatedAt
+		}
+		backup.FinishedAt = timePtr(finishedAt)
 		backup.VerifiedAt = timePtr(verifiedAt)
 		snapshot.Backups = append(snapshot.Backups, backup)
 	}
@@ -1597,7 +1626,7 @@ JOIN projects branch ON branch.id = pb.branch_project_id`)
 		return fmt.Errorf("iterate normalized backups: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT project_id, id, segment, location, size_bytes, checksum_sha256, status, created_at, verified_at FROM wal_archives`)
+	rows, err = s.db.QueryContext(ctx, `SELECT project_id, id, segment, segment_source, location, remote_location, storage_target_id, size_bytes, checksum_sha256, status, created_at, verified_at FROM wal_archives`)
 	if err != nil {
 		return fmt.Errorf("load normalized wal archives: %w", err)
 	}
@@ -1605,7 +1634,7 @@ JOIN projects branch ON branch.id = pb.branch_project_id`)
 		var projectID string
 		var archive WALArchive
 		var verifiedAt sql.NullTime
-		if err := rows.Scan(&projectID, &archive.ID, &archive.Segment, &archive.Location, &archive.SizeBytes, &archive.ChecksumSHA256, &archive.Status, &archive.CreatedAt, &verifiedAt); err != nil {
+		if err := rows.Scan(&projectID, &archive.ID, &archive.Segment, &archive.SegmentSource, &archive.Location, &archive.RemoteLocation, &archive.StorageTargetID, &archive.SizeBytes, &archive.ChecksumSHA256, &archive.Status, &archive.CreatedAt, &verifiedAt); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan normalized wal archive: %w", err)
 		}
@@ -1684,6 +1713,9 @@ JOIN projects branch ON branch.id = pb.branch_project_id`)
 }
 
 func (s *PersistentStore) save(ctx context.Context) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	snapshot := s.snapshot()
 	payload, err := s.encodeSnapshot(snapshot)
 	if err != nil {
@@ -1746,9 +1778,11 @@ func (s *PersistentStore) snapshot() memoryStoreSnapshot {
 		Replicas:              cloneSliceMap(s.replicas),
 		LogDrains:             cloneSliceMap(s.logDrains),
 		Secrets:               cloneNestedMap(s.secrets),
+		BackupStorageTargets:  cloneMap(s.backupStorageTargets),
 		Policies:              cloneMap(s.policies),
 		PITRPolicies:          cloneMap(s.pitrPolicies),
 		Backups:               append([]Backup(nil), s.backups...),
+		PlatformBackups:       append([]PlatformBackup(nil), s.platformBackups...),
 		WALArchives:           append([]WALArchive(nil), s.walArchives...),
 		ProjectLogs:           append([]ProjectLog(nil), s.projectLogs...),
 		Telemetry:             cloneMap(s.telemetry),
@@ -1768,12 +1802,109 @@ func (s *PersistentStore) encodeSnapshot(snapshot memoryStoreSnapshot) ([]byte, 
 	return payload, nil
 }
 
+func (s *PersistentStore) ExportControlPlaneCheckpoint(ctx context.Context) ([]byte, error) {
+	var payload []byte
+	err := s.db.QueryRowContext(ctx, `SELECT state FROM control_state_checkpoints WHERE id = $1`, controlStateCheckpointID).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		if err := s.save(ctx); err != nil {
+			return nil, err
+		}
+		err = s.db.QueryRowContext(ctx, `SELECT state FROM control_state_checkpoints WHERE id = $1`, controlStateCheckpointID).Scan(&payload)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("export control-plane checkpoint: %w", err)
+	}
+	return append([]byte(nil), payload...), nil
+}
+
+func (s *PersistentStore) ImportControlPlaneCheckpoint(ctx context.Context, payload []byte, preservedPlatformBackups ...PlatformBackup) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("control-plane checkpoint payload is empty")
+	}
+	plaintext, err := s.encryption.Decrypt(payload)
+	if err != nil {
+		return fmt.Errorf("decrypt control-plane checkpoint: %w", err)
+	}
+	var snapshot memoryStoreSnapshot
+	if err := gob.NewDecoder(bytes.NewReader(plaintext)).Decode(&snapshot); err != nil {
+		return fmt.Errorf("decode control-plane checkpoint: %w", err)
+	}
+	preservePlatformBackups(&snapshot, preservedPlatformBackups)
+	checkpointPayload, err := s.encodeSnapshot(snapshot)
+	if err != nil {
+		return err
+	}
+
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin control-plane checkpoint import: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO control_state_checkpoints (id, state, updated_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = EXCLUDED.updated_at`,
+		controlStateCheckpointID, checkpointPayload, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("import control-plane checkpoint: %w", err)
+	}
+	if err := s.syncNormalizedTablesTx(ctx, tx, snapshot); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit control-plane checkpoint import: %w", err)
+	}
+	s.applySnapshotLocked(snapshot)
+	return nil
+}
+
+func preservePlatformBackups(snapshot *memoryStoreSnapshot, backups []PlatformBackup) {
+	if snapshot == nil {
+		return
+	}
+	for _, backup := range backups {
+		if strings.TrimSpace(backup.ID) == "" {
+			continue
+		}
+		exists := false
+		for _, existing := range snapshot.PlatformBackups {
+			if existing.ID == backup.ID {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			snapshot.PlatformBackups = append(snapshot.PlatformBackups, backup)
+		}
+	}
+}
+
 func (s *PersistentStore) syncNormalizedTables(ctx context.Context, snapshot memoryStoreSnapshot) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin normalized meta sync: %w", err)
 	}
 	defer tx.Rollback()
+
+	if err := s.syncNormalizedTablesTx(ctx, tx, snapshot); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit normalized meta sync: %w", err)
+	}
+	return nil
+}
+
+func (s *PersistentStore) syncNormalizedTablesTx(ctx context.Context, tx *sql.Tx, snapshot memoryStoreSnapshot) error {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, normalizedMetaSyncAdvisoryLock); err != nil {
+		return fmt.Errorf("lock normalized meta sync: %w", err)
+	}
 
 	for _, statement := range []string{
 		`DELETE FROM audit_events`,
@@ -1859,9 +1990,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, NULLIF($11, ''), NU
 	}
 	sso := normalizedPlatformSSOConfig(snapshot.PlatformSSO)
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO platform_sso (id, enabled, provider, idp_entity_id, sso_url, certificate_pem, acs_url, metadata_url, email_domain, auto_provision, default_role, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-		controlStateCheckpointID, sso.Enabled, sso.Provider, sso.IDPEntityID, sso.SSOURL, nullString(sso.Certificate), sso.ACSURL, nullString(sso.MetadataURL), nullString(sso.EmailDomain), sso.AutoProvision, sso.DefaultRole, sso.UpdatedAt); err != nil {
+INSERT INTO platform_sso (id, enabled, provider, idp_entity_id, sso_url, certificate_pem, acs_url, metadata_url, email_domain, auto_provision, default_role, scim_enabled, scim_token_hash, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		controlStateCheckpointID, sso.Enabled, sso.Provider, sso.IDPEntityID, sso.SSOURL, nullString(sso.Certificate), sso.ACSURL, nullString(sso.MetadataURL), nullString(sso.EmailDomain), sso.AutoProvision, sso.DefaultRole, sso.SCIMEnabled, nullString(sso.SCIMTokenHash), sso.UpdatedAt); err != nil {
 		return fmt.Errorf("sync platform sso: %w", err)
 	}
 	for _, user := range snapshot.Users {
@@ -2352,8 +2483,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, connection.ID,
 		}
 		for _, domain := range domains {
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO domains (project_id, fqdn, cert_status, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5)`, projectID, domain.FQDN, domain.CertStatus, domain.CreatedAt, domain.UpdatedAt); err != nil {
+INSERT INTO domains (project_id, fqdn, cert_status, cert_mode, cert_fingerprint, cert_not_after, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, projectID, domain.FQDN, domain.CertStatus, domain.CertMode, nullString(domain.CertFingerprint), nullTimePtr(domain.CertNotAfter), domain.CreatedAt, domain.UpdatedAt); err != nil {
 				return fmt.Errorf("sync domain %s/%s: %w", ref, domain.FQDN, err)
 			}
 		}
@@ -2403,8 +2534,8 @@ VALUES ($1, $2, $3, $4, $5, $6)`, secret.ID, projectID, secret.Kind, encryptedVa
 				continue
 			}
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO project_branches (id, source_project_id, branch_project_id, name, status, created_at, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`, branch.ID, sourceID, branchProjectID, branch.Name, branch.Status, branch.CreatedAt, branch.ExpiresAt); err != nil {
+INSERT INTO project_branches (id, source_project_id, branch_project_id, name, with_data, status, created_at, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, branch.ID, sourceID, branchProjectID, branch.Name, branch.WithData, branch.Status, branch.CreatedAt, branch.ExpiresAt); err != nil {
 				return fmt.Errorf("sync branch %s/%s: %w", ref, branch.ProjectRef, err)
 			}
 		}
@@ -2459,8 +2590,8 @@ VALUES ($1, $2, $3, $4, $5, $6)`, projectID, policy.Enabled, policy.ArchiveBucke
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO backups (id, project_id, kind, location, size_bytes, checksum_sha256, status, created_at, verified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, backup.ID, projectID, backup.Kind, backup.Location, backup.SizeBytes, backup.ChecksumSHA256, backup.Status, backup.CreatedAt, backup.VerifiedAt); err != nil {
+INSERT INTO backups (id, project_id, kind, location, remote_location, storage_target_id, size_bytes, checksum_sha256, status, started_at, finished_at, created_at, verified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, backup.ID, projectID, backup.Kind, backup.Location, backup.RemoteLocation, backup.StorageTargetID, backup.SizeBytes, backup.ChecksumSHA256, backup.Status, backup.StartedAt, backup.FinishedAt, backup.CreatedAt, backup.VerifiedAt); err != nil {
 			return fmt.Errorf("sync backup %s: %w", backup.ID, err)
 		}
 	}
@@ -2470,8 +2601,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, backup.ID, projectID, backup.Kind,
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO wal_archives (id, project_id, segment, location, size_bytes, checksum_sha256, status, created_at, verified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, archive.ID, projectID, archive.Segment, archive.Location, archive.SizeBytes, archive.ChecksumSHA256, archive.Status, archive.CreatedAt, archive.VerifiedAt); err != nil {
+INSERT INTO wal_archives (id, project_id, segment, segment_source, location, remote_location, storage_target_id, size_bytes, checksum_sha256, status, created_at, verified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`, archive.ID, projectID, archive.Segment, archive.SegmentSource, archive.Location, archive.RemoteLocation, archive.StorageTargetID, archive.SizeBytes, archive.ChecksumSHA256, archive.Status, archive.CreatedAt, archive.VerifiedAt); err != nil {
 			return fmt.Errorf("sync wal archive %s: %w", archive.ID, err)
 		}
 	}
@@ -2502,9 +2633,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, event.ID, nullString(event.ActorID
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit normalized meta sync: %w", err)
-	}
 	return nil
 }
 
@@ -2542,6 +2670,13 @@ func nullTime(value time.Time) any {
 		return nil
 	}
 	return value
+}
+
+func nullTimePtr(value *time.Time) any {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	return value.UTC()
 }
 
 func timePtr(value sql.NullTime) *time.Time {
@@ -2777,6 +2912,11 @@ func (s *PersistentStore) UpdateProjectDomainCertStatus(ctx context.Context, ref
 	return domain, s.checkpoint(ctx, err)
 }
 
+func (s *PersistentStore) UpdateProjectDomainCertificate(ctx context.Context, ref string, fqdn string, metadata ProjectDomainCertificateMetadata) (ProjectDomain, error) {
+	domain, err := s.MemoryStore.UpdateProjectDomainCertificate(ctx, ref, fqdn, metadata)
+	return domain, s.checkpoint(ctx, err)
+}
+
 func (s *PersistentStore) DeleteProjectDomain(ctx context.Context, ref string, fqdn string) error {
 	err := s.MemoryStore.DeleteProjectDomain(ctx, ref, fqdn)
 	return s.checkpoint(ctx, err)
@@ -2982,6 +3122,16 @@ func (s *PersistentStore) EnsureProjectSecrets(ctx context.Context, ref string) 
 	return secrets, s.checkpoint(ctx, err)
 }
 
+func (s *PersistentStore) UpsertProjectSecret(ctx context.Context, ref string, kind string, input ProjectSecretInput) (ProjectSecret, error) {
+	secret, err := s.MemoryStore.UpsertProjectSecret(ctx, ref, kind, input)
+	return secret, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) DeleteProjectSecret(ctx context.Context, ref string, kind string) error {
+	err := s.MemoryStore.DeleteProjectSecret(ctx, ref, kind)
+	return s.checkpoint(ctx, err)
+}
+
 func (s *PersistentStore) RotateProjectSecret(ctx context.Context, ref string, kind string) (ProjectSecret, error) {
 	secret, err := s.MemoryStore.RotateProjectSecret(ctx, ref, kind)
 	return secret, s.checkpoint(ctx, err)
@@ -2990,6 +3140,31 @@ func (s *PersistentStore) RotateProjectSecret(ctx context.Context, ref string, k
 func (s *PersistentStore) CreateBackup(ctx context.Context, input BackupInput) (Backup, error) {
 	backup, err := s.MemoryStore.CreateBackup(ctx, input)
 	return backup, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) CreatePlatformBackup(ctx context.Context, input PlatformBackupInput) (PlatformBackup, error) {
+	backup, err := s.MemoryStore.CreatePlatformBackup(ctx, input)
+	return backup, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) CreateBackupStorageTarget(ctx context.Context, input BackupStorageTargetInput) (BackupStorageTarget, error) {
+	target, err := s.MemoryStore.CreateBackupStorageTarget(ctx, input)
+	return target, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) UpdateBackupStorageTarget(ctx context.Context, id string, input BackupStorageTargetInput) (BackupStorageTarget, error) {
+	target, err := s.MemoryStore.UpdateBackupStorageTarget(ctx, id, input)
+	return target, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) UpdateBackupStorageTargetTestResult(ctx context.Context, id string, testedAt time.Time, status string, message string) (BackupStorageTarget, error) {
+	target, err := s.MemoryStore.UpdateBackupStorageTargetTestResult(ctx, id, testedAt, status, message)
+	return target, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) DeleteBackupStorageTarget(ctx context.Context, id string) error {
+	err := s.MemoryStore.DeleteBackupStorageTarget(ctx, id)
+	return s.checkpoint(ctx, err)
 }
 
 func (s *PersistentStore) UpdateBackupPolicy(ctx context.Context, ref string, input BackupPolicyInput) (BackupPolicy, error) {

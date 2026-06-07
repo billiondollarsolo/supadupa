@@ -1,6 +1,7 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
+import type { ColumnDef } from "@tanstack/react-table";
 import { ArrowLeft, Globe2, Plus, RadioTower, Save, SlidersHorizontal, Trash2, X } from "lucide-react";
 import {
   addProjectDomain,
@@ -8,9 +9,12 @@ import {
   deleteProjectDomain,
   deleteProjectNetworkConnection,
   destroyProject,
+  resetProjectDomainCertificate,
   updateProjectConfig,
   updateProjectServices,
+  uploadProjectDomainCertificate,
 } from "../../api";
+import { DataTable } from "../../components/data-table";
 import { Modal } from "../../components/modal";
 import {
   configAreaLabels,
@@ -18,7 +22,7 @@ import {
   projectServiceLabels,
   type ConfigArea,
 } from "../../lib/project-config";
-import { formatTime } from "../../lib/format";
+import { formatDateTime, formatTime } from "../../lib/format";
 import { parseKeyValueLines, parseLines } from "../../lib/parse";
 import type { Project, ProjectConfig, ProjectDomain, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectServices } from "../../types";
 
@@ -40,10 +44,10 @@ function ConfigResourceCard({ detail, label, meta, status, onClick }: { label: s
     <button className="rounded-md border border-border bg-bg p-3 text-left transition hover:border-border-strong hover:bg-surface-2" onClick={onClick} type="button">
       <div className="mb-3 flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="truncate font-mono text-sm font-medium">{label}</p>
-          <p className="truncate text-xs text-faint">{meta}</p>
+          <p className="truncate text-sm font-medium">{label}</p>
+          <p className="truncate font-mono text-xs text-faint">{meta}</p>
         </div>
-        <span className={`pill ${status === "issued" || status === "active" ? "healthy" : "provisioning"}`}>{status}</span>
+        <span className={`pill ${status === "active" || status === "ready" || status === "validated" ? "healthy" : ""}`}>{status}</span>
       </div>
       <p className="truncate text-xs text-muted">{detail}</p>
     </button>
@@ -59,9 +63,13 @@ export function DomainsPanel({ project, domains, loading, enabled }: { project?:
   const selectedDomain = selectedFqdn && selectedFqdn !== "new" ? domains.find((domain) => domain.fqdn === selectedFqdn) : undefined;
   const basePath = project ? `/projects/${project.ref}/config/domains` : "";
   const [fqdn, setFqdn] = useState("");
+  const [certificatePEM, setCertificatePEM] = useState("");
+  const [privateKeyPEM, setPrivateKeyPEM] = useState("");
   const invalidate = (ref: string) => {
     void queryClient.invalidateQueries({ queryKey: ["project-domains", ref] });
-    void queryClient.invalidateQueries({ queryKey: ["project-routes", ref] });
+    void queryClient.invalidateQueries({ queryKey: ["connect", ref] });
+    void queryClient.invalidateQueries({ queryKey: ["cli-profile", ref] });
+    void queryClient.invalidateQueries({ queryKey: ["project-route-manifest", ref] });
     void queryClient.invalidateQueries({ queryKey: ["project-logs", ref] });
     void queryClient.invalidateQueries({ queryKey: ["audit-events"] });
   };
@@ -77,6 +85,49 @@ export function DomainsPanel({ project, domains, loading, enabled }: { project?:
     mutationFn: ({ ref, domain }: { ref: string; domain: string }) => deleteProjectDomain(ref, domain),
     onSuccess: (_, variables) => invalidate(variables.ref),
   });
+  const uploadCertMutation = useMutation({
+    mutationFn: ({ ref, domain, cert, key }: { ref: string; domain: string; cert: string; key: string }) => uploadProjectDomainCertificate(ref, domain, cert, key),
+    onSuccess: (_, variables) => {
+      setCertificatePEM("");
+      setPrivateKeyPEM("");
+      invalidate(variables.ref);
+    },
+  });
+  const resetCertMutation = useMutation({
+    mutationFn: ({ ref, domain }: { ref: string; domain: string }) => resetProjectDomainCertificate(ref, domain),
+    onSuccess: (_, variables) => invalidate(variables.ref),
+  });
+  const domainColumns = useMemo<ColumnDef<ProjectDomain>[]>(() => [
+    {
+      accessorKey: "fqdn",
+      header: "Domain",
+      cell: ({ row }) => (
+        <button className="font-mono text-sm text-primary" onClick={() => basePath && void navigate({ to: `${basePath}/${encodeURIComponent(row.original.fqdn)}` })} type="button">
+          {row.original.fqdn}
+        </button>
+      ),
+    },
+    {
+      accessorKey: "cert_status",
+      header: "Certificate",
+      cell: ({ row }) => <span className="pill">{row.original.cert_status}</span>,
+    },
+    {
+      accessorKey: "cert_mode",
+      header: "Mode",
+      cell: ({ row }) => row.original.cert_mode || "acme",
+    },
+    {
+      accessorKey: "cert_not_after",
+      header: "Expires",
+      cell: ({ row }) => row.original.cert_not_after ? formatDateTime(row.original.cert_not_after) : "Automatic",
+    },
+    {
+      accessorKey: "updated_at",
+      header: "Updated",
+      cell: ({ row }) => formatDateTime(row.original.updated_at),
+    },
+  ], [basePath, navigate]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -107,20 +158,8 @@ export function DomainsPanel({ project, domains, loading, enabled }: { project?:
             <Plus size={14} />
             Add domain
           </button>
-          <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
-            {loading ? <p className="text-sm text-muted">Loading domains...</p> : null}
-            {!loading && domains.length === 0 ? <p className="text-sm text-muted">No custom domains configured.</p> : null}
-            {domains.map((domain) => (
-              <ConfigResourceCard
-                detail="Custom ingress domain for this project."
-                key={domain.fqdn}
-                label={domain.fqdn}
-                meta="Certificate"
-                status={domain.cert_status}
-                onClick={() => basePath && void navigate({ to: `${basePath}/${encodeURIComponent(domain.fqdn)}` })}
-              />
-            ))}
-          </div>
+          {loading ? <p className="text-sm text-muted">Loading domains...</p> : null}
+          {!loading ? <DataTable columns={domainColumns} data={domains} emptyText="No custom domains configured." minWidth={760} /> : null}
         </div>
       ) : null}
       {selectedItem === "new" ? (
@@ -148,8 +187,37 @@ export function DomainsPanel({ project, domains, loading, enabled }: { project?:
             <div className="grid gap-2">
               <div className="metric-grid">
                 <div className="metric-cell"><p className="label">Certificate</p><p className="text-sm font-medium">{selectedDomain.cert_status}</p></div>
+                <div className="metric-cell"><p className="label">Mode</p><p className="text-sm font-medium">{selectedDomain.cert_mode || "acme"}</p></div>
                 <div className="metric-cell"><p className="label">FQDN</p><p className="truncate font-mono text-sm font-medium">{selectedDomain.fqdn}</p></div>
+                <div className="metric-cell"><p className="label">Expires</p><p className="text-sm font-medium">{selectedDomain.cert_not_after ? formatDateTime(selectedDomain.cert_not_after) : "Automatic"}</p></div>
               </div>
+              {selectedDomain.cert_fingerprint ? (
+                <div className="rounded-md border border-border bg-bg p-3">
+                  <p className="label">Fingerprint</p>
+                  <p className="mt-1 break-all font-mono text-xs text-muted">{selectedDomain.cert_fingerprint}</p>
+                </div>
+              ) : null}
+              <form className="grid gap-2 rounded-md border border-border bg-bg p-3" onSubmit={(event) => {
+                event.preventDefault();
+                if (project && certificatePEM.trim() && privateKeyPEM.trim()) {
+                  uploadCertMutation.mutate({ ref: project.ref, domain: selectedDomain.fqdn, cert: certificatePEM, key: privateKeyPEM });
+                }
+              }}>
+                <p className="label">Bring your own certificate</p>
+                <textarea className="input min-h-28 font-mono text-xs" placeholder="-----BEGIN CERTIFICATE-----" value={certificatePEM} onChange={(event) => setCertificatePEM(event.target.value)} />
+                <textarea className="input min-h-28 font-mono text-xs" placeholder="-----BEGIN PRIVATE KEY-----" value={privateKeyPEM} onChange={(event) => setPrivateKeyPEM(event.target.value)} />
+                <div className="flex gap-2 max-sm:flex-col">
+                  <button className="button secondary justify-center" disabled={!project || uploadCertMutation.isPending || !certificatePEM.trim() || !privateKeyPEM.trim()} type="submit">
+                    <Save size={14} />
+                    Upload certificate
+                  </button>
+                  <button className="button secondary justify-center" disabled={!project || resetCertMutation.isPending || selectedDomain.cert_mode !== "byo"} onClick={() => project && resetCertMutation.mutate({ ref: project.ref, domain: selectedDomain.fqdn })} type="button">
+                    Reset to ACME
+                  </button>
+                </div>
+                {uploadCertMutation.error ? <p className="text-sm text-danger">{String(uploadCertMutation.error)}</p> : null}
+                {resetCertMutation.error ? <p className="text-sm text-danger">{String(resetCertMutation.error)}</p> : null}
+              </form>
               <button className="button danger w-fit" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, domain: selectedDomain.fqdn })} type="button">
                 <X size={14} />
                 Remove domain
@@ -431,7 +499,7 @@ export function ConfigPanel({
     onSuccess: (_, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["project-config", variables.ref, variables.nextArea] });
       if (variables.nextArea === "network") {
-        void queryClient.invalidateQueries({ queryKey: ["project-routes", variables.ref] });
+        void queryClient.invalidateQueries({ queryKey: ["project-route-manifest", variables.ref] });
         void queryClient.invalidateQueries({ queryKey: ["network-policy", variables.ref] });
       }
       void queryClient.invalidateQueries({ queryKey: ["project-logs", variables.ref] });
@@ -523,7 +591,7 @@ export function DangerZonePanel({ onDestroyed, project }: { project?: Project; o
       void queryClient.removeQueries({ queryKey: ["connect", ref] });
       void queryClient.removeQueries({ queryKey: ["cli-profile", ref] });
       void queryClient.removeQueries({ queryKey: ["project-metrics", ref] });
-      void queryClient.removeQueries({ queryKey: ["project-routes", ref] });
+      void queryClient.removeQueries({ queryKey: ["project-route-manifest", ref] });
       void queryClient.removeQueries({ queryKey: ["project-domains", ref] });
       void queryClient.removeQueries({ queryKey: ["project-config", ref] });
       void queryClient.removeQueries({ queryKey: ["project-services", ref] });

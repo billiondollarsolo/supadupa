@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 const testCertificatePEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
@@ -442,16 +444,16 @@ func TestClientProjectBackupAndPITRPolicyRequests(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/backups/policy":
-			_, _ = w.Write([]byte(`{"project_ref":"alpha","enabled":true,"schedule":"daily","kind":"logical","last_run_at":"2026-06-05T01:00:00Z","next_run_at":"2026-06-06T02:00:00Z","updated_at":"2026-06-05T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"project_ref":"alpha","enabled":true,"schedule":"daily","kind":"logical","storage_target_id":"target_1","last_run_at":"2026-06-05T01:00:00Z","next_run_at":"2026-06-06T02:00:00Z","updated_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/projects/alpha/backups/policy":
 			var got ProjectBackupPolicyInput
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if !got.Enabled || got.Schedule != "hourly" || got.Kind != "logical" {
+			if !got.Enabled || got.Schedule != "hourly" || got.Kind != "physical" || got.StorageTargetID != "target_2" {
 				t.Fatalf("unexpected backup policy payload %#v", got)
 			}
-			_, _ = w.Write([]byte(`{"project_ref":"alpha","enabled":true,"schedule":"hourly","kind":"logical","next_run_at":"2026-06-05T13:00:00Z","updated_at":"2026-06-05T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"project_ref":"alpha","enabled":true,"schedule":"hourly","kind":"physical","storage_target_id":"target_2","next_run_at":"2026-06-05T13:00:00Z","updated_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/pitr/policy":
 			_, _ = w.Write([]byte(`{"project_ref":"alpha","enabled":false,"archive_bucket":"","retention_days":7,"updated_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/projects/alpha/pitr/policy":
@@ -477,14 +479,14 @@ func TestClientProjectBackupAndPITRPolicyRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get backup policy: %v", err)
 	}
-	if backupPolicy.ProjectRef != "alpha" || backupPolicy.Schedule != "daily" || backupPolicy.LastRunAt == nil || backupPolicy.NextRunAt == nil {
+	if backupPolicy.ProjectRef != "alpha" || backupPolicy.Schedule != "daily" || backupPolicy.StorageTargetID != "target_1" || backupPolicy.LastRunAt == nil || backupPolicy.NextRunAt == nil {
 		t.Fatalf("unexpected backup policy %#v", backupPolicy)
 	}
-	backupPolicy, err = client.UpdateProjectBackupPolicy(context.Background(), "alpha", ProjectBackupPolicyInput{Enabled: true, Schedule: "hourly", Kind: "logical"})
+	backupPolicy, err = client.UpdateProjectBackupPolicy(context.Background(), "alpha", ProjectBackupPolicyInput{Enabled: true, Schedule: "hourly", Kind: "physical", StorageTargetID: "target_2"})
 	if err != nil {
 		t.Fatalf("update backup policy: %v", err)
 	}
-	if backupPolicy.Schedule != "hourly" || backupPolicy.NextRunAt == nil {
+	if backupPolicy.Schedule != "hourly" || backupPolicy.Kind != "physical" || backupPolicy.StorageTargetID != "target_2" || backupPolicy.NextRunAt == nil {
 		t.Fatalf("unexpected updated backup policy %#v", backupPolicy)
 	}
 	pitrPolicy, err := client.GetProjectPITRPolicy(context.Background(), "alpha")
@@ -513,6 +515,132 @@ func TestClientProjectBackupAndPITRPolicyRequests(t *testing.T) {
 	}
 }
 
+func TestClientBackupStorageTargetLifecycleRequests(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/backup-storage-targets":
+			var got BackupStorageTargetInput
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Name != "R2" || got.Endpoint != "https://account.r2.cloudflarestorage.com" || got.Bucket != "supadupa" || got.SecretAccessKey != "secret-key" || !got.Default {
+				t.Fatalf("unexpected target create payload %#v", got)
+			}
+			_, _ = w.Write([]byte(`{"id":"target_1","name":"R2","type":"s3","endpoint":"https://account.r2.cloudflarestorage.com","region":"auto","bucket":"supadupa","prefix":"prod","access_key_id":"access-key","secret_configured":true,"force_path_style":true,"default":true,"durable_off_host":true,"recovery_ready":false,"readiness_status":"validation-pending","created_at":"2026-06-05T12:00:00Z","updated_at":"2026-06-05T12:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backup-storage-targets":
+			_, _ = w.Write([]byte(`[{"id":"target_1","name":"R2","type":"s3","endpoint":"https://account.r2.cloudflarestorage.com","region":"auto","bucket":"supadupa","prefix":"prod","access_key_id":"access-key","secret_configured":true,"force_path_style":true,"default":true,"durable_off_host":true,"recovery_ready":true,"readiness_status":"off-host-ready","last_tested_at":"2026-06-05T12:30:00Z","last_test_status":"passed","created_at":"2026-06-05T12:00:00Z","updated_at":"2026-06-05T12:30:00Z"}]`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/backup-storage-targets/target_1":
+			var got BackupStorageTargetInput
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Name != "R2" || got.Bucket != "supadupa-new" || got.SecretAccessKey != "" || !got.ForcePathStyle {
+				t.Fatalf("unexpected target update payload %#v", got)
+			}
+			_, _ = w.Write([]byte(`{"id":"target_1","name":"R2","type":"s3","endpoint":"https://account.r2.cloudflarestorage.com","region":"auto","bucket":"supadupa-new","prefix":"prod","access_key_id":"access-key","secret_configured":true,"force_path_style":true,"default":true,"durable_off_host":true,"recovery_ready":true,"readiness_status":"off-host-ready","last_test_status":"passed","created_at":"2026-06-05T12:00:00Z","updated_at":"2026-06-05T12:30:00Z"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/backup-storage-targets/target_1/test":
+			_, _ = w.Write([]byte(`{"id":"target_1","name":"R2","type":"s3","endpoint":"https://account.r2.cloudflarestorage.com","region":"auto","bucket":"supadupa-new","secret_configured":true,"durable_off_host":true,"recovery_ready":true,"readiness_status":"off-host-ready","last_test_status":"passed","last_tested_at":"2026-06-05T12:45:00Z"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/backup-storage-targets/target_1":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := client.CreateBackupStorageTarget(context.Background(), BackupStorageTargetInput{Name: "R2", Type: "s3", Endpoint: "https://account.r2.cloudflarestorage.com", Region: "auto", Bucket: "supadupa", Prefix: "prod", AccessKeyID: "access-key", SecretAccessKey: "secret-key", ForcePathStyle: true, Default: true})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if target.ID != "target_1" || !target.SecretConfigured || target.ReadinessStatus != "validation-pending" {
+		t.Fatalf("unexpected created target %#v", target)
+	}
+	targets, err := client.ListBackupStorageTargets(context.Background())
+	if err != nil {
+		t.Fatalf("list targets: %v", err)
+	}
+	if len(targets) != 1 || !targets[0].RecoveryReady || targets[0].LastTestedAt == nil {
+		t.Fatalf("unexpected targets %#v", targets)
+	}
+	target, err = client.UpdateBackupStorageTarget(context.Background(), "target_1", BackupStorageTargetInput{Name: "R2", Type: "s3", Endpoint: "https://account.r2.cloudflarestorage.com", Region: "auto", Bucket: "supadupa-new", Prefix: "prod", AccessKeyID: "access-key", ForcePathStyle: true, Default: true})
+	if err != nil {
+		t.Fatalf("update target: %v", err)
+	}
+	if target.Bucket != "supadupa-new" || !target.RecoveryReady {
+		t.Fatalf("unexpected updated target %#v", target)
+	}
+	target, err = client.TestBackupStorageTarget(context.Background(), "target_1")
+	if err != nil {
+		t.Fatalf("test target: %v", err)
+	}
+	if target.LastTestStatus != "passed" || !target.RecoveryReady {
+		t.Fatalf("unexpected tested target %#v", target)
+	}
+	if err := client.DeleteBackupStorageTarget(context.Background(), "target_1"); err != nil {
+		t.Fatalf("delete target: %v", err)
+	}
+	expected := []string{
+		"POST /v1/backup-storage-targets",
+		"GET /v1/backup-storage-targets",
+		"PUT /v1/backup-storage-targets/target_1",
+		"POST /v1/backup-storage-targets/target_1/test",
+		"DELETE /v1/backup-storage-targets/target_1",
+	}
+	if strings.Join(seen, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected requests:\n%s", strings.Join(seen, "\n"))
+	}
+}
+
+func TestBackupStorageTargetResourceStateAndInput(t *testing.T) {
+	secret := types.StringValue("secret-key")
+	model := backupStorageTargetResourceModel{
+		Name:            types.StringValue("R2"),
+		Type:            types.StringValue("s3"),
+		Endpoint:        types.StringValue("https://account.r2.cloudflarestorage.com"),
+		Region:          types.StringValue("auto"),
+		Bucket:          types.StringValue("supadupa"),
+		Prefix:          types.StringValue("prod"),
+		AccessKeyID:     types.StringValue("access-key"),
+		SecretAccessKey: secret,
+		ForcePathStyle:  types.BoolValue(true),
+		Default:         types.BoolValue(true),
+	}
+	input := backupStorageTargetInputFromModel(model)
+	if input.SecretAccessKey != "secret-key" || input.Bucket != "supadupa" || !input.ForcePathStyle || !input.Default {
+		t.Fatalf("unexpected target input %#v", input)
+	}
+	setBackupStorageTargetState(&model, BackupStorageTarget{
+		ID:               "target_1",
+		Name:             "R2",
+		Type:             "s3",
+		Endpoint:         "https://account.r2.cloudflarestorage.com",
+		Region:           "auto",
+		Bucket:           "supadupa",
+		Prefix:           "prod",
+		AccessKeyID:      "access-key",
+		SecretConfigured: true,
+		ForcePathStyle:   true,
+		Default:          true,
+		DurableOffHost:   true,
+		RecoveryReady:    true,
+		ReadinessStatus:  "off-host-ready",
+		LastTestStatus:   "passed",
+	})
+	if model.ID.ValueString() != "target_1" || !model.SecretConfigured.ValueBool() || !model.DurableOffHost.ValueBool() || !model.RecoveryReady.ValueBool() {
+		t.Fatalf("unexpected target state %#v", model)
+	}
+	if model.SecretAccessKey.ValueString() != "secret-key" {
+		t.Fatalf("secret access key should stay from config/state")
+	}
+}
+
 func TestClientProjectBranchAndReplicaRequests(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -524,12 +652,12 @@ func TestClientProjectBranchAndReplicaRequests(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Ref != "alpha-preview" || got.Name != "Alpha Preview" || got.TTLHours != 24 {
+			if got.Ref != "alpha-preview" || got.Name != "Alpha Preview" || got.TTLHours != 24 || got.WithData {
 				t.Fatalf("unexpected branch payload %#v", got)
 			}
-			_, _ = w.Write([]byte(`{"branch":{"id":"branch_1","source_project_ref":"alpha","project_ref":"alpha-preview","name":"Alpha Preview","status":"healthy","created_at":"2026-06-05T12:00:00Z","expires_at":"2026-06-06T12:00:00Z"},"project":{"id":"project_preview","ref":"alpha-preview","org_id":"org_1","name":"Alpha Preview","status":"healthy","spec":{"resource_tier":"small"}}}`))
+			_, _ = w.Write([]byte(`{"branch":{"id":"branch_1","source_project_ref":"alpha","project_ref":"alpha-preview","name":"Alpha Preview","with_data":false,"status":"healthy","created_at":"2026-06-05T12:00:00Z","expires_at":"2026-06-06T12:00:00Z"},"project":{"id":"project_preview","ref":"alpha-preview","org_id":"org_1","name":"Alpha Preview","status":"healthy","spec":{"resource_tier":"small"}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/branches":
-			_, _ = w.Write([]byte(`[{"id":"branch_1","source_project_ref":"alpha","project_ref":"alpha-preview","name":"Alpha Preview","status":"healthy","created_at":"2026-06-05T12:00:00Z","expires_at":"2026-06-06T12:00:00Z"}]`))
+			_, _ = w.Write([]byte(`[{"id":"branch_1","source_project_ref":"alpha","project_ref":"alpha-preview","name":"Alpha Preview","with_data":false,"status":"healthy","created_at":"2026-06-05T12:00:00Z","expires_at":"2026-06-06T12:00:00Z"}]`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/projects/alpha/branches/alpha-preview":
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/alpha/replicas":
@@ -579,7 +707,7 @@ func TestClientProjectBranchAndReplicaRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project branch: %v", err)
 	}
-	if branch.ID != "branch_1" || branch.ProjectRef != "alpha-preview" || branch.ExpiresAt == nil || project.ID != "project_preview" {
+	if branch.ID != "branch_1" || branch.ProjectRef != "alpha-preview" || branch.WithData || branch.ExpiresAt == nil || project.ID != "project_preview" {
 		t.Fatalf("unexpected branch/project %#v %#v", branch, project)
 	}
 	branches, err := client.ListProjectBranches(context.Background(), "alpha")
@@ -718,9 +846,9 @@ func TestClientProjectDomainLifecycleRequests(t *testing.T) {
 			if got.FQDN != "api.example.com" {
 				t.Fatalf("unexpected domain payload %#v", got)
 			}
-			_, _ = w.Write([]byte(`{"project_ref":"alpha","fqdn":"api.example.com","cert_status":"issued"}`))
+			_, _ = w.Write([]byte(`{"project_ref":"alpha","fqdn":"api.example.com","cert_status":"issued","cert_mode":"byo"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/domains":
-			_, _ = w.Write([]byte(`[{"project_ref":"alpha","fqdn":"api.example.com","cert_status":"issued"}]`))
+			_, _ = w.Write([]byte(`[{"project_ref":"alpha","fqdn":"api.example.com","cert_status":"issued","cert_mode":"byo"}]`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/projects/alpha/domains/api.example.com":
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -737,7 +865,7 @@ func TestClientProjectDomainLifecycleRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add project domain: %v", err)
 	}
-	if domain.ProjectRef != "alpha" || domain.FQDN != "api.example.com" || domain.CertStatus != "issued" {
+	if domain.ProjectRef != "alpha" || domain.FQDN != "api.example.com" || domain.CertStatus != "issued" || domain.CertMode != "byo" {
 		t.Fatalf("unexpected domain %#v", domain)
 	}
 	domains, err := client.ListProjectDomains(context.Background(), "alpha")
@@ -758,6 +886,131 @@ func TestClientProjectDomainLifecycleRequests(t *testing.T) {
 	}
 	if strings.Join(seen, "\n") != strings.Join(expected, "\n") {
 		t.Fatalf("unexpected requests:\n%s", strings.Join(seen, "\n"))
+	}
+}
+
+func TestProjectDomainResourceStateComputesCustomEndpointURLs(t *testing.T) {
+	var model projectDomainResourceModel
+	setProjectDomainState(&model, ProjectDomain{
+		ProjectRef: "alpha",
+		FQDN:       "api.example.com",
+		CertStatus: "uploaded",
+		CertMode:   "byo",
+	})
+
+	if model.ID.ValueString() != "alpha/api.example.com" || model.CertMode.ValueString() != "byo" {
+		t.Fatalf("unexpected identity/cert state: %#v", model)
+	}
+	for label, got := range map[string]string{
+		"api":       model.APIURL.ValueString(),
+		"ready_api": model.ReadyAPIURL.ValueString(),
+		"rest":      model.RESTURL.ValueString(),
+		"auth":      model.AuthURL.ValueString(),
+		"graphql":   model.GraphQLURL.ValueString(),
+		"realtime":  model.RealtimeURL.ValueString(),
+		"functions": model.FunctionsURL.ValueString(),
+		"storage":   model.StorageURL.ValueString(),
+	} {
+		if !strings.HasPrefix(got, "https://api.example.com") {
+			t.Fatalf("%s URL = %q", label, got)
+		}
+	}
+
+	setProjectDomainState(&model, ProjectDomain{
+		ProjectRef: "alpha",
+		FQDN:       "pending.example.com",
+		CertStatus: "pending",
+		CertMode:   "acme",
+	})
+	if model.APIURL.ValueString() != "https://pending.example.com" {
+		t.Fatalf("pending api_url = %q", model.APIURL.ValueString())
+	}
+	if model.ReadyAPIURL.ValueString() != "" {
+		t.Fatalf("pending ready_api_url should be empty, got %q", model.ReadyAPIURL.ValueString())
+	}
+}
+
+func TestClientProjectConnectRequest(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/alpha/connect" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+		_, _ = w.Write([]byte(`{
+			"api_url":"https://alpha.apps.test",
+			"studio_url":"https://studio-alpha.apps.test",
+			"rest_url":"https://alpha.apps.test/rest/v1",
+			"auth_url":"https://alpha.apps.test/auth/v1",
+			"graphql_url":"https://alpha.apps.test/graphql/v1",
+			"realtime_url":"https://alpha.apps.test/realtime/v1",
+			"functions_url":"https://alpha.apps.test/functions/v1",
+			"storage_url":"https://alpha.apps.test/storage/v1",
+			"storage_s3_url":"https://storage-alpha.apps.test/storage/v1/s3",
+			"custom_api_urls":["https://api.example.com"],
+			"api_keys":{"anon":"secret://projects/alpha/anon_key","service_role":"secret://projects/alpha/service_role"},
+			"postgres":{
+				"public_direct":"postgres://postgres:${DB_PASSWORD}@db-alpha.apps.test:5432/postgres?sslmode=require",
+				"public_transaction":"postgres://postgres.alpha:${DB_PASSWORD}@pooler-alpha.apps.test:6543/postgres?sslmode=require",
+				"public_session":"postgres://postgres.alpha:${DB_PASSWORD}@pooler-alpha.apps.test:5432/postgres?sslmode=require"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	connect, err := client.GetProjectConnect(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("get project connect: %v", err)
+	}
+	if connect.APIURL != "https://alpha.apps.test" || connect.CustomAPIURLs[0] != "https://api.example.com" || connect.APIKeys["anon"] == "" || connect.Postgres["public_direct"] == "" {
+		t.Fatalf("unexpected connect payload %#v", connect)
+	}
+	if strings.Join(seen, "\n") != "GET /v1/projects/alpha/connect" {
+		t.Fatalf("unexpected requests:\n%s", strings.Join(seen, "\n"))
+	}
+}
+
+func TestProjectConnectDataSourceState(t *testing.T) {
+	var model projectConnectDataSourceModel
+	setProjectConnectDataSourceState(context.Background(), &model, "alpha", ProjectConnect{
+		APIURL:        "https://alpha.apps.test",
+		StudioURL:     "https://studio-alpha.apps.test",
+		RESTURL:       "https://alpha.apps.test/rest/v1",
+		AuthURL:       "https://alpha.apps.test/auth/v1",
+		GraphQLURL:    "https://alpha.apps.test/graphql/v1",
+		RealtimeURL:   "https://alpha.apps.test/realtime/v1",
+		FunctionsURL:  "https://alpha.apps.test/functions/v1",
+		StorageURL:    "https://alpha.apps.test/storage/v1",
+		StorageS3URL:  "https://storage-alpha.apps.test/storage/v1/s3",
+		CustomAPIURLs: []string{"https://api.example.com", "https://alt.example.com"},
+		APIKeys:       map[string]string{"anon": "secret://projects/alpha/anon_key", "service_role": "secret://projects/alpha/service_role"},
+		Postgres: map[string]string{
+			"public_direct":      "postgres://postgres:${DB_PASSWORD}@db-alpha.apps.test:5432/postgres?sslmode=require",
+			"public_transaction": "postgres://postgres.alpha:${DB_PASSWORD}@pooler-alpha.apps.test:6543/postgres?sslmode=require",
+			"public_session":     "postgres://postgres.alpha:${DB_PASSWORD}@pooler-alpha.apps.test:5432/postgres?sslmode=require",
+		},
+	}, func(title string, detail string) {
+		t.Fatalf("%s: %s", title, detail)
+	})
+
+	if model.Ref.ValueString() != "alpha" || model.APIURL.ValueString() != "https://alpha.apps.test" || model.AnonKeyHandle.ValueString() == "" {
+		t.Fatalf("unexpected connect state %#v", model)
+	}
+	if model.PublicDatabaseURL.ValueString() == "" || model.PublicPoolerTransactionURL.ValueString() == "" || model.StorageS3URL.ValueString() == "" {
+		t.Fatalf("missing remote connection fields %#v", model)
+	}
+	var customURLs []string
+	diags := model.CustomAPIURLs.ElementsAs(context.Background(), &customURLs, false)
+	if diags.HasError() {
+		t.Fatalf("decode custom API URLs: %s", diags.Errors()[0].Detail())
+	}
+	if strings.Join(customURLs, ",") != "https://api.example.com,https://alt.example.com" {
+		t.Fatalf("custom_api_urls = %#v", customURLs)
 	}
 }
 

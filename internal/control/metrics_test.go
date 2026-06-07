@@ -29,7 +29,7 @@ func TestProjectMetricsTracksProjectScopedCounters(t *testing.T) {
 	if _, err := store.CreateBackup(ctx, BackupInput{ProjectRef: project.Ref, Kind: "logical", Location: "memory://backup", SizeBytes: 2048, Status: "completed"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateWALArchive(ctx, WALArchiveInput{ProjectRef: project.Ref, Segment: "0001", Location: "memory://wal", SizeBytes: 1024, Status: "archived"}); err != nil {
+	if _, err := store.CreateWALArchive(ctx, WALArchiveInput{ProjectRef: project.Ref, Segment: "000000010000000000000001", SegmentSource: "postgres", Location: "memory://wal", SizeBytes: 1024, Status: "archived"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.RecordProjectLog(ctx, ProjectLogInput{ProjectRef: project.Ref, Level: "info", Message: "hello"}); err != nil {
@@ -60,7 +60,7 @@ func TestProjectMetricsIncludesObservedTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sampledAt := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	sampledAt := time.Now().UTC().Add(-1 * time.Minute)
 	if _, err := store.RecordProjectTelemetry(ctx, project.Ref, TelemetrySampleInput{
 		Source:           "compose",
 		CPUPercent:       12.5,
@@ -92,5 +92,100 @@ func TestProjectMetricsIncludesObservedTelemetry(t *testing.T) {
 	}
 	if fleet.Observed.ProjectsSampled != 1 || fleet.Observed.CPUPercent != 12.5 || fleet.Observed.MemoryBytes != 512*1024*1024 {
 		t.Fatalf("unexpected fleet observed rollup %#v", fleet.Observed)
+	}
+}
+
+func TestFleetMetricsExcludesStaleAndDeletedProjectTelemetry(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "fresh-metrics", Name: "Fresh Metrics"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "stale-metrics", Name: "Stale Metrics"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "deleted-metrics", Name: "Deleted Metrics"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordProjectTelemetry(ctx, fresh.Ref, TelemetrySampleInput{
+		Source:           "compose",
+		CPUPercent:       10,
+		MemoryBytes:      128,
+		MemoryLimitBytes: 1024,
+		SampledAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordProjectTelemetry(ctx, stale.Ref, TelemetrySampleInput{
+		Source:           "compose",
+		CPUPercent:       90,
+		MemoryBytes:      512,
+		MemoryLimitBytes: 1024,
+		SampledAt:        time.Now().UTC().Add(-10 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordProjectTelemetry(ctx, deleted.Ref, TelemetrySampleInput{
+		Source:           "compose",
+		CPUPercent:       80,
+		MemoryBytes:      256,
+		MemoryLimitBytes: 1024,
+		SampledAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(ctx, deleted.Ref); err != nil {
+		t.Fatal(err)
+	}
+
+	fleet, err := store.GetFleetMetrics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fleet.Observed.ProjectsSampled != 1 || fleet.Observed.StaleProjects != 1 {
+		t.Fatalf("expected one fresh and one stale active telemetry sample, got %#v", fleet.Observed)
+	}
+	if fleet.Observed.CPUPercent != 10 || fleet.Observed.MemoryBytes != 128 {
+		t.Fatalf("expected stale/deleted telemetry excluded from totals, got %#v", fleet.Observed)
+	}
+}
+
+func TestCreateProjectDefaultsToAvailableHostCapacity(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := store.CreateHost(ctx, CreateHostRequest{
+		Name:     "local-docker",
+		Address:  "127.0.0.1",
+		Capacity: HostCapacity{CPU: 16, RAMMB: 32768, DiskGB: 600, DiskIOPS: 48000, Project: 20},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "auto-hosted", Name: "Auto Hosted", ResourceTier: ResourceTierSmall})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Spec.HostID != host.ID {
+		t.Fatalf("expected project host_id %q, got %q", host.ID, project.Spec.HostID)
+	}
+
+	metrics, err := store.GetFleetMetrics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.HostUsed.Project != 1 || metrics.HostUsed.CPU != 1 || metrics.HostUsed.RAMMB != 2048 || metrics.HostUsed.DiskGB != 20 || metrics.HostUsed.DiskIOPS != 3000 {
+		t.Fatalf("expected small tier reservation in host usage, got %#v", metrics.HostUsed)
 	}
 }

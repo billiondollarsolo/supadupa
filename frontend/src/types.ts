@@ -393,6 +393,8 @@ export type PlatformSSOConfig = {
   email_domain: string;
   auto_provision: boolean;
   default_role: "admin" | "developer" | "viewer" | string;
+  scim_enabled: boolean;
+  scim_token_configured: boolean;
   updated_at: string;
 };
 
@@ -509,8 +511,11 @@ export type Host = {
 };
 
 export type ConnectPayload = {
+  services: Record<string, boolean>;
   api_url: string;
   local_api_url?: string;
+  custom_api_urls?: string[];
+  custom_domains?: ProjectDomain[];
   studio_url: string;
   local_studio_url?: string;
   rest_url: string;
@@ -542,11 +547,18 @@ export type ConnectPayload = {
   }>;
 };
 
+export type ProjectStudioSession = {
+  token: string;
+  expires_at: string;
+};
+
 export type ProjectCLIProfile = {
   project_ref: string;
   project_name: string;
   api_url: string;
   local_api_url?: string;
+  custom_api_urls?: string[];
+  custom_domains?: ProjectDomain[];
   studio_url: string;
   local_studio_url?: string;
   rest_url: string;
@@ -557,8 +569,13 @@ export type ProjectCLIProfile = {
   storage_url: string;
   storage_s3_url: string;
   database_url: string;
+  internal_database_url: string;
   pooler_transaction_url: string;
+  internal_pooler_url: string;
   pooler_session_url: string;
+  internal_pooler_session_url: string;
+  public_database_url: string;
+  public_pooler_url: string;
   env: Record<string, string>;
   supabase_config_toml: string;
   commands: Record<string, string>;
@@ -591,11 +608,105 @@ export type Backup = {
   project_ref: string;
   kind: string;
   location: string;
+  remote_location?: string;
+  storage_target_id?: string;
   size_bytes: number;
   checksum_sha256: string;
   status: string;
+  started_at: string;
+  finished_at?: string;
   created_at: string;
   verified_at?: string;
+};
+
+export type BackupStorageTarget = {
+  id: string;
+  name: string;
+  type: "s3" | string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix?: string;
+  access_key_id?: string;
+  secret_configured: boolean;
+  force_path_style: boolean;
+  default: boolean;
+  durable_off_host: boolean;
+  recovery_ready: boolean;
+  readiness_status: "off-host-ready" | "validation-pending" | "validation-failed" | "local-or-loopback" | "missing-secret" | string;
+  readiness_message?: string;
+  last_tested_at?: string;
+  last_test_status?: string;
+  last_test_error?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RuntimeConfig = {
+  provisioner: string;
+  apply: {
+    compose: boolean;
+    kubernetes: boolean;
+    storage_data_plane: boolean;
+  };
+  backup: {
+    compose_defaults: boolean;
+    logical_configured: boolean;
+    physical_configured: boolean;
+    wal_archive_configured: boolean;
+    logical_restore_configured: boolean;
+    pitr_restore_configured: boolean;
+    backup_dry_run: boolean;
+    restore_dry_run: boolean;
+    wal_archive_dry_run: boolean;
+  };
+  recovery: {
+    require_recovery_ready_targets: boolean;
+  };
+  upgrade: {
+    require_durable_backup: boolean;
+    failure_auto_restore: boolean;
+  };
+};
+
+export type PlatformBackup = {
+  id: string;
+  kind: string;
+  location: string;
+  remote_location?: string;
+  storage_target_id?: string;
+  size_bytes: number;
+  checksum_sha256: string;
+  status: string;
+  started_at: string;
+  finished_at?: string;
+  created_at: string;
+  verified_at?: string;
+};
+
+export type UpgradeProjectResponse = {
+  project: Project;
+  backup: Backup;
+  previous_version: string;
+  target_version: string;
+  rollback_available: boolean;
+};
+
+export type StackReleaseManifest = {
+  version: string;
+  postgres: string;
+  kong: string;
+  studio: string;
+  postgres_meta: string;
+  auth: string;
+  rest: string;
+  realtime: string;
+  storage: string;
+  imgproxy: string;
+  edge_runtime: string;
+  pooler: string;
+  analytics: string;
+  vector: string;
 };
 
 export type BackupPolicy = {
@@ -603,6 +714,7 @@ export type BackupPolicy = {
   enabled: boolean;
   schedule: "daily" | "hourly" | string;
   kind: string;
+  storage_target_id?: string;
   last_run_at?: string;
   next_run_at?: string;
   updated_at: string;
@@ -621,12 +733,44 @@ export type WALArchive = {
   id: string;
   project_ref: string;
   segment: string;
+  segment_source: string;
   location: string;
+  remote_location: string;
+  storage_target_id: string;
   size_bytes: number;
   checksum_sha256: string;
   status: string;
   created_at: string;
   verified_at?: string;
+};
+
+export type ProjectRecoverabilityStatus = {
+  project_ref: string;
+  status: string;
+  backup_policy_enabled: boolean;
+  off_host_backup_configured: boolean;
+  off_host_backup_verified: boolean;
+  latest_backup?: Backup;
+  latest_verified_backup?: Backup;
+  pitr_enabled: boolean;
+  latest_wal_archive?: WALArchive;
+  wal_archive_off_host_verified: boolean;
+  recovery_window_start?: string;
+  recovery_window_end?: string;
+  physical_backup_available: boolean;
+  restore_to_time_configured: boolean;
+  restore_to_time_available: boolean;
+  restore_to_time_unavailable?: string;
+  warnings: string[];
+  recommendations: string[];
+};
+
+export type RestoreToTimeResponse = {
+  project_ref: string;
+  recovery_time_target_unix: number;
+  recovery_time_target: string;
+  restore_path: string;
+  restore_state: string;
 };
 
 export type ProjectLog = {
@@ -651,13 +795,35 @@ export type ProjectRoute = {
   ip_allowlist?: string[];
   cache_control?: string;
   smart_cdn?: boolean;
+  cert_mode?: string;
+  cert_file?: string;
+  key_file?: string;
   created_at: string;
+};
+
+export type ProjectTCPRoute = {
+  protocol: "tcp" | string;
+  name: string;
+  fqdn: string;
+  entrypoint: string;
+  public_port: number;
+  upstream_address: string;
+  tls: boolean;
+};
+
+export type ProjectRouteManifest = {
+  project_ref: string;
+  http_routes: ProjectRoute[];
+  tcp_routes: ProjectTCPRoute[];
 };
 
 export type ProjectDomain = {
   project_ref: string;
   fqdn: string;
-  cert_status: "pending" | "issued" | "failed" | string;
+  cert_status: "pending" | "issued" | "failed" | "uploaded" | string;
+  cert_mode: "acme" | "manual" | "command" | "byo" | string;
+  cert_fingerprint?: string;
+  cert_not_after?: string;
   created_at: string;
   updated_at: string;
 };
@@ -674,6 +840,7 @@ export type ProjectBranch = {
   source_project_ref: string;
   project_ref: string;
   name: string;
+  with_data: boolean;
   status: string;
   created_at: string;
   expires_at?: string;
@@ -695,6 +862,8 @@ export type ProjectReplica = {
   role: "read" | "primary" | string;
   message?: string;
   read_uri: string;
+  public_read_uri?: string;
+  internal_read_uri?: string;
   read_weight: number;
   failover_priority: number;
   replication_lag_bytes: number;

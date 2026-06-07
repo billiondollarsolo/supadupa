@@ -9,6 +9,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -27,6 +29,7 @@ type projectBranchResourceModel struct {
 	ProjectID types.String `tfsdk:"project_id"`
 	Name      types.String `tfsdk:"name"`
 	TTLHours  types.Int64  `tfsdk:"ttl_hours"`
+	WithData  types.Bool   `tfsdk:"with_data"`
 	Status    types.String `tfsdk:"status"`
 	CreatedAt types.String `tfsdk:"created_at"`
 	ExpiresAt types.String `tfsdk:"expires_at"`
@@ -81,6 +84,13 @@ func (r *projectBranchResource) Schema(ctx context.Context, req resource.SchemaR
 				Description:   "Optional branch TTL in hours. Zero means no automatic expiry.",
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
+			"with_data": resourceschema.BoolAttribute{
+				Optional:      true,
+				Computed:      true,
+				Default:       booldefault.StaticBool(false),
+				Description:   "Clone source project data into the branch. Defaults to false, matching hosted Supabase preview branches.",
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
+			},
 			"status": resourceschema.StringAttribute{
 				Computed:    true,
 				Description: "Current branch project status.",
@@ -128,6 +138,7 @@ func (r *projectBranchResource) Create(ctx context.Context, req resource.CreateR
 		Ref:      plan.Ref.ValueString(),
 		Name:     plan.Name.ValueString(),
 		TTLHours: int(plan.TTLHours.ValueInt64()),
+		WithData: plan.WithData.ValueBool(),
 	})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create Supadupa project branch", err.Error())
@@ -218,6 +229,7 @@ func setProjectBranchState(model *projectBranchResourceModel, branch ProjectBran
 	model.Ref = types.StringValue(branch.ProjectRef)
 	model.ProjectID = types.StringValue(project.ID)
 	model.Name = types.StringValue(branch.Name)
+	model.WithData = types.BoolValue(branch.WithData)
 	model.Status = types.StringValue(project.Status)
 	model.CreatedAt = optionalTimeString(branch.CreatedAt)
 	model.ExpiresAt = optionalTimePointerString(branch.ExpiresAt)

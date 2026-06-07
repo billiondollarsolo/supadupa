@@ -21,6 +21,8 @@ var managedSecretEnvironmentMappings = []secretEnvironmentMapping{
 	{EnvKey: "S3_SECRET_KEY", SecretKind: "s3_secret_key"},
 	{EnvKey: "STORAGE_ACCESS_KEY_ID", SecretKind: "s3_access_key"},
 	{EnvKey: "STORAGE_SECRET_ACCESS_KEY", SecretKind: "s3_secret_key"},
+	{EnvKey: "S3_PROTOCOL_ACCESS_KEY_ID", SecretKind: "s3_access_key"},
+	{EnvKey: "S3_PROTOCOL_ACCESS_KEY_SECRET", SecretKind: "s3_secret_key"},
 }
 
 func ManagedSecretEnvironmentKeys() []string {

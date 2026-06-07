@@ -134,6 +134,9 @@ CREATE TABLE domains (
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     fqdn TEXT NOT NULL,
     cert_status TEXT NOT NULL,
+    cert_mode TEXT NOT NULL DEFAULT 'acme',
+    cert_fingerprint TEXT,
+    cert_not_after TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (project_id, fqdn)

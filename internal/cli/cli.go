@@ -3,24 +3,30 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
 
+type CommandRunner func(ctx context.Context, name string, args []string, env []string, stdout, stderr io.Writer) error
+
 type Runner struct {
-	HTTPClient *http.Client
-	Stdout     io.Writer
-	Stderr     io.Writer
-	Env        map[string]string
+	HTTPClient    *http.Client
+	CommandRunner CommandRunner
+	Stdout        io.Writer
+	Stderr        io.Writer
+	Env           map[string]string
 }
 
 func (r Runner) Run(ctx context.Context, args []string) int {
@@ -32,7 +38,7 @@ func (r Runner) Run(ctx context.Context, args []string) int {
 	}
 	client := r.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Timeout: r.httpTimeout()}
 	}
 
 	global := flag.NewFlagSet("supadupa-cli", flag.ContinueOnError)
@@ -59,6 +65,15 @@ func (r Runner) Run(ctx context.Context, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func (r Runner) httpTimeout() time.Duration {
+	value := strings.TrimSpace(r.env("SUPADUPA_CLI_HTTP_TIMEOUT", "10m"))
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		return 10 * time.Minute
+	}
+	return timeout
 }
 
 func (r Runner) dispatch(ctx context.Context, c apiClient, args []string) error {
@@ -91,6 +106,8 @@ func (r Runner) dispatch(ctx context.Context, c apiClient, args []string) error 
 		return r.billing(ctx, c, args[1:])
 	case "settings":
 		return r.settings(ctx, c, args[1:])
+	case "backup-targets":
+		return r.backupTargets(ctx, c, args[1:])
 	case "projects":
 		return r.projects(ctx, c, args[1:])
 	case "config":
@@ -257,6 +274,146 @@ func (r Runner) settings(ctx context.Context, c apiClient, args []string) error 
 	default:
 		return fmt.Errorf("unknown settings subcommand %q", args[0])
 	}
+}
+
+type backupStorageTargetCLI struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Type             string `json:"type"`
+	Endpoint         string `json:"endpoint"`
+	Region           string `json:"region"`
+	Bucket           string `json:"bucket"`
+	Prefix           string `json:"prefix"`
+	AccessKeyID      string `json:"access_key_id"`
+	ForcePathStyle   bool   `json:"force_path_style"`
+	Default          bool   `json:"default"`
+	SecretConfigured bool   `json:"secret_configured"`
+}
+
+func (r Runner) backupTargets(ctx context.Context, c apiClient, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("backup-targets requires subcommand: list, create, update, test, delete")
+	}
+	switch args[0] {
+	case "list":
+		return r.printResponse(c.do(ctx, http.MethodGet, "/v1/backup-storage-targets", nil, false))
+	case "create":
+		input, err := r.parseBackupTargetInput("backup-targets create", args[1:], backupStorageTargetCLI{}, true)
+		if err != nil {
+			return err
+		}
+		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/backup-storage-targets", input, false))
+	case "update":
+		targetID := strings.TrimSpace(flagArgValue(args[1:], "id"))
+		if targetID == "" {
+			return fmt.Errorf("--id is required")
+		}
+		existing, err := fetchBackupTargetForCLI(ctx, c, targetID)
+		if err != nil {
+			return err
+		}
+		input, err := r.parseBackupTargetInput("backup-targets update", args[1:], existing, false)
+		if err != nil {
+			return err
+		}
+		return r.printResponse(c.do(ctx, http.MethodPut, "/v1/backup-storage-targets/"+url.PathEscape(targetID), input, false))
+	case "test":
+		fs := newFlagSet("backup-targets test", r.Stderr)
+		id := fs.String("id", "", "Backup storage target ID")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*id) == "" {
+			return fmt.Errorf("--id is required")
+		}
+		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/backup-storage-targets/"+url.PathEscape(*id)+"/test", nil, false))
+	case "delete":
+		fs := newFlagSet("backup-targets delete", r.Stderr)
+		id := fs.String("id", "", "Backup storage target ID")
+		yes := fs.Bool("yes", false, "Confirm backup target deletion")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*id) == "" {
+			return fmt.Errorf("--id is required")
+		}
+		if !*yes {
+			return fmt.Errorf("backup-targets delete requires --yes")
+		}
+		return r.printResponse(c.do(ctx, http.MethodDelete, "/v1/backup-storage-targets/"+url.PathEscape(*id), nil, false))
+	default:
+		return fmt.Errorf("unknown backup-targets subcommand %q", args[0])
+	}
+}
+
+func (r Runner) parseBackupTargetInput(command string, args []string, existing backupStorageTargetCLI, creating bool) (map[string]any, error) {
+	fs := newFlagSet(command, r.Stderr)
+	_ = fs.String("id", "", "Backup storage target ID")
+	name := fs.String("name", existing.Name, "Backup storage target name")
+	targetType := fs.String("type", valueOrDefault(existing.Type, "s3"), "Backup storage target type")
+	endpoint := fs.String("endpoint", existing.Endpoint, "S3-compatible endpoint URL")
+	region := fs.String("region", valueOrDefault(existing.Region, "auto"), "S3 region")
+	bucket := fs.String("bucket", existing.Bucket, "S3 bucket")
+	prefix := fs.String("prefix", existing.Prefix, "Object key prefix")
+	accessKeyID := fs.String("access-key-id", existing.AccessKeyID, "S3 access key ID")
+	secretAccessKey := fs.String("secret-access-key", "", "S3 secret access key; omitted on update preserves the stored secret")
+	forcePathStyle := fs.Bool("force-path-style", existing.ForcePathStyle, "Use S3 path-style addressing")
+	defaultTarget := fs.Bool("default", existing.Default, "Mark this as the platform default target")
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if creating && strings.TrimSpace(*secretAccessKey) == "" {
+		return nil, fmt.Errorf("--secret-access-key is required")
+	}
+	return map[string]any{
+		"name":              *name,
+		"type":              *targetType,
+		"endpoint":          *endpoint,
+		"region":            *region,
+		"bucket":            *bucket,
+		"prefix":            *prefix,
+		"access_key_id":     *accessKeyID,
+		"secret_access_key": *secretAccessKey,
+		"force_path_style":  *forcePathStyle,
+		"default":           *defaultTarget,
+	}, nil
+}
+
+func fetchBackupTargetForCLI(ctx context.Context, c apiClient, id string) (backupStorageTargetCLI, error) {
+	payload, status, err := c.do(ctx, http.MethodGet, "/v1/backup-storage-targets", nil, false)
+	if err := apiResponseError(payload, status, err); err != nil {
+		return backupStorageTargetCLI{}, err
+	}
+	var targets []backupStorageTargetCLI
+	if err := json.Unmarshal(payload, &targets); err != nil {
+		return backupStorageTargetCLI{}, err
+	}
+	for _, target := range targets {
+		if target.ID == id {
+			return target, nil
+		}
+	}
+	return backupStorageTargetCLI{}, fmt.Errorf("backup storage target %s was not found", id)
+}
+
+func valueOrDefault(value string, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fallback
+}
+
+func flagArgValue(args []string, name string) string {
+	prefix := "--" + name + "="
+	for i, arg := range args {
+		if arg == "--"+name && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(arg, prefix) {
+			return strings.TrimPrefix(arg, prefix)
+		}
+	}
+	return ""
 }
 
 func (r Runner) mfa(ctx context.Context, c apiClient, args []string) error {
@@ -755,7 +912,7 @@ func (r Runner) billing(ctx context.Context, c apiClient, args []string) error {
 
 func (r Runner) projects(ctx context.Context, c apiClient, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("projects requires subcommand: list, create, get, connect, cli-profile, activity, pause, resume, restart, upgrade, scale, destroy")
+		return fmt.Errorf("projects requires subcommand: list, create, get, connect, cli-profile, db-tunnel, gen-types, activity, pause, resume, restart, upgrade, scale, destroy")
 	}
 	switch args[0] {
 	case "list":
@@ -774,6 +931,7 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 		ref := fs.String("ref", "", "Project ref")
 		name := fs.String("name", "", "Project name")
 		domain := fs.String("domain", "", "Base domain")
+		stackVersion := fs.String("stack-version", "", "Stack version")
 		hostID := fs.String("host-id", "", "Host ID")
 		profile := fs.String("profile", "", "Stack profile")
 		tier := fs.String("tier", "", "Resource tier")
@@ -784,6 +942,7 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 			"ref":           *ref,
 			"name":          *name,
 			"domain":        *domain,
+			"stack_version": *stackVersion,
 			"host_id":       *hostID,
 			"profile":       *profile,
 			"resource_tier": *tier,
@@ -793,6 +952,8 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 		fs := newFlagSet("projects "+args[0], r.Stderr)
 		ref := fs.String("ref", "", "Project ref")
 		format := fs.String("format", "json", "Output format for cli-profile: json, env, or toml")
+		apiDomain := fs.String("api-domain", "", "Use a ready custom API domain as SUPABASE_URL for cli-profile env output")
+		preferCustomDomain := fs.Bool("prefer-custom-domain", false, "Use the first ready custom API domain as SUPABASE_URL for cli-profile env output")
 		yes := fs.Bool("yes", false, "Confirm destructive action")
 		retainVolumes := fs.Bool("retain-volumes", false, "Retain data volumes on destroy")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -807,7 +968,7 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 		case "cli-profile":
 			path += "/connect/cli"
 			payload, status, err := c.do(ctx, http.MethodGet, path, nil, false)
-			return r.printCLIProfile(payload, status, err, *format)
+			return r.printCLIProfile(payload, status, err, *format, customAPIURLOptions{Domain: *apiDomain, Prefer: *preferCustomDomain})
 		case "activity":
 			path += "/activity"
 		case "pause", "resume", "restart":
@@ -823,14 +984,27 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 			}
 		}
 		return r.printResponse(c.do(ctx, method, path, body, false))
+	case "link":
+		return r.projectLink(ctx, c, args[1:])
+	case "env":
+		return r.projectEnv(ctx, c, args[1:])
+	case "db-tunnel":
+		return r.projectDBTunnel(ctx, c, args[1:])
+	case "gen-types":
+		return r.projectGenTypes(ctx, c, args[1:])
 	case "upgrade":
 		fs := newFlagSet("projects upgrade", r.Stderr)
 		ref := fs.String("ref", "", "Project ref")
 		version := fs.String("version", "", "Stack version")
+		backupID := fs.String("backup-id", "", "Pre-upgrade backup ID")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(*ref)+"/upgrade", map[string]string{"version": *version}, false))
+		payload := map[string]string{"version": *version}
+		if strings.TrimSpace(*backupID) != "" {
+			payload["backup_id"] = *backupID
+		}
+		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(*ref)+"/upgrade", payload, false))
 	case "scale":
 		fs := newFlagSet("projects scale", r.Stderr)
 		ref := fs.String("ref", "", "Project ref")
@@ -845,11 +1019,584 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 }
 
 type cliProfileResponse struct {
-	Env                map[string]string `json:"env"`
-	SupabaseConfigTOML string            `json:"supabase_config_toml"`
+	ProjectRef          string            `json:"project_ref"`
+	ProjectName         string            `json:"project_name"`
+	APIURL              string            `json:"api_url"`
+	CustomAPIURLs       []string          `json:"custom_api_urls"`
+	StudioURL           string            `json:"studio_url"`
+	DatabaseURL         string            `json:"database_url"`
+	InternalDatabaseURL string            `json:"internal_database_url"`
+	PublicDatabaseURL   string            `json:"public_database_url"`
+	Env                 map[string]string `json:"env"`
+	SupabaseConfigTOML  string            `json:"supabase_config_toml"`
+	SecretHandles       map[string]string `json:"secret_handles"`
 }
 
-func (r Runner) printCLIProfile(payload []byte, status int, err error, format string) error {
+type secretRevealResponse struct {
+	Value string `json:"value"`
+}
+
+type dbTunnelReady struct {
+	ProjectRef        string `json:"project_ref"`
+	ListenAddr        string `json:"listen_addr"`
+	RemoteHost        string `json:"remote_host"`
+	DatabaseURL       string `json:"database_url"`
+	DockerDatabaseURL string `json:"docker_database_url,omitempty"`
+	Message           string `json:"message"`
+}
+
+func (r Runner) projectDBTunnel(ctx context.Context, c apiClient, args []string) error {
+	fs := newFlagSet("projects db-tunnel", r.Stderr)
+	ref := fs.String("ref", "", "Project ref")
+	listen := fs.String("listen", "127.0.0.1:15432", "Local listen address")
+	advertiseHost := fs.String("advertise-host", "", "Host to advertise in docker_database_url")
+	readyFile := fs.String("ready-file", "", "Write tunnel metadata JSON after listening")
+	once := fs.Bool("once", false, "Accept one connection and exit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	projectRef := strings.TrimSpace(*ref)
+	if projectRef == "" {
+		return fmt.Errorf("--ref is required")
+	}
+	profile, err := fetchCLIProfile(ctx, c, projectRef)
+	if err != nil {
+		return err
+	}
+	remoteURL := strings.TrimSpace(profile.PublicDatabaseURL)
+	if remoteURL == "" {
+		remoteURL = strings.TrimSpace(profile.DatabaseURL)
+	}
+	if remoteURL == "" {
+		return fmt.Errorf("project profile did not include a database URL")
+	}
+	parseableRemoteURL := strings.ReplaceAll(remoteURL, "${DB_PASSWORD}", "db-password-placeholder")
+	parseableRemoteURL = strings.ReplaceAll(parseableRemoteURL, "$DB_PASSWORD", "db-password-placeholder")
+	remote, err := url.Parse(parseableRemoteURL)
+	if err != nil {
+		return fmt.Errorf("invalid project database URL: %w", err)
+	}
+	if remote.Hostname() == "" {
+		return fmt.Errorf("project database URL did not include a host")
+	}
+	remotePort := remote.Port()
+	if remotePort == "" {
+		remotePort = "5432"
+	}
+	remoteAddr := net.JoinHostPort(remote.Hostname(), remotePort)
+	listener, err := net.Listen("tcp", strings.TrimSpace(*listen))
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	localURL := tunnelDatabaseURL(remote, listener.Addr(), "")
+	dockerURL := ""
+	if host := strings.TrimSpace(*advertiseHost); host != "" {
+		dockerURL = tunnelDatabaseURL(remote, listener.Addr(), host)
+	}
+	ready := dbTunnelReady{
+		ProjectRef:        projectRef,
+		ListenAddr:        listener.Addr().String(),
+		RemoteHost:        remoteAddr,
+		DatabaseURL:       localURL,
+		DockerDatabaseURL: dockerURL,
+		Message:           "local plaintext Postgres tunnel to public STARTTLS database route",
+	}
+	readyPayload, err := json.MarshalIndent(ready, "", "  ")
+	if err != nil {
+		return err
+	}
+	if path := strings.TrimSpace(*readyFile); path != "" {
+		if err := os.WriteFile(path, append(readyPayload, '\n'), 0o600); err != nil {
+			return err
+		}
+	}
+	_, _ = r.Stdout.Write(append(readyPayload, '\n'))
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				return err
+			}
+		}
+		if *once {
+			return proxyPlainPostgresToSTARTTLS(ctx, conn, remoteAddr, remote.Hostname())
+		}
+		go func() {
+			if err := proxyPlainPostgresToSTARTTLS(ctx, conn, remoteAddr, remote.Hostname()); err != nil {
+				fmt.Fprintf(r.Stderr, "db tunnel connection failed: %v\n", err)
+			}
+		}()
+	}
+}
+
+func tunnelDatabaseURL(remote *url.URL, addr net.Addr, advertisedHost string) string {
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		host = addr.String()
+		port = "5432"
+	}
+	if advertisedHost == "" {
+		advertisedHost = host
+	}
+	if advertisedHost == "" || advertisedHost == "0.0.0.0" || advertisedHost == "::" {
+		advertisedHost = "127.0.0.1"
+	}
+	username := remote.User.Username()
+	if username == "" {
+		username = "postgres"
+	}
+	path := remote.EscapedPath()
+	if path == "" {
+		path = "/postgres"
+	}
+	return fmt.Sprintf("postgres://%s:${DB_PASSWORD}@%s%s?sslmode=disable", username, net.JoinHostPort(advertisedHost, port), path)
+}
+
+func proxyPlainPostgresToSTARTTLS(ctx context.Context, client net.Conn, remoteAddr string, serverName string) error {
+	defer client.Close()
+	remote, err := net.Dial("tcp", remoteAddr)
+	if err != nil {
+		return err
+	}
+	defer remote.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = client.SetDeadline(deadline)
+		_ = remote.SetDeadline(deadline)
+	}
+	if _, err := remote.Write([]byte{0, 0, 0, 8, 4, 210, 22, 47}); err != nil {
+		return err
+	}
+	response := make([]byte, 1)
+	if _, err := io.ReadFull(remote, response); err != nil {
+		return err
+	}
+	if response[0] != 'S' {
+		return fmt.Errorf("remote Postgres route rejected STARTTLS")
+	}
+	tlsRemote := tls.Client(remote, &tls.Config{ServerName: serverName, MinVersion: tls.VersionTLS12})
+	if err := tlsRemote.Handshake(); err != nil {
+		return err
+	}
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(tlsRemote, client)
+		_ = tlsRemote.CloseWrite()
+		errCh <- err
+	}()
+	go func() {
+		_, err := io.Copy(client, tlsRemote)
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil && !errorsIsClosedConn(err) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+func errorsIsClosedConn(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "use of closed network connection") || strings.Contains(text, "broken pipe") || strings.Contains(text, "connection reset")
+}
+
+func (r Runner) projectLink(ctx context.Context, c apiClient, args []string) error {
+	fs := newFlagSet("projects link", r.Stderr)
+	ref := fs.String("ref", "", "Project ref")
+	dir := fs.String("dir", ".", "Workspace directory")
+	revealSecrets := fs.Bool("reveal-secrets", false, "Write real secret values after audited reveal")
+	apiDomain := fs.String("api-domain", "", "Use a ready custom API domain as SUPABASE_URL in the workspace env file")
+	preferCustomDomain := fs.Bool("prefer-custom-domain", false, "Use the first ready custom API domain as SUPABASE_URL in the workspace env file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	projectRef := strings.TrimSpace(*ref)
+	if projectRef == "" {
+		return fmt.Errorf("--ref is required")
+	}
+	profile, err := fetchCLIProfile(ctx, c, projectRef)
+	if err != nil {
+		return err
+	}
+	env := profile.Env
+	if *revealSecrets {
+		env, err = materializedProjectEnv(ctx, c, projectRef, profile)
+		if err != nil {
+			return err
+		}
+	}
+	env, err = envWithSelectedAPIURL(env, profile.CustomAPIURLs, customAPIURLOptions{Domain: *apiDomain, Prefer: *preferCustomDomain})
+	if err != nil {
+		return err
+	}
+	root := strings.TrimSpace(*dir)
+	if root == "" {
+		root = "."
+	}
+	bindingDir := filepath.Join(root, ".supadupa")
+	if err := os.MkdirAll(bindingDir, 0o700); err != nil {
+		return err
+	}
+	binding := map[string]any{
+		"project_ref":      profile.ProjectRef,
+		"project_name":     profile.ProjectName,
+		"api_url":          profile.APIURL,
+		"studio_url":       profile.StudioURL,
+		"management_api":   c.baseURL,
+		"linked_at":        time.Now().UTC().Format(time.RFC3339),
+		"secrets_revealed": *revealSecrets,
+	}
+	if len(profile.CustomAPIURLs) > 0 {
+		binding["custom_api_urls"] = profile.CustomAPIURLs
+	}
+	if selected := env["SUPABASE_URL"]; selected != "" && selected != profile.APIURL {
+		binding["selected_api_url"] = selected
+	}
+	if binding["project_ref"] == "" {
+		binding["project_ref"] = projectRef
+	}
+	payload, err := json.MarshalIndent(binding, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	if err := os.WriteFile(filepath.Join(bindingDir, "project.json"), payload, 0o600); err != nil {
+		return err
+	}
+	toml := profile.SupabaseConfigTOML
+	if toml == "" || !strings.HasSuffix(toml, "\n") {
+		toml += "\n"
+	}
+	if err := os.WriteFile(filepath.Join(bindingDir, "config.toml"), []byte(toml), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(bindingDir, "supabase.env"), []byte(renderEnvFile(env)), 0o600); err != nil {
+		return err
+	}
+	supabaseConfigPath := filepath.Join(root, "supabase", "config.toml")
+	supabaseConfigWritten, err := writeFileIfMissing(supabaseConfigPath, []byte(toml), 0o600)
+	if err != nil {
+		return err
+	}
+	if supabaseConfigWritten {
+		binding["supabase_config_path"] = supabaseConfigPath
+		binding["supabase_config_written"] = true
+		updated, err := json.MarshalIndent(binding, "", "  ")
+		if err != nil {
+			return err
+		}
+		updated = append(updated, '\n')
+		if err := os.WriteFile(filepath.Join(bindingDir, "project.json"), updated, 0o600); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(r.Stdout, "linked %s in %s\n", projectRef, bindingDir)
+	return nil
+}
+
+func (r Runner) projectEnv(ctx context.Context, c apiClient, args []string) error {
+	fs := newFlagSet("projects env", r.Stderr)
+	ref := fs.String("ref", "", "Project ref")
+	out := fs.String("out", "", "Write env to file instead of stdout")
+	revealSecrets := fs.Bool("reveal-secrets", false, "Print/write real secret values after audited reveal")
+	apiDomain := fs.String("api-domain", "", "Use a ready custom API domain as SUPABASE_URL")
+	preferCustomDomain := fs.Bool("prefer-custom-domain", false, "Use the first ready custom API domain as SUPABASE_URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	projectRef := strings.TrimSpace(*ref)
+	if projectRef == "" {
+		return fmt.Errorf("--ref is required")
+	}
+	profile, err := fetchCLIProfile(ctx, c, projectRef)
+	if err != nil {
+		return err
+	}
+	env := profile.Env
+	if *revealSecrets {
+		env, err = materializedProjectEnv(ctx, c, projectRef, profile)
+		if err != nil {
+			return err
+		}
+	}
+	env, err = envWithSelectedAPIURL(env, profile.CustomAPIURLs, customAPIURLOptions{Domain: *apiDomain, Prefer: *preferCustomDomain})
+	if err != nil {
+		return err
+	}
+	payload := renderEnvFile(env)
+	if strings.TrimSpace(*out) != "" {
+		return writeFileWithParents(*out, []byte(payload), 0o600)
+	}
+	_, _ = fmt.Fprint(r.Stdout, payload)
+	return nil
+}
+
+func (r Runner) projectGenTypes(ctx context.Context, c apiClient, args []string) error {
+	fs := newFlagSet("projects gen-types", r.Stderr)
+	ref := fs.String("ref", "", "Project ref")
+	lang := fs.String("lang", "typescript", "Generated type language; currently typescript")
+	out := fs.String("out", "", "Write generated types to this file instead of stdout")
+	image := fs.String("image", r.env("SUPADUPA_POSTGRES_META_IMAGE", "public.ecr.aws/supabase/postgres-meta:v0.96.6"), "postgres-meta container image")
+	network := fs.String("network", r.env("SUPADUPA_TYPEGEN_DOCKER_NETWORK", "host"), "Docker network for postgres-meta")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	projectRef := strings.TrimSpace(*ref)
+	if projectRef == "" {
+		return fmt.Errorf("--ref is required")
+	}
+	language := normalizeTypegenLanguage(*lang)
+	if language == "" {
+		return fmt.Errorf("unsupported gen-types language %q; supported: typescript", *lang)
+	}
+	imageName := strings.TrimSpace(*image)
+	if imageName == "" {
+		return fmt.Errorf("--image is required")
+	}
+	networkName := strings.TrimSpace(*network)
+	if networkName == "" {
+		return fmt.Errorf("--network is required")
+	}
+
+	profile, err := fetchCLIProfile(ctx, c, projectRef)
+	if err != nil {
+		return err
+	}
+	dbURLTemplate, err := preferredTypegenDBURL(profile)
+	if err != nil {
+		return err
+	}
+	dbURL := dbURLTemplate
+	if dbURLHasPasswordPlaceholder(dbURLTemplate) {
+		password, err := revealProjectSecret(ctx, c, projectRef, "db_password")
+		if err != nil {
+			return err
+		}
+		dbURL, err = materializeDBPassword(dbURLTemplate, password)
+		if err != nil {
+			return err
+		}
+	}
+
+	var generated bytes.Buffer
+	output := r.Stdout
+	if strings.TrimSpace(*out) != "" {
+		output = &generated
+	}
+	runner := r.CommandRunner
+	if runner == nil {
+		runner = defaultCommandRunner
+	}
+	dockerArgs := []string{
+		"run", "--rm",
+		"--network", networkName,
+		"-e", "PG_META_GENERATE_TYPES",
+		"-e", "PG_META_DB_URL",
+		imageName,
+		"node", "dist/server/server.js",
+	}
+	env := []string{
+		"PG_META_GENERATE_TYPES=" + language,
+		"PG_META_DB_URL=" + dbURL,
+	}
+	if err := runner(ctx, "docker", dockerArgs, env, output, r.Stderr); err != nil {
+		return fmt.Errorf("postgres-meta type generation failed: %w", err)
+	}
+	if strings.TrimSpace(*out) != "" {
+		if err := writeFileWithParents(*out, generated.Bytes(), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeFileWithParents(path string, payload []byte, perm os.FileMode) error {
+	cleaned := filepath.Clean(path)
+	if dir := filepath.Dir(cleaned); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(cleaned, payload, perm)
+}
+
+func writeFileIfMissing(path string, payload []byte, perm os.FileMode) (bool, error) {
+	cleaned := filepath.Clean(path)
+	if _, err := os.Stat(cleaned); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := writeFileWithParents(cleaned, payload, perm); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func fetchCLIProfile(ctx context.Context, c apiClient, ref string) (cliProfileResponse, error) {
+	payload, status, err := c.do(ctx, http.MethodGet, "/v1/projects/"+url.PathEscape(ref)+"/connect/cli", nil, false)
+	if err := apiResponseError(payload, status, err); err != nil {
+		return cliProfileResponse{}, err
+	}
+	var profile cliProfileResponse
+	if err := json.Unmarshal(payload, &profile); err != nil {
+		return cliProfileResponse{}, err
+	}
+	return profile, nil
+}
+
+func revealProjectSecret(ctx context.Context, c apiClient, ref, kind string) (string, error) {
+	path := "/v1/projects/" + url.PathEscape(ref) + "/secrets/" + url.PathEscape(kind) + "/reveal"
+	payload, status, err := c.do(ctx, http.MethodGet, path, nil, false)
+	if err := apiResponseError(payload, status, err); err != nil {
+		return "", err
+	}
+	var secret secretRevealResponse
+	if err := json.Unmarshal(payload, &secret); err != nil {
+		return "", err
+	}
+	if secret.Value == "" {
+		return "", fmt.Errorf("%s secret reveal returned an empty value", kind)
+	}
+	return secret.Value, nil
+}
+
+func materializedProjectEnv(ctx context.Context, c apiClient, ref string, profile cliProfileResponse) (map[string]string, error) {
+	env := map[string]string{}
+	for key, value := range profile.Env {
+		env[key] = value
+	}
+	kindsByEnv := []struct {
+		key  string
+		kind string
+	}{
+		{key: "SUPABASE_ANON_KEY", kind: "anon_key"},
+		{key: "SUPABASE_SERVICE_ROLE_KEY", kind: "service_role"},
+		{key: "SUPABASE_DB_PASSWORD", kind: "db_password"},
+		{key: "SUPABASE_S3_ACCESS_KEY", kind: "s3_access_key"},
+		{key: "SUPABASE_S3_SECRET_KEY", kind: "s3_secret_key"},
+	}
+	revealed := map[string]string{}
+	revealKind := func(kind string) (string, error) {
+		if value, ok := revealed[kind]; ok {
+			return value, nil
+		}
+		value, err := revealProjectSecret(ctx, c, ref, kind)
+		if err != nil {
+			return "", err
+		}
+		revealed[kind] = value
+		return value, nil
+	}
+	for _, item := range kindsByEnv {
+		value := strings.TrimSpace(env[item.key])
+		if value == "" || !strings.HasPrefix(value, "secret://") {
+			continue
+		}
+		secret, err := revealKind(item.kind)
+		if err != nil {
+			return nil, err
+		}
+		env[item.key] = secret
+	}
+	if dbPassword, ok := revealed["db_password"]; ok {
+		for _, key := range []string{"SUPABASE_DB_URL", "DATABASE_URL", "SUPADUPA_INTERNAL_DB_URL"} {
+			if value := env[key]; dbURLHasPasswordPlaceholder(value) {
+				materialized, err := materializeDBPassword(value, dbPassword)
+				if err != nil {
+					return nil, err
+				}
+				env[key] = materialized
+			}
+		}
+	}
+	return env, nil
+}
+
+func preferredTypegenDBURL(profile cliProfileResponse) (string, error) {
+	for _, candidate := range []string{
+		profile.PublicDatabaseURL,
+		profile.DatabaseURL,
+		profile.Env["DATABASE_URL"],
+		profile.Env["SUPABASE_DB_URL"],
+		profile.InternalDatabaseURL,
+	} {
+		if strings.TrimSpace(candidate) != "" {
+			return strings.TrimSpace(candidate), nil
+		}
+	}
+	return "", fmt.Errorf("cli profile did not include a database URL")
+}
+
+func normalizeTypegenLanguage(input string) string {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "", "typescript", "ts":
+		return "typescript"
+	default:
+		return ""
+	}
+}
+
+func dbURLHasPasswordPlaceholder(input string) bool {
+	return strings.Contains(input, "${DB_PASSWORD}") || strings.Contains(input, "$DB_PASSWORD")
+}
+
+func materializeDBPassword(input, password string) (string, error) {
+	if !dbURLHasPasswordPlaceholder(input) {
+		return input, nil
+	}
+	parseable := strings.ReplaceAll(input, "${DB_PASSWORD}", "db-password-placeholder")
+	parseable = strings.ReplaceAll(parseable, "$DB_PASSWORD", "db-password-placeholder")
+	parsed, err := url.Parse(parseable)
+	if err == nil && parsed.User != nil {
+		username := parsed.User.Username()
+		if username != "" {
+			parsed.User = url.UserPassword(username, password)
+			return parsed.String(), nil
+		}
+	}
+	if strings.Contains(input, "${DB_PASSWORD}") {
+		return strings.ReplaceAll(input, "${DB_PASSWORD}", url.PathEscape(password)), nil
+	}
+	return strings.ReplaceAll(input, "$DB_PASSWORD", url.PathEscape(password)), nil
+}
+
+func apiResponseError(payload []byte, status int, err error) error {
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("api returned %d: %s", status, strings.TrimSpace(string(payload)))
+	}
+	return nil
+}
+
+func defaultCommandRunner(ctx context.Context, name string, args []string, env []string, stdout, stderr io.Writer) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
+}
+
+type customAPIURLOptions struct {
+	Domain string
+	Prefer bool
+}
+
+func (r Runner) printCLIProfile(payload []byte, status int, err error, format string, apiOptions customAPIURLOptions) error {
 	format = strings.ToLower(strings.TrimSpace(format))
 	if format == "" || format == "json" {
 		return r.printResponse(payload, status, err)
@@ -866,14 +1613,11 @@ func (r Runner) printCLIProfile(payload []byte, status int, err error, format st
 	}
 	switch format {
 	case "env":
-		keys := make([]string, 0, len(profile.Env))
-		for key := range profile.Env {
-			keys = append(keys, key)
+		env, err := envWithSelectedAPIURL(profile.Env, profile.CustomAPIURLs, apiOptions)
+		if err != nil {
+			return err
 		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			fmt.Fprintf(r.Stdout, "%s=%s\n", key, shellEnvValue(profile.Env[key]))
-		}
+		_, _ = fmt.Fprint(r.Stdout, renderEnvFile(env))
 		return nil
 	case "toml":
 		_, _ = fmt.Fprint(r.Stdout, profile.SupabaseConfigTOML)
@@ -884,6 +1628,91 @@ func (r Runner) printCLIProfile(payload []byte, status int, err error, format st
 	default:
 		return fmt.Errorf("unsupported cli-profile format %q", format)
 	}
+}
+
+func envWithSelectedAPIURL(env map[string]string, customAPIURLs []string, options customAPIURLOptions) (map[string]string, error) {
+	out := make(map[string]string, len(env)+1)
+	for key, value := range env {
+		out[key] = value
+	}
+	selected, err := selectCustomAPIURL(customAPIURLs, options)
+	if err != nil {
+		return nil, err
+	}
+	if selected != "" {
+		out["SUPABASE_URL"] = selected
+		out["SUPADUPA_SELECTED_API_URL"] = selected
+	}
+	return out, nil
+}
+
+func selectCustomAPIURL(customAPIURLs []string, options customAPIURLOptions) (string, error) {
+	domain := strings.TrimSpace(options.Domain)
+	if domain == "" && !options.Prefer {
+		return "", nil
+	}
+	ready := make([]string, 0, len(customAPIURLs))
+	for _, apiURL := range customAPIURLs {
+		normalized := normalizeCustomAPIURL(apiURL)
+		if normalized != "" {
+			ready = append(ready, normalized)
+		}
+	}
+	if len(ready) == 0 {
+		return "", fmt.Errorf("no ready custom API domains are available for this project")
+	}
+	if domain == "" {
+		return ready[0], nil
+	}
+	want := normalizeCustomAPIURL(domain)
+	for _, apiURL := range ready {
+		if apiURL == want || hostFromURL(apiURL) == strings.Trim(strings.ToLower(domain), ".") {
+			return apiURL, nil
+		}
+	}
+	return "", fmt.Errorf("custom API domain %q is not ready for this project; available: %s", domain, strings.Join(ready, ", "))
+}
+
+func normalizeCustomAPIURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + strings.Trim(value, ".")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	parsed.Scheme = "https"
+	parsed.Host = strings.Trim(strings.ToLower(parsed.Host), ".")
+	parsed.Path = ""
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func hostFromURL(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+func renderEnvFile(env map[string]string) string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var out strings.Builder
+	for _, key := range keys {
+		fmt.Fprintf(&out, "%s=%s\n", key, shellEnvValue(env[key]))
+	}
+	return out.String()
 }
 
 func shellEnvValue(value string) string {
@@ -970,11 +1799,13 @@ func (r Runner) services(ctx context.Context, c apiClient, args []string) error 
 
 func (r Runner) domains(ctx context.Context, c apiClient, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("domains requires subcommand: list, add, delete")
+		return fmt.Errorf("domains requires subcommand: list, add, delete, upload-certificate, reset-certificate")
 	}
 	fs := newFlagSet("domains "+args[0], r.Stderr)
 	ref := fs.String("ref", "", "Project ref")
 	fqdn := fs.String("fqdn", "", "Domain FQDN")
+	certFile := fs.String("cert-file", "", "Certificate PEM file")
+	keyFile := fs.String("key-file", "", "Private key PEM file")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -986,6 +1817,21 @@ func (r Runner) domains(ctx context.Context, c apiClient, args []string) error {
 		return r.printResponse(c.do(ctx, http.MethodPost, path, map[string]string{"fqdn": *fqdn}, false))
 	case "delete":
 		return r.printResponse(c.do(ctx, http.MethodDelete, path+"/"+url.PathEscape(*fqdn), nil, false))
+	case "upload-certificate":
+		certificatePEM, err := os.ReadFile(*certFile)
+		if err != nil {
+			return err
+		}
+		privateKeyPEM, err := os.ReadFile(*keyFile)
+		if err != nil {
+			return err
+		}
+		return r.printResponse(c.do(ctx, http.MethodPut, path+"/"+url.PathEscape(*fqdn)+"/certificate", map[string]string{
+			"certificate_pem": string(certificatePEM),
+			"private_key_pem": string(privateKeyPEM),
+		}, false))
+	case "reset-certificate":
+		return r.printResponse(c.do(ctx, http.MethodDelete, path+"/"+url.PathEscape(*fqdn)+"/certificate", nil, false))
 	default:
 		return fmt.Errorf("unknown domains subcommand %q", args[0])
 	}
@@ -1148,6 +1994,7 @@ func (r Runner) branches(ctx context.Context, c apiClient, args []string) error 
 		branchRef := fs.String("branch-ref", "", "Branch project ref")
 		name := fs.String("name", "", "Branch project name")
 		ttlHours := fs.Int("ttl-hours", 0, "Optional branch TTL in hours")
+		withData := fs.Bool("with-data", false, "Clone source project data into the branch")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -1155,6 +2002,7 @@ func (r Runner) branches(ctx context.Context, c apiClient, args []string) error 
 			"ref":       *branchRef,
 			"name":      *name,
 			"ttl_hours": *ttlHours,
+			"with_data": *withData,
 		}
 		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(*ref)+"/branches", payload, false))
 	case "delete":
@@ -1201,13 +2049,15 @@ func (r Runner) backups(ctx context.Context, c apiClient, args []string) error {
 		enabled := fs.Bool("enabled", false, "Enable scheduled backups")
 		schedule := fs.String("schedule", "daily", "Backup schedule")
 		kind := fs.String("kind", "logical", "Backup kind")
+		storageTargetID := fs.String("storage-target-id", "", "Backup storage target ID; omit to use platform default")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		payload := map[string]any{
-			"enabled":  *enabled,
-			"schedule": *schedule,
-			"kind":     *kind,
+			"enabled":           *enabled,
+			"schedule":          *schedule,
+			"kind":              *kind,
+			"storage_target_id": *storageTargetID,
 		}
 		path := "/v1/projects/" + url.PathEscape(*ref) + "/backups/policy"
 		return r.printResponse(c.do(ctx, http.MethodPut, path, payload, false))
@@ -2203,6 +3053,14 @@ func (r Runner) networkConnections(ctx context.Context, c apiClient, args []stri
 }
 
 func (r Runner) metrics(ctx context.Context, c apiClient, args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "fleet":
+			args = args[1:]
+		case "project":
+			args = args[1:]
+		}
+	}
 	fs := newFlagSet("metrics", r.Stderr)
 	prometheus := fs.Bool("prometheus", false, "Print Prometheus text format")
 	ref := fs.String("ref", "", "Project ref for project-scoped metrics")
@@ -2313,7 +3171,7 @@ func (r Runner) printResponse(payload []byte, status int, err error) error {
 
 func (r Runner) printUsage() {
 	fmt.Fprintln(r.Stderr, "usage: supadupa-cli [--api URL] [--token TOKEN] <command> [args]")
-	fmt.Fprintln(r.Stderr, "commands: bootstrap, login, mfa, orgs, users, scim, provisioner, members, teams, access, hosts, quotas, usage, billing, settings, projects, config, services, domains, routes, log-drains, secrets, branches, replicas, backups, pitr, functions, auth-clients, auth-hooks, replication, embeddings, database-extensions, database-cron, database-queues, database-webhooks, database-schemas, database-roles, storage-buckets, vector-buckets, analytics-buckets, cdn, network, network-connections, metrics, advisor, compliance, audit, logs")
+	fmt.Fprintln(r.Stderr, "commands: bootstrap, login, mfa, orgs, users, scim, provisioner, members, teams, access, hosts, quotas, usage, billing, settings, backup-targets, projects, config, services, domains, routes, log-drains, secrets, branches, replicas, backups, pitr, functions, auth-clients, auth-hooks, replication, embeddings, database-extensions, database-cron, database-queues, database-webhooks, database-schemas, database-roles, storage-buckets, vector-buckets, analytics-buckets, cdn, network, network-connections, metrics, advisor, compliance, audit, logs")
 }
 
 func (r Runner) env(key string, fallback string) string {
@@ -2419,19 +3277,30 @@ func (s *stringListFlag) Set(value string) error {
 func parseKeyValues(inputs []string) map[string]string {
 	out := map[string]string{}
 	for _, input := range inputs {
-		for _, part := range strings.Split(input, ",") {
+		for _, part := range splitKeyValueInput(input) {
 			key, value, ok := strings.Cut(part, "=")
 			if !ok {
 				continue
 			}
 			key = strings.TrimSpace(key)
 			value = strings.TrimSpace(value)
-			if key != "" && value != "" {
+			if key != "" {
 				out[key] = value
 			}
 		}
 	}
 	return out
+}
+
+func splitKeyValueInput(input string) []string {
+	key, value, ok := strings.Cut(input, "=")
+	if ok && strings.TrimSpace(key) != "" {
+		trimmedValue := strings.TrimSpace(value)
+		if strings.HasPrefix(trimmedValue, "{") || strings.HasPrefix(trimmedValue, "[") {
+			return []string{input}
+		}
+	}
+	return strings.Split(input, ",")
 }
 
 func parseListValues(inputs []string) []string {

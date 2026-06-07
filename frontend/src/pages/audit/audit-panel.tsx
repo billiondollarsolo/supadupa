@@ -1,8 +1,41 @@
+import { useMemo } from "react";
+import type { ColumnDef } from "@tanstack/react-table";
+import { DataTable } from "../../components/data-table";
 import type { AuditEvent, AuditIntegrity } from "../../types";
 import { formatTime } from "../../lib/format";
 
 export function AuditPanel({ events, integrity, loading, maxEvents }: { events: AuditEvent[]; integrity?: AuditIntegrity; loading: boolean; maxEvents?: number }) {
   const visibleEvents = typeof maxEvents === "number" ? events.slice(0, maxEvents) : events;
+  const columns = useMemo<ColumnDef<AuditEvent>[]>(
+    () => [
+      {
+        header: "Action",
+        accessorKey: "action",
+        size: 220,
+        cell: ({ row }) => <p className="cell-main truncate">{row.original.action}</p>,
+      },
+      {
+        header: "Target",
+        accessorKey: "target",
+        size: 320,
+        cell: ({ row }) => <p className="truncate font-mono text-xs text-muted">{row.original.target}</p>,
+      },
+      {
+        header: "Index",
+        accessorKey: "chain_index",
+        size: 100,
+        cell: ({ row }) => <p className="font-mono text-xs text-muted">#{row.original.chain_index}</p>,
+      },
+      {
+        header: "Time",
+        accessorKey: "created_at",
+        size: 120,
+        cell: ({ row }) => <time className="text-xs text-faint">{formatTime(row.original.created_at)}</time>,
+      },
+    ],
+    [],
+  );
+
   return (
     <section className="panel">
       <div className="section-head">
@@ -27,16 +60,7 @@ export function AuditPanel({ events, integrity, loading, maxEvents }: { events: 
             <time className="text-xs text-faint">{formatTime(integrity.checked_at)}</time>
           </div>
         ) : null}
-        {!loading && events.length === 0 ? <p className="text-sm text-muted">No events recorded yet.</p> : null}
-        {visibleEvents.map((event) => (
-          <div className="audit-row" key={event.id}>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{event.action}</p>
-              <p className="truncate font-mono text-xs text-muted">#{event.chain_index} {event.target}</p>
-            </div>
-            <time className="text-xs text-faint">{formatTime(event.created_at)}</time>
-          </div>
-        ))}
+        <DataTable columns={columns} data={visibleEvents} emptyText="No events recorded yet." minWidth={760} />
         {typeof maxEvents === "number" && events.length > maxEvents ? <p className="text-xs text-faint">Showing {maxEvents} of {events.length} events.</p> : null}
       </div>
     </section>

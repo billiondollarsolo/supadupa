@@ -38,6 +38,10 @@ type AuthHookSyncer interface {
 	SyncAuthHooks(ctx context.Context, ref string, hooks []ProjectAuthHook) error
 }
 
+type ReplicaSyncer interface {
+	SyncReplicas(ctx context.Context, ref string, replicas []ProjectReplica) error
+}
+
 type TelemetryCollector interface {
 	CollectProjectTelemetry(ctx context.Context, ref string) (TelemetrySampleInput, error)
 }
@@ -47,6 +51,7 @@ type BranchCloneOptions struct {
 	BranchRef string
 	BranchID  string
 	Name      string
+	WithData  bool
 	ExpiresAt *time.Time
 }
 

@@ -70,7 +70,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			}
 			continue
 		}
-		if status.Phase != "" && status.Phase != project.Status {
+		if status.Phase != "" && (status.Phase != project.Status || status.Message != project.Message) {
 			_, _ = r.store.UpdateProjectStatus(ctx, project.Ref, status.Phase, status.Message)
 			level := "info"
 			if status.Phase == control.ProjectDegraded || status.Phase == control.ProjectError {

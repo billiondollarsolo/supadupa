@@ -310,6 +310,75 @@ select {
   min-width: 2px;
 }
 
+.usage-trend {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.trend-chart {
+  display: block;
+  height: 128px;
+  overflow: visible;
+  width: 100%;
+}
+
+.trend-grid-line {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+.trend-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.trend-line.cpu {
+  stroke: var(--color-accent);
+}
+
+.trend-line.memory {
+  stroke: var(--color-success);
+}
+
+.trend-legend {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+}
+
+.trend-legend::before {
+  border-radius: 999px;
+  content: "";
+  display: inline-block;
+  height: 7px;
+  width: 7px;
+}
+
+.trend-legend.cpu::before {
+  background: var(--color-accent);
+}
+
+.trend-legend.memory::before {
+  background: var(--color-success);
+}
+
+@media (max-width: 1024px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 :root[data-theme="light"] .panel,
 :root[data-theme="light"] .toast,
 :root[data-theme="light"] .palette-dialog,
@@ -387,6 +456,7 @@ select {
   background: var(--color-bg);
   display: grid;
   min-width: 0;
+  overflow: hidden;
   padding: 14px;
   transition: background 140ms ease-out, border-color 140ms ease-out;
 }
@@ -395,6 +465,89 @@ select {
 .project-card.active {
   background: var(--color-surface-2);
   border-color: var(--color-border-strong);
+}
+
+.project-card-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.project-card-button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: grid;
+  gap: 12px;
+  min-height: 360px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.project-card-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+  width: 100%;
+}
+
+.project-card-header .pill {
+  max-width: 45%;
+}
+
+.project-card-panel,
+.resource-summary {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.project-card-panel {
+  padding: 8px;
+}
+
+.project-card-detail-grid,
+.project-card-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  width: 100%;
+}
+
+.project-card-actions {
+  margin-top: 12px;
+}
+
+.resource-summary {
+  padding: 12px;
+}
+
+@media (max-width: 1280px) {
+  .project-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1024px) {
+  .project-card-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 520px) {
+  .project-card-detail-grid,
+  .project-card-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .wizard-review {
@@ -441,13 +594,18 @@ select {
 }
 
 .pill {
+  align-items: center;
   border: 1px solid var(--color-border);
   border-radius: 999px;
   color: var(--color-muted);
   display: inline-flex;
   font-size: 12px;
   line-height: 1;
+  min-width: 0;
+  overflow: hidden;
   padding: 5px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pill.healthy {
@@ -461,6 +619,7 @@ select {
 }
 
 .pill.paused,
+.pill.warning,
 .pill.provisioning {
   border-color: color-mix(in srgb, var(--color-warning), transparent 65%);
   color: var(--color-warning);
@@ -669,6 +828,90 @@ select {
   padding-inline: 0;
 }
 
+.data-table-wrap {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.data-table {
+  border-collapse: collapse;
+  min-width: 760px;
+  table-layout: fixed;
+  width: 100%;
+}
+
+.data-table th,
+.data-table td {
+  border-bottom: 1px solid var(--color-border);
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.data-table th {
+  color: var(--color-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.data-table td {
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.data-table tbody tr {
+  transition: background 140ms ease-out;
+}
+
+.data-table tbody tr:hover {
+  background: var(--color-bg);
+}
+
+.data-table tbody tr.table-row-error {
+  background: color-mix(in srgb, var(--color-danger) 7%, transparent);
+}
+
+.data-table tbody tr.table-row-warning {
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+}
+
+.data-table tbody tr.table-row-error:hover {
+  background: color-mix(in srgb, var(--color-danger) 11%, var(--color-bg));
+}
+
+.data-table tbody tr.table-row-warning:hover {
+  background: color-mix(in srgb, var(--color-warning) 12%, var(--color-bg));
+}
+
+.data-table button:not(.icon-button) {
+  color: inherit;
+  display: block;
+  width: 100%;
+}
+
+.data-table .icon-button {
+  min-height: 32px;
+  min-width: 32px;
+}
+
+.data-table .cell-main {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.data-table .cell-sub {
+  color: var(--color-faint);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
 .audit-row,
 .backup-row,
 .billing-row,
@@ -710,6 +953,23 @@ select {
   grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
 }
 
+.recoverability-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.readiness-row {
+  align-items: start;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 82px;
+  padding: 10px;
+}
+
 .extension-row {
   align-items: center;
   border: 1px solid var(--color-border);
@@ -734,7 +994,17 @@ select {
     justify-content: flex-start;
   }
 
+  .recoverability-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .extension-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 520px) {
+  .recoverability-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

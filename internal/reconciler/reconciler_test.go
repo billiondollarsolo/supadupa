@@ -111,6 +111,52 @@ func TestReconcileMarksDegradedDrift(t *testing.T) {
 	}
 }
 
+func TestReconcileUpdatesSamePhaseMessageDrift(t *testing.T) {
+	ctx := context.Background()
+	store := control.NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, control.CreateProjectRequest{
+		OrgID:  org.ID,
+		Ref:    "alpha",
+		Name:   "Alpha",
+		Domain: "supadupa.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.UpdateProjectStatus(ctx, project.Ref, control.ProjectDegraded, "compose render drift: compose missing ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = New(store, fakeProvisioner{status: control.ProjectStatus{
+		Ref:     project.Ref,
+		Phase:   control.ProjectDegraded,
+		Message: "compose live drift: missing live services realtime",
+	}}, nil).Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := store.GetProject(ctx, project.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != control.ProjectDegraded || updated.Message != "compose live drift: missing live services realtime" {
+		t.Fatalf("expected same-phase message update, got %#v", updated)
+	}
+	events, err := store.ListAuditEvents(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != "project.reconciled" || events[0].Metadata["from"] != string(control.ProjectDegraded) || events[0].Metadata["to"] != string(control.ProjectDegraded) {
+		t.Fatalf("expected same-phase reconciled audit event, got %#v", events)
+	}
+}
+
 func TestReconcileLogsProvisionerErrors(t *testing.T) {
 	ctx := context.Background()
 	store := control.NewMemoryStore()
@@ -165,7 +211,7 @@ func TestReconcilePreservesPausedProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.UpdateProjectStatus(ctx, project.Ref, control.ProjectPaused, "paused")
+	_, err = store.UpdateProjectStatus(ctx, project.Ref, control.ProjectPaused, "compose project paused")
 	if err != nil {
 		t.Fatal(err)
 	}

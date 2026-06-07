@@ -181,19 +181,57 @@ type ProjectAccessGrantInput struct {
 }
 
 type ProjectBackupPolicy struct {
-	ProjectRef string     `json:"project_ref"`
-	Enabled    bool       `json:"enabled"`
-	Schedule   string     `json:"schedule"`
-	Kind       string     `json:"kind"`
-	LastRunAt  *time.Time `json:"last_run_at,omitempty"`
-	NextRunAt  *time.Time `json:"next_run_at,omitempty"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ProjectRef      string     `json:"project_ref"`
+	Enabled         bool       `json:"enabled"`
+	Schedule        string     `json:"schedule"`
+	Kind            string     `json:"kind"`
+	StorageTargetID string     `json:"storage_target_id,omitempty"`
+	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt       *time.Time `json:"next_run_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type ProjectBackupPolicyInput struct {
-	Enabled  bool   `json:"enabled"`
-	Schedule string `json:"schedule"`
-	Kind     string `json:"kind"`
+	Enabled         bool   `json:"enabled"`
+	Schedule        string `json:"schedule"`
+	Kind            string `json:"kind"`
+	StorageTargetID string `json:"storage_target_id,omitempty"`
+}
+
+type BackupStorageTarget struct {
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Type             string     `json:"type"`
+	Endpoint         string     `json:"endpoint"`
+	Region           string     `json:"region"`
+	Bucket           string     `json:"bucket"`
+	Prefix           string     `json:"prefix,omitempty"`
+	AccessKeyID      string     `json:"access_key_id,omitempty"`
+	SecretConfigured bool       `json:"secret_configured"`
+	ForcePathStyle   bool       `json:"force_path_style"`
+	Default          bool       `json:"default"`
+	DurableOffHost   bool       `json:"durable_off_host"`
+	RecoveryReady    bool       `json:"recovery_ready"`
+	ReadinessStatus  string     `json:"readiness_status"`
+	ReadinessMessage string     `json:"readiness_message,omitempty"`
+	LastTestedAt     *time.Time `json:"last_tested_at,omitempty"`
+	LastTestStatus   string     `json:"last_test_status,omitempty"`
+	LastTestError    string     `json:"last_test_error,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+type BackupStorageTargetInput struct {
+	Name            string `json:"name"`
+	Type            string `json:"type"`
+	Endpoint        string `json:"endpoint"`
+	Region          string `json:"region"`
+	Bucket          string `json:"bucket"`
+	Prefix          string `json:"prefix"`
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key,omitempty"`
+	ForcePathStyle  bool   `json:"force_path_style"`
+	Default         bool   `json:"default"`
 }
 
 type ProjectPITRPolicy struct {
@@ -216,6 +254,7 @@ type ProjectBranch struct {
 	SourceProjectRef string     `json:"source_project_ref"`
 	ProjectRef       string     `json:"project_ref"`
 	Name             string     `json:"name"`
+	WithData         bool       `json:"with_data"`
 	Status           string     `json:"status"`
 	CreatedAt        time.Time  `json:"created_at"`
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
@@ -225,6 +264,7 @@ type ProjectBranchInput struct {
 	Ref      string `json:"ref"`
 	Name     string `json:"name"`
 	TTLHours int    `json:"ttl_hours"`
+	WithData bool   `json:"with_data"`
 }
 
 type projectBranchCreateResponseWire struct {
@@ -656,6 +696,22 @@ type ProjectDomain struct {
 	ProjectRef string `json:"project_ref"`
 	FQDN       string `json:"fqdn"`
 	CertStatus string `json:"cert_status"`
+	CertMode   string `json:"cert_mode"`
+}
+
+type ProjectConnect struct {
+	APIURL        string            `json:"api_url"`
+	StudioURL     string            `json:"studio_url"`
+	RESTURL       string            `json:"rest_url"`
+	AuthURL       string            `json:"auth_url"`
+	GraphQLURL    string            `json:"graphql_url"`
+	RealtimeURL   string            `json:"realtime_url"`
+	FunctionsURL  string            `json:"functions_url"`
+	StorageURL    string            `json:"storage_url"`
+	StorageS3URL  string            `json:"storage_s3_url"`
+	CustomAPIURLs []string          `json:"custom_api_urls"`
+	APIKeys       map[string]string `json:"api_keys"`
+	Postgres      map[string]string `json:"postgres"`
 }
 
 type ProjectDomainInput struct {
@@ -1048,6 +1104,14 @@ func (c *Client) GetProject(ctx context.Context, ref string) (Project, error) {
 	return project, nil
 }
 
+func (c *Client) GetProjectConnect(ctx context.Context, ref string) (ProjectConnect, error) {
+	var connect ProjectConnect
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+url.PathEscape(ref)+"/connect", nil, &connect); err != nil {
+		return ProjectConnect{}, err
+	}
+	return connect, nil
+}
+
 func (c *Client) DeleteProject(ctx context.Context, ref string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/projects/"+url.PathEscape(ref), nil, nil)
 }
@@ -1091,6 +1155,42 @@ func (c *Client) UpdateProjectBackupPolicy(ctx context.Context, ref string, inpu
 		return ProjectBackupPolicy{}, err
 	}
 	return policy, nil
+}
+
+func (c *Client) ListBackupStorageTargets(ctx context.Context) ([]BackupStorageTarget, error) {
+	var targets []BackupStorageTarget
+	if err := c.do(ctx, http.MethodGet, "/v1/backup-storage-targets", nil, &targets); err != nil {
+		return nil, err
+	}
+	return targets, nil
+}
+
+func (c *Client) CreateBackupStorageTarget(ctx context.Context, input BackupStorageTargetInput) (BackupStorageTarget, error) {
+	var target BackupStorageTarget
+	if err := c.do(ctx, http.MethodPost, "/v1/backup-storage-targets", input, &target); err != nil {
+		return BackupStorageTarget{}, err
+	}
+	return target, nil
+}
+
+func (c *Client) UpdateBackupStorageTarget(ctx context.Context, id string, input BackupStorageTargetInput) (BackupStorageTarget, error) {
+	var target BackupStorageTarget
+	if err := c.do(ctx, http.MethodPut, "/v1/backup-storage-targets/"+url.PathEscape(id), input, &target); err != nil {
+		return BackupStorageTarget{}, err
+	}
+	return target, nil
+}
+
+func (c *Client) TestBackupStorageTarget(ctx context.Context, id string) (BackupStorageTarget, error) {
+	var target BackupStorageTarget
+	if err := c.do(ctx, http.MethodPost, "/v1/backup-storage-targets/"+url.PathEscape(id)+"/test", nil, &target); err != nil {
+		return BackupStorageTarget{}, err
+	}
+	return target, nil
+}
+
+func (c *Client) DeleteBackupStorageTarget(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/backup-storage-targets/"+url.PathEscape(id), nil, nil)
 }
 
 func (c *Client) GetProjectPITRPolicy(ctx context.Context, ref string) (ProjectPITRPolicy, error) {

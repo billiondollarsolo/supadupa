@@ -9,15 +9,20 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,6 +59,91 @@ func TestCORSOrigins(t *testing.T) {
 		}
 		if got := response.Header().Get("Vary"); got != "Origin" {
 			t.Fatalf("expected Vary Origin header, got %q", got)
+		}
+		if got := response.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "PATCH") {
+			t.Fatalf("expected CORS preflight to allow PATCH for SCIM updates, got %q", got)
+		}
+	}
+}
+
+func TestDefaultCORSOriginsIncludeConfiguredAdminHost(t *testing.T) {
+	t.Setenv("SUPADUPA_ADMIN_HOST", "admin.example.com")
+	server := NewServer(Config{Provisioner: composeprovisioner.New()})
+
+	request := httptest.NewRequest(http.MethodOptions, "/v1/health", nil)
+	request.Header.Set("Origin", "https://admin.example.com")
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://admin.example.com" {
+		t.Fatalf("expected admin host origin to be allowed, got %q", got)
+	}
+
+	localRequest := httptest.NewRequest(http.MethodOptions, "/v1/health", nil)
+	localRequest.Header.Set("Origin", "http://localhost:3000")
+	localResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(localResponse, localRequest)
+	if got := localResponse.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("expected configured admin host to suppress local defaults, got %q", got)
+	}
+}
+
+func TestListStackReleasesReturnsConfiguredManifests(t *testing.T) {
+	t.Setenv("SUPADUPA_SUPPORTED_STACK_VERSIONS", "2026.06.06")
+	t.Setenv("SUPADUPA_STACK_RELEASES_JSON", `{
+		"2026.06.06": {
+			"postgres": "pg-tag",
+			"kong": "kong-tag",
+			"studio": "studio-tag",
+			"postgres_meta": "meta-tag",
+			"auth": "auth-tag",
+			"rest": "rest-tag",
+			"realtime": "realtime-tag",
+			"storage": "storage-tag",
+			"imgproxy": "imgproxy-tag",
+			"edge_runtime": "edge-tag",
+			"pooler": "pooler-tag",
+			"analytics": "analytics-tag",
+			"vector": "vector-tag"
+		}
+	}`)
+	store := control.NewMemoryStore()
+	user, err := store.CreateUser(context.Background(), control.CreateUserRequest{Email: "admin@example.com", Password: "super-secure", Role: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := control.NewAuthService("stack-release-test-secret")
+	token, err := auth.Issue(user, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Config{Store: store, Auth: auth, Provisioner: fakeProvisioner{}, AuthRequired: true})
+
+	unauthorized := perform(server, http.MethodGet, "/v1/stack-releases", "")
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized status, got %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	response := performWithToken(server, http.MethodGet, "/v1/stack-releases", "", token)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected release list status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	for _, expected := range []string{
+		`"version":"2026.06.06"`,
+		`"postgres":"pg-tag"`,
+		`"kong":"kong-tag"`,
+		`"studio":"studio-tag"`,
+		`"postgres_meta":"meta-tag"`,
+		`"auth":"auth-tag"`,
+		`"rest":"rest-tag"`,
+		`"realtime":"realtime-tag"`,
+		`"storage":"storage-tag"`,
+		`"edge_runtime":"edge-tag"`,
+		`"pooler":"pooler-tag"`,
+		`"analytics":"analytics-tag"`,
+		`"vector":"vector-tag"`,
+	} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("expected release response to include %s: %s", expected, response.Body.String())
 		}
 	}
 }
@@ -372,8 +462,13 @@ func TestSCIMUsersAndGroupsProvisioning(t *testing.T) {
 		t.Fatalf("expected SCIM user replace: %d %s", replaceUser.Code, replaceUser.Body.String())
 	}
 
+	patchUser := performWithToken(server, http.MethodPatch, "/v1/scim/v2/Users/"+userID, `{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"userName","value":"viewer@example.com"},{"op":"replace","path":"urn:supadupa:params:scim:schemas:extension:User.role","value":"viewer"}]}`, token)
+	if patchUser.Code != http.StatusOK || !strings.Contains(patchUser.Body.String(), `"userName":"viewer@example.com"`) || !strings.Contains(patchUser.Body.String(), `"role":"viewer"`) {
+		t.Fatalf("expected SCIM user patch: %d %s", patchUser.Code, patchUser.Body.String())
+	}
+
 	listUsers := performWithToken(server, http.MethodGet, "/v1/scim/v2/Users", "", token)
-	if listUsers.Code != http.StatusOK || !strings.Contains(listUsers.Body.String(), `"totalResults":2`) || !strings.Contains(listUsers.Body.String(), `"userName":"engineer@example.com"`) {
+	if listUsers.Code != http.StatusOK || !strings.Contains(listUsers.Body.String(), `"totalResults":2`) || !strings.Contains(listUsers.Body.String(), `"userName":"viewer@example.com"`) {
 		t.Fatalf("expected SCIM user list: %d %s", listUsers.Code, listUsers.Body.String())
 	}
 
@@ -383,7 +478,7 @@ func TestSCIMUsersAndGroupsProvisioning(t *testing.T) {
 		t.Fatalf("expected SCIM group create 201, got %d: %s", createGroup.Code, createGroup.Body.String())
 	}
 	groupID := extractString(t, createGroup.Body.String(), "id")
-	for _, expected := range []string{`"displayName":"Platform Engineers"`, `"display":"engineer@example.com"`, `"org_id":"` + orgID + `"`} {
+	for _, expected := range []string{`"displayName":"Platform Engineers"`, `"display":"viewer@example.com"`, `"org_id":"` + orgID + `"`} {
 		if !strings.Contains(createGroup.Body.String(), expected) {
 			t.Fatalf("expected SCIM group value %s: %s", expected, createGroup.Body.String())
 		}
@@ -403,7 +498,7 @@ func TestSCIMUsersAndGroupsProvisioning(t *testing.T) {
 		t.Fatalf("expected deleted SCIM user 404, got %d: %s", getDeletedUser.Code, getDeletedUser.Body.String())
 	}
 	getGroup := performWithToken(server, http.MethodGet, "/v1/scim/v2/Groups/"+groupID, "", token)
-	if getGroup.Code != http.StatusOK || strings.Contains(getGroup.Body.String(), "engineer@example.com") {
+	if getGroup.Code != http.StatusOK || strings.Contains(getGroup.Body.String(), "viewer@example.com") {
 		t.Fatalf("expected SCIM deprovision to remove team membership: %d %s", getGroup.Code, getGroup.Body.String())
 	}
 
@@ -412,9 +507,116 @@ func TestSCIMUsersAndGroupsProvisioning(t *testing.T) {
 		t.Fatalf("expected SCIM group delete 204, got %d: %s", deleteGroup.Code, deleteGroup.Body.String())
 	}
 	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
-	for _, action := range []string{"scim.user_create", "scim.user_replace", "scim.user_deprovision", "scim.group_create", "scim.group_delete"} {
+	for _, action := range []string{"scim.user_create", "scim.user_replace", "scim.user_patch", "scim.user_deprovision", "scim.group_create", "scim.group_delete"} {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected SCIM audit action %s: %s", action, auditResponse.Body.String())
+		}
+	}
+}
+
+func TestSCIMBearerTokenProvisioningIsSeparateFromPlatformAdminAuth(t *testing.T) {
+	store := control.NewMemoryStore()
+	serverAuth := control.NewAuthService("scim-test-secret")
+	server := NewServer(Config{
+		Store:        store,
+		Auth:         serverAuth,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	adminToken := extractString(t, bootstrap.Body.String(), "token")
+	update := performWithToken(server, http.MethodPut, "/v1/settings/sso", `{"enabled":false,"default_role":"developer","scim_enabled":true,"scim_token":"scim-secret-token"}`, adminToken)
+	if update.Code != http.StatusOK {
+		t.Fatalf("expected SCIM config update 200, got %d: %s", update.Code, update.Body.String())
+	}
+	for _, forbidden := range []string{"scim-secret-token", "scim_token_hash"} {
+		if strings.Contains(update.Body.String(), forbidden) {
+			t.Fatalf("expected SCIM token material to be redacted from settings response: %s", update.Body.String())
+		}
+	}
+	if !strings.Contains(update.Body.String(), `"scim_enabled":true`) || !strings.Contains(update.Body.String(), `"scim_token_configured":true`) {
+		t.Fatalf("expected SCIM settings status in response: %s", update.Body.String())
+	}
+
+	invalid := performWithToken(server, http.MethodGet, "/v1/scim/v2/Users", "", "wrong-token")
+	if invalid.Code != http.StatusUnauthorized {
+		t.Fatalf("expected invalid SCIM bearer to be unauthorized, got %d: %s", invalid.Code, invalid.Body.String())
+	}
+
+	create := performWithToken(server, http.MethodPost, "/v1/scim/v2/Users", `{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"idp-user@example.com","active":true}`, "scim-secret-token")
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected SCIM bearer user create 201, got %d: %s", create.Code, create.Body.String())
+	}
+	if !strings.Contains(create.Body.String(), `"userName":"idp-user@example.com"`) {
+		t.Fatalf("expected SCIM user response, got %s", create.Body.String())
+	}
+
+	editWithoutToken := performWithToken(server, http.MethodPut, "/v1/settings/sso", `{"enabled":false,"default_role":"viewer","scim_enabled":true}`, adminToken)
+	if editWithoutToken.Code != http.StatusOK || !strings.Contains(editWithoutToken.Body.String(), `"scim_token_configured":true`) {
+		t.Fatalf("expected SCIM token hash to be preserved on SSO edit, got %d: %s", editWithoutToken.Code, editWithoutToken.Body.String())
+	}
+	list := performWithToken(server, http.MethodGet, "/v1/scim/v2/Users", "", "scim-secret-token")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"userName":"idp-user@example.com"`) {
+		t.Fatalf("expected preserved SCIM token to keep working, got %d: %s", list.Code, list.Body.String())
+	}
+
+	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", adminToken)
+	if strings.Contains(auditResponse.Body.String(), "scim-secret-token") {
+		t.Fatalf("expected audit events to redact SCIM token material: %s", auditResponse.Body.String())
+	}
+}
+
+func TestRuntimeConfigRequiresAdminAndRedactsOperationalCommands(t *testing.T) {
+	t.Setenv("SUPADUPA_COMPOSE_APPLY", "true")
+	t.Setenv("SUPADUPA_COMPOSE_BACKUP_DEFAULTS", "true")
+	t.Setenv("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS", "true")
+	t.Setenv("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP", "true")
+	t.Setenv("SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE", "true")
+	t.Setenv("SUPADUPA_LOGICAL_BACKUP_COMMAND", "secret logical command")
+	t.Setenv("SUPADUPA_PITR_RESTORE_COMMAND", "secret pitr command")
+
+	store := control.NewMemoryStore()
+	user, err := store.CreateUser(context.Background(), control.CreateUserRequest{Email: "admin@example.com", Password: "super-secure", Role: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := control.NewAuthService("runtime-config-test-secret")
+	token, err := auth.Issue(user, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Config{Store: store, Auth: auth, Provisioner: fakeProvisioner{}, AuthRequired: true})
+
+	unauthorized := perform(server, http.MethodGet, "/v1/runtime-config", "")
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized runtime config status, got %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	response := performWithToken(server, http.MethodGet, "/v1/runtime-config", "", token)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected runtime config 200, got %d: %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		`"provisioner":"fake"`,
+		`"compose":true`,
+		`"compose_defaults":true`,
+		`"logical_configured":true`,
+		`"pitr_restore_configured":true`,
+		`"require_recovery_ready_targets":true`,
+		`"require_durable_backup":true`,
+		`"failure_auto_restore":true`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected runtime config to contain %s, got %s", expected, body)
+		}
+	}
+	for _, unexpected := range []string{"secret logical command", "secret pitr command", "SUPADUPA_LOGICAL_BACKUP_COMMAND", "SUPADUPA_PITR_RESTORE_COMMAND"} {
+		if strings.Contains(body, unexpected) {
+			t.Fatalf("runtime config leaked %q: %s", unexpected, body)
 		}
 	}
 }
@@ -439,11 +641,16 @@ func TestPlatformDefaultsAPIUpdatesAndAppliesToProjectCreate(t *testing.T) {
 	}
 	token := extractString(t, bootstrap.Body.String(), "token")
 
-	update := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"essential","resource_tier":"medium","backup_schedule":"hourly","feature_flags":{"single_org_mode":false,"read_replicas":true,"kubernetes_operator":true},"smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"}}`, token)
+	invalidStack := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"essential","resource_tier":"medium","backup_schedule":"hourly"}`, token)
+	if invalidStack.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid stack defaults 400, got %d: %s", invalidStack.Code, invalidStack.Body.String())
+	}
+
+	update := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"15.8.1.060","profile":"essential","resource_tier":"medium","backup_schedule":"hourly","feature_flags":{"single_org_mode":false,"read_replicas":true,"kubernetes_operator":true},"smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"}}`, token)
 	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), `"domain":"apps.example.com"`) || !strings.Contains(update.Body.String(), `"backup_schedule":"hourly"`) || !strings.Contains(update.Body.String(), `"host":"smtp.example.com"`) || !strings.Contains(update.Body.String(), `"password_handle":"secret://platform/smtp-password"`) || !strings.Contains(update.Body.String(), `"single_org_mode":false`) || !strings.Contains(update.Body.String(), `"read_replicas":true`) || !strings.Contains(update.Body.String(), `"kubernetes_operator":true`) || !strings.Contains(update.Body.String(), `"supabase_cli_compat":true`) {
 		t.Fatalf("expected updated defaults: %d %s", update.Code, update.Body.String())
 	}
-	invalidSMTP := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"essential","resource_tier":"medium","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":587,"password_handle":"raw","tls_mode":"starttls"}}`, token)
+	invalidSMTP := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"15.8.1.060","profile":"essential","resource_tier":"medium","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":587,"password_handle":"raw","tls_mode":"starttls"}}`, token)
 	if invalidSMTP.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid smtp defaults 400, got %d: %s", invalidSMTP.Code, invalidSMTP.Body.String())
 	}
@@ -457,7 +664,7 @@ func TestPlatformDefaultsAPIUpdatesAndAppliesToProjectCreate(t *testing.T) {
 	if projectResponse.Code != http.StatusCreated {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
-	if provisioner.spec.Domain != "apps.example.com" || provisioner.spec.StackVersion != "2026.06.05" || provisioner.spec.Profile != control.StackProfileEssential || provisioner.spec.ResourceTier != control.ResourceTierMedium {
+	if provisioner.spec.Domain != "apps.example.com" || provisioner.spec.StackVersion != "15.8.1.060" || provisioner.spec.Profile != control.StackProfileEssential || provisioner.spec.ResourceTier != control.ResourceTierMedium {
 		t.Fatalf("expected provisioner spec from defaults, got %#v", provisioner.spec)
 	}
 	policy, err := store.GetBackupPolicy(context.Background(), "defaults-api")
@@ -471,6 +678,112 @@ func TestPlatformDefaultsAPIUpdatesAndAppliesToProjectCreate(t *testing.T) {
 	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
 	if !strings.Contains(auditResponse.Body.String(), `"action":"settings.defaults_update"`) {
 		t.Fatalf("expected settings audit event: %s", auditResponse.Body.String())
+	}
+}
+
+func TestBackupStorageTargetsAPIAndProjectPolicy(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+
+	unauthorized := perform(server, http.MethodGet, "/v1/backup-storage-targets", "")
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized target list, got %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	token := extractString(t, bootstrap.Body.String(), "token")
+	var s3Mu sync.Mutex
+	s3Objects := map[string][]byte{}
+	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read fake s3 body: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			s3Mu.Lock()
+			s3Objects[r.URL.Path] = body
+			s3Mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			s3Mu.Lock()
+			body, ok := s3Objects[r.URL.Path]
+			s3Mu.Unlock()
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write(body)
+		case http.MethodDelete:
+			s3Mu.Lock()
+			delete(s3Objects, r.URL.Path)
+			s3Mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer s3Server.Close()
+	targetBody := fmt.Sprintf(`{"name":"Primary S3","type":"s3","endpoint":%q,"region":"auto","bucket":"supadupa-backups","prefix":"control","access_key_id":"access","secret_access_key":"super-secret","force_path_style":true,"default":false}`, s3Server.URL)
+	created := performWithToken(server, http.MethodPost, "/v1/backup-storage-targets", targetBody, token)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("expected target create 201, got %d: %s", created.Code, created.Body.String())
+	}
+	targetID := extractString(t, created.Body.String(), "id")
+	if strings.Contains(created.Body.String(), "super-secret") || !strings.Contains(created.Body.String(), `"secret_configured":true`) {
+		t.Fatalf("expected redacted target response, got %s", created.Body.String())
+	}
+	if !strings.Contains(created.Body.String(), `"durable_off_host":false`) || !strings.Contains(created.Body.String(), `"recovery_ready":false`) || !strings.Contains(created.Body.String(), `"readiness_status":"local-or-loopback"`) {
+		t.Fatalf("expected local target readiness metadata, got %s", created.Body.String())
+	}
+
+	listed := performWithToken(server, http.MethodGet, "/v1/backup-storage-targets", "", token)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), targetID) || !strings.Contains(listed.Body.String(), `"readiness_status":"local-or-loopback"`) || strings.Contains(listed.Body.String(), "super-secret") {
+		t.Fatalf("expected redacted target list, got %d: %s", listed.Code, listed.Body.String())
+	}
+	tested := performWithToken(server, http.MethodPost, "/v1/backup-storage-targets/"+targetID+"/test", "", token)
+	if tested.Code != http.StatusOK || !strings.Contains(tested.Body.String(), `"last_test_status":"passed"`) || !strings.Contains(tested.Body.String(), `"recovery_ready":false`) || !strings.Contains(tested.Body.String(), `"readiness_status":"local-or-loopback"`) || strings.Contains(tested.Body.String(), "super-secret") {
+		t.Fatalf("expected passed redacted target test, got %d: %s", tested.Code, tested.Body.String())
+	}
+	listedAfterTest := performWithToken(server, http.MethodGet, "/v1/backup-storage-targets", "", token)
+	if listedAfterTest.Code != http.StatusOK || !strings.Contains(listedAfterTest.Body.String(), `"last_test_status":"passed"`) || strings.Contains(listedAfterTest.Body.String(), "super-secret") {
+		t.Fatalf("expected listed target test status, got %d: %s", listedAfterTest.Code, listedAfterTest.Body.String())
+	}
+	platformBackup := performWithToken(server, http.MethodPost, "/v1/platform/backups", "", token)
+	if platformBackup.Code != http.StatusCreated || !strings.Contains(platformBackup.Body.String(), `"kind":"control-plane"`) || strings.Contains(platformBackup.Body.String(), `"storage_target_id"`) || strings.Contains(platformBackup.Body.String(), `"remote_location"`) {
+		t.Fatalf("expected platform backup response, got %d: %s", platformBackup.Code, platformBackup.Body.String())
+	}
+	if strings.Contains(platformBackup.Body.String(), "super-secret") {
+		t.Fatalf("platform backup response leaked target secret: %s", platformBackup.Body.String())
+	}
+	platformBackups := performWithToken(server, http.MethodGet, "/v1/platform/backups", "", token)
+	if platformBackups.Code != http.StatusOK || !strings.Contains(platformBackups.Body.String(), `"kind":"control-plane"`) {
+		t.Fatalf("expected platform backups list, got %d: %s", platformBackups.Code, platformBackups.Body.String())
+	}
+
+	orgResponse := performWithToken(server, http.MethodPost, "/v1/orgs", `{"name":"Backup API"}`, token)
+	if orgResponse.Code != http.StatusCreated {
+		t.Fatalf("expected org create 201, got %d: %s", orgResponse.Code, orgResponse.Body.String())
+	}
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"backup-target-api","name":"Backup Target API","domain":"apps.example.test"}`, token)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	policy := performWithToken(server, http.MethodPut, "/v1/projects/backup-target-api/backups/policy", `{"enabled":true,"schedule":"hourly","kind":"logical","storage_target_id":"`+targetID+`"}`, token)
+	if policy.Code != http.StatusOK || !strings.Contains(policy.Body.String(), `"storage_target_id":"`+targetID+`"`) {
+		t.Fatalf("expected policy target, got %d: %s", policy.Code, policy.Body.String())
+	}
+
+	audit := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
+	if strings.Contains(audit.Body.String(), "super-secret") {
+		t.Fatalf("audit log leaked target secret: %s", audit.Body.String())
 	}
 }
 
@@ -872,7 +1185,7 @@ func TestCreateOrgProjectAndConnect(t *testing.T) {
 		t.Fatalf("expected healthy project: %s", projectResponse.Body.String())
 	}
 
-	poolerUpdateResponse := perform(server, http.MethodPut, "/v1/projects/alpha-proj/config/pooler", `{"config":{"dedicated_pooler_enabled":"true","dedicated_pooler_tier":"medium","pool_mode":"both","transaction_port":"7654","session_port":"55432"}}`)
+	poolerUpdateResponse := perform(server, http.MethodPut, "/v1/projects/alpha-proj/config/pooler", `{"config":{"dedicated_pooler_enabled":"true","dedicated_pooler_tier":"medium","pool_mode":"both"}}`)
 	if poolerUpdateResponse.Code != http.StatusOK {
 		t.Fatalf("expected pooler config update 200, got %d: %s", poolerUpdateResponse.Code, poolerUpdateResponse.Body.String())
 	}
@@ -893,26 +1206,30 @@ func TestCreateOrgProjectAndConnect(t *testing.T) {
 		`"status":"current"`,
 		`"alg":"EdDSA"`,
 		`"direct":"postgres://postgres:${DB_PASSWORD}@db.alpha-proj.internal:5432/postgres?sslmode=require"`,
-		`"transaction":"postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler.alpha-proj.internal:7654/postgres?sslmode=require"`,
-		`"session":"postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler.alpha-proj.internal:55432/postgres?sslmode=require"`,
-		`"pooler":{"dedicated":"true","dedicated_tier":"medium","default_pool_size":"20","max_client_connections":"200","pool_mode":"both","session_port":"55432","transaction_port":"7654"}`,
+		`"transaction":"postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler.alpha-proj.internal:6543/postgres?sslmode=require"`,
+		`"session":"postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler.alpha-proj.internal:5432/postgres?sslmode=require"`,
+		`"pooler":{"dedicated":"true","dedicated_tier":"medium","default_pool_size":"20","max_client_connections":"200","pool_mode":"both","session_port":"5432","transaction_port":"6543"}`,
 		`"password_handle":"secret://projects/alpha-proj/db_password"`,
 		`"sslmode":"require"`,
+		`"public_direct":{"database":"postgres","host":"db-alpha-proj.supadupa.test","password_handle":"secret://projects/alpha-proj/db_password","port":"5432","sslmode":"require","user":"postgres"}`,
+		`"public_transaction":{"database":"postgres","host":"pooler-alpha-proj.supadupa.test","password_handle":"secret://projects/alpha-proj/db_password","port":"6543","sslmode":"require","user":"postgres.alpha-proj"}`,
+		`"public_session":{"database":"postgres","host":"pooler-alpha-proj.supadupa.test","password_handle":"secret://projects/alpha-proj/db_password","port":"5432","sslmode":"require","user":"postgres.alpha-proj"}`,
 		`"auth_url":"https://alpha-proj.supadupa.test/auth/v1"`,
 		`"storage_url":"https://alpha-proj.supadupa.test/storage/v1"`,
-		`"s3_endpoint":"https://alpha-proj.supadupa.test/storage/v1/s3"`,
+		`"s3_endpoint":"https://storage-alpha-proj.supadupa.test/storage/v1/s3"`,
 		`"access_key_handle":"secret://projects/alpha-proj/s3_access_key"`,
 		`"api":"https://alpha-proj.supadupa.test"`,
-		`"studio_url":"https://studio.alpha-proj.supadupa.test"`,
-		`"studio":"https://studio.alpha-proj.supadupa.test"`,
-		`"studio_via_api":"https://alpha-proj.supadupa.test/studio"`,
-		`"rest_docs":"https://studio.alpha-proj.supadupa.test/project/default/api"`,
-		`"graphql_explorer":"https://studio.alpha-proj.supadupa.test/project/default/api?panel=graphql"`,
-		`"storage_s3":"https://alpha-proj.supadupa.test/storage/v1/s3"`,
+		`"studio_url":"https://studio-alpha-proj.supadupa.test"`,
+		`"studio":"https://studio-alpha-proj.supadupa.test"`,
+		`"rest_docs":"https://studio-alpha-proj.supadupa.test/project/alpha-proj/api"`,
+		`"graphql_explorer":"https://studio-alpha-proj.supadupa.test/project/alpha-proj/api?panel=graphql"`,
+		`"storage_s3":"https://storage-alpha-proj.supadupa.test/storage/v1/s3"`,
 		`"functions_service":"https://alpha-proj.supadupa.test/functions/v1"`,
 		`"realtime_service":"https://alpha-proj.supadupa.test/realtime/v1"`,
 		`"connection_snippets"`,
-		`"psql_pool_transaction":"psql postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler.alpha-proj.internal:7654/postgres?sslmode=require"`,
+		`"psql_direct":"psql postgres://postgres:${DB_PASSWORD}@db-alpha-proj.supadupa.test:5432/postgres?sslmode=require"`,
+		`"psql_pool_transaction":"psql postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler-alpha-proj.supadupa.test:6543/postgres?sslmode=require"`,
+		`"psql_internal_pool_transaction":"psql postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler.alpha-proj.internal:6543/postgres?sslmode=require"`,
 		`"env_publishable_key":"SUPABASE_PUBLISHABLE_KEY=secret://projects/alpha-proj/publishable_key"`,
 		`"flutter":"Supabase.initialize`,
 		`"swift":"SupabaseClient`,
@@ -942,11 +1259,13 @@ func TestCreateOrgProjectAndConnect(t *testing.T) {
 		`"project_ref":"alpha-proj"`,
 		`"SUPABASE_URL":"https://alpha-proj.supadupa.test"`,
 		`"SUPABASE_SERVICE_ROLE_KEY":"secret://projects/alpha-proj/service_role"`,
-		`"database_url":"postgres://postgres:${DB_PASSWORD}@db.alpha-proj.internal:5432/postgres?sslmode=prefer"`,
-		`"pooler_transaction_url":"postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler.alpha-proj.internal:7654/postgres?sslmode=prefer"`,
+		`"database_url":"postgres://postgres:${DB_PASSWORD}@db-alpha-proj.supadupa.test:5432/postgres?sslmode=require"`,
+		`"internal_database_url":"postgres://postgres:${DB_PASSWORD}@db.alpha-proj.internal:5432/postgres?sslmode=prefer"`,
+		`"pooler_transaction_url":"postgres://postgres.alpha-proj:${DB_PASSWORD}@pooler-alpha-proj.supadupa.test:6543/postgres?sslmode=require"`,
+		`"supadupa_gen_types":"supadupa-cli projects gen-types --ref alpha-proj --out database.types.ts"`,
 		`"supabase_config_toml"`,
-		`[supadupa]`,
 		`"control_plane":"Use supadupa Management API`,
+		`"typegen":"Use supadupa-cli projects gen-types`,
 	} {
 		if !strings.Contains(cliProfileResponse.Body.String(), expected) {
 			t.Fatalf("expected cli profile value %s: %s", expected, cliProfileResponse.Body.String())
@@ -960,8 +1279,154 @@ func TestCreateOrgProjectAndConnect(t *testing.T) {
 	if !strings.Contains(routesResponse.Body.String(), `"fqdn":"alpha-proj.supadupa.test"`) {
 		t.Fatalf("expected api route in response: %s", routesResponse.Body.String())
 	}
-	if !strings.Contains(routesResponse.Body.String(), `"fqdn":"studio.alpha-proj.supadupa.test"`) {
+	if !strings.Contains(routesResponse.Body.String(), `"fqdn":"studio-alpha-proj.supadupa.test"`) {
 		t.Fatalf("expected studio route in response: %s", routesResponse.Body.String())
+	}
+	if !strings.Contains(routesResponse.Body.String(), `"fqdn":"storage-alpha-proj.supadupa.test"`) {
+		t.Fatalf("expected storage route in response: %s", routesResponse.Body.String())
+	}
+
+	routeManifestResponse := perform(server, http.MethodGet, "/v1/projects/alpha-proj/route-manifest", "")
+	if routeManifestResponse.Code != http.StatusOK {
+		t.Fatalf("expected route manifest status 200, got %d: %s", routeManifestResponse.Code, routeManifestResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"project_ref":"alpha-proj"`,
+		`"http_routes"`,
+		`"fqdn":"storage-alpha-proj.supadupa.test"`,
+		`"tcp_routes"`,
+		`"name":"db"`,
+		`"fqdn":"db-alpha-proj.supadupa.test"`,
+		`"entrypoint":"postgres"`,
+		`"public_port":5432`,
+		`"upstream_address":"alpha-proj-db:5432"`,
+		`"name":"pooler-transaction"`,
+		`"fqdn":"pooler-alpha-proj.supadupa.test"`,
+		`"entrypoint":"pooler"`,
+		`"public_port":6543`,
+		`"upstream_address":"alpha-proj-pooler:6543"`,
+		`"name":"pooler-session"`,
+		`"upstream_address":"alpha-proj-pooler:5432"`,
+	} {
+		if !strings.Contains(routeManifestResponse.Body.String(), expected) {
+			t.Fatalf("expected route manifest value %s: %s", expected, routeManifestResponse.Body.String())
+		}
+	}
+}
+
+func TestStudioForwardAuthUsesSupadupaSessionCookie(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	cookies := bootstrap.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatalf("expected bootstrap to set auth cookie")
+	}
+	if cookies[0].Domain != "" {
+		t.Fatalf("expected auth cookie to be host-only by default, got domain %q", cookies[0].Domain)
+	}
+	token := extractString(t, bootstrap.Body.String(), "token")
+	orgResponse := performWithToken(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`, token)
+	if orgResponse.Code != http.StatusCreated {
+		t.Fatalf("expected org status 201, got %d: %s", orgResponse.Code, orgResponse.Body.String())
+	}
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"studio-auth","name":"Studio Auth","domain":"apps.example.test"}`, token)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	otherProjectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"studio-other","name":"Studio Other","domain":"apps.example.test"}`, token)
+	if otherProjectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected other project status 201, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
+	}
+
+	unauthorizedRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
+	unauthorizedRequest.Header.Set("X-Forwarded-Host", "studio-studio-auth.apps.example.test")
+	unauthorizedResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(unauthorizedResponse, unauthorizedRequest)
+	if unauthorizedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated studio forward auth to be denied, got %d: %s", unauthorizedResponse.Code, unauthorizedResponse.Body.String())
+	}
+
+	authorizedRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
+	authorizedRequest.Header.Set("X-Forwarded-Host", "studio-studio-other.apps.example.test")
+	authorizedRequest.AddCookie(cookies[0])
+	authorizedResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(authorizedResponse, authorizedRequest)
+	if authorizedResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected authenticated studio forward auth to pass, got %d: %s", authorizedResponse.Code, authorizedResponse.Body.String())
+	}
+	if got := authorizedResponse.Header().Get("X-Supadupa-User"); got != "admin@example.com" {
+		t.Fatalf("expected forwarded user header, got %q", got)
+	}
+	if got := authorizedResponse.Header().Get("X-Supadupa-Project"); got != "studio-auth" {
+		t.Fatalf("expected forwarded project header, got %q", got)
+	}
+
+	sessionResponse := performWithToken(server, http.MethodGet, "/v1/projects/studio-auth/studio-session", "", token)
+	if sessionResponse.Code != http.StatusOK {
+		t.Fatalf("expected studio session status 200, got %d: %s", sessionResponse.Code, sessionResponse.Body.String())
+	}
+	studioToken := extractString(t, sessionResponse.Body.String(), "token")
+	studioRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
+	studioRequest.Header.Set("X-Forwarded-Host", "studio-studio-other.apps.example.test")
+	studioRequest.Header.Set("X-Forwarded-Uri", "/?supadupa_studio_token="+url.QueryEscape(studioToken))
+	studioResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(studioResponse, studioRequest)
+	if studioResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected scoped studio token to pass, got %d: %s", studioResponse.Code, studioResponse.Body.String())
+	}
+	if got := studioResponse.Header().Get("X-Supadupa-Project"); got != "studio-auth" {
+		t.Fatalf("expected scoped studio project header, got %q", got)
+	}
+
+	wrongProjectRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-other", nil)
+	wrongProjectRequest.Header.Set("X-Forwarded-Uri", "/?supadupa_studio_token="+url.QueryEscape(studioToken))
+	wrongProjectResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(wrongProjectResponse, wrongProjectRequest)
+	if wrongProjectResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("expected scoped studio token to be rejected for another project, got %d: %s", wrongProjectResponse.Code, wrongProjectResponse.Body.String())
+	}
+}
+
+func TestAuthCookieDomainRequiresExplicitOptIn(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "https://api.supadupa.example/v1/auth/bootstrap", strings.NewReader(`{"email":"admin@example.com","password":"super-secure"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if cookies := response.Result().Cookies(); len(cookies) == 0 || cookies[0].Domain != "" {
+		t.Fatalf("expected host-only cookie by default, got %#v", cookies)
+	}
+
+	t.Setenv("SUPADUPA_COOKIE_DOMAIN", "supadupa.example")
+	request = httptest.NewRequest(http.MethodPost, "https://api.supadupa.example/v1/auth/login", strings.NewReader(`{"email":"admin@example.com","password":"super-secure"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected login status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if cookies := response.Result().Cookies(); len(cookies) == 0 || cookies[0].Domain != "supadupa.example" {
+		t.Fatalf("expected explicit cookie domain, got %#v", cookies)
 	}
 }
 
@@ -990,11 +1455,15 @@ func TestProjectBranchesCreateListRoutesAndCleanup(t *testing.T) {
 
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	enableOrgFeaturesForTest(t, store, orgID, "preview_branches")
+	enableOrgFeaturesForTest(t, store, orgID, "preview_branches", "custom_domains")
 	projectBody := `{"ref":"branch-source","name":"Branch Source","domain":"supadupa.test","profile":"full","resource_tier":"small","services":{"storage":true},"environment":{"CUSTOM":"value"}}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
 	if projectResponse.Code != http.StatusCreated {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	otherProjectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"branch-other","name":"Branch Other","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
+	if otherProjectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected other project status 201, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/branch-source/branches", `{"ref":"Bad Ref","name":"Bad"}`)
@@ -1009,6 +1478,7 @@ func TestProjectBranchesCreateListRoutesAndCleanup(t *testing.T) {
 	for _, expected := range []string{
 		`"source_project_ref":"branch-source"`,
 		`"project_ref":"branch-preview"`,
+		`"with_data":false`,
 		`"status":"healthy"`,
 		`"ref":"branch-preview"`,
 		`"name":"Preview"`,
@@ -1034,10 +1504,25 @@ func TestProjectBranchesCreateListRoutesAndCleanup(t *testing.T) {
 	if routesResponse.Code != http.StatusOK || !strings.Contains(routesResponse.Body.String(), `"fqdn":"branch-preview.supadupa.test"`) {
 		t.Fatalf("expected branch routes: %d %s", routesResponse.Code, routesResponse.Body.String())
 	}
+	for _, reserved := range []string{
+		"branch-preview.supadupa.test",
+		"studio-branch-preview.supadupa.test",
+		"storage-branch-preview.supadupa.test",
+		"db-branch-preview.supadupa.test",
+		"pooler-branch-preview.supadupa.test",
+	} {
+		reservedResponse := perform(server, http.MethodPost, "/v1/projects/branch-other/domains", fmt.Sprintf(`{"fqdn":%q}`, reserved))
+		if reservedResponse.Code != http.StatusConflict {
+			t.Fatalf("expected branch generated domain %s conflict, got %d: %s", reserved, reservedResponse.Code, reservedResponse.Body.String())
+		}
+	}
 
 	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
 	if !strings.Contains(auditResponse.Body.String(), `"action":"project.branch_create"`) {
 		t.Fatalf("expected branch create audit event: %s", auditResponse.Body.String())
+	}
+	if strings.Contains(auditResponse.Body.String(), `"clone_state"`) || !strings.Contains(auditResponse.Body.String(), `"with_data":"false"`) {
+		t.Fatalf("expected data-less branch audit metadata without clone state: %s", auditResponse.Body.String())
 	}
 	logsResponse := perform(server, http.MethodGet, "/v1/projects/branch-source/logs", "")
 	if !strings.Contains(logsResponse.Body.String(), "Branch created") {
@@ -1080,7 +1565,7 @@ func TestProjectBranchCreatePassesGeneratedSecretsToProvisioner(t *testing.T) {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
-	createResponse := perform(server, http.MethodPost, "/v1/projects/branch-source/branches", `{"ref":"branch-secret-preview","name":"Preview","ttl_hours":24}`)
+	createResponse := perform(server, http.MethodPost, "/v1/projects/branch-source/branches", `{"ref":"branch-secret-preview","name":"Preview","ttl_hours":24,"with_data":true}`)
 	if createResponse.Code != http.StatusCreated {
 		t.Fatalf("expected branch create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
 	}
@@ -1097,11 +1582,8 @@ func TestProjectBranchCreatePassesGeneratedSecretsToProvisioner(t *testing.T) {
 		"JWT_SECRET":                       "jwt_",
 		"SUPADUPA_JWT_SIGNING_KEY_CURRENT": "{",
 		"SUPADUPA_JWT_SIGNING_KEY_NEXT":    "{",
-		"ANON_KEY":                         "anon_",
-		"SERVICE_ROLE_KEY":                 "svc_",
 		"SUPABASE_PUBLISHABLE_KEY":         "pub_",
 		"SUPABASE_SECRET_KEY":              "sec_",
-		"POSTGRES_PASSWORD":                "db_",
 		"S3_ACCESS_KEY":                    "s3ak_",
 		"S3_SECRET_KEY":                    "s3sk_",
 	} {
@@ -1110,14 +1592,22 @@ func TestProjectBranchCreatePassesGeneratedSecretsToProvisioner(t *testing.T) {
 			t.Fatalf("expected branch provisioner env %s to have prefix %q, got %q in %#v", key, prefix, value, provisioner.spec.Environment)
 		}
 	}
+	if value := provisioner.spec.Environment["POSTGRES_PASSWORD"]; len(value) != 48 || !isLowerHexForTest(value) {
+		t.Fatalf("expected branch provisioner env POSTGRES_PASSWORD to be 48 lowercase hex chars, got %q in %#v", value, provisioner.spec.Environment)
+	}
+	for _, key := range []string{"ANON_KEY", "SERVICE_ROLE_KEY"} {
+		if strings.Count(provisioner.spec.Environment[key], ".") != 2 {
+			t.Fatalf("expected branch provisioner env %s to be a JWT, got %q in %#v", key, provisioner.spec.Environment[key], provisioner.spec.Environment)
+		}
+	}
 	if provisioner.spec.Environment["POSTGRES_PASSWORD"] == "source-should-not-win" {
 		t.Fatalf("source db password won over branch managed secret")
 	}
-	if provisioner.clonedBranch.SourceRef != "branch-source" || provisioner.clonedBranch.BranchRef != "branch-secret-preview" || provisioner.clonedBranch.BranchID == "" {
+	if provisioner.clonedBranch.SourceRef != "branch-source" || provisioner.clonedBranch.BranchRef != "branch-secret-preview" || provisioner.clonedBranch.BranchID == "" || !provisioner.clonedBranch.WithData {
 		t.Fatalf("expected branch clone call, got %#v", provisioner.clonedBranch)
 	}
 	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
-	if !strings.Contains(auditResponse.Body.String(), `"clone_state":"dry-run"`) || !strings.Contains(auditResponse.Body.String(), `"clone_path":"branch-clone.sql"`) {
+	if !strings.Contains(auditResponse.Body.String(), `"clone_state":"dry-run"`) || !strings.Contains(auditResponse.Body.String(), `"clone_path":"branch-clone.sql"`) || !strings.Contains(auditResponse.Body.String(), `"with_data":"true"`) {
 		t.Fatalf("expected branch clone metadata in audit: %s", auditResponse.Body.String())
 	}
 }
@@ -1132,16 +1622,31 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 	hostID := extractString(t, hostResponse.Body.String(), "id")
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	enableOrgFeaturesForTest(t, store, orgID, "read_replicas")
+	otherOrgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Replica Domain Peer"}`)
+	otherOrgID := extractString(t, otherOrgResponse.Body.String(), "id")
+	enableOrgFeaturesForTest(t, store, orgID, "read_replicas", "custom_domains")
+	enableOrgFeaturesForTest(t, store, otherOrgID, "custom_domains")
 	projectBody := `{"ref":"replica-proj","name":"Replica","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
 	if projectResponse.Code != http.StatusCreated {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
+	otherProjectResponse := perform(server, http.MethodPost, "/v1/orgs/"+otherOrgID+"/projects", `{"ref":"replica-domain-other","name":"Replica Domain Other","host_id":"`+hostID+`","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
+	if otherProjectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected other replica domain project status 201, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
+	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/replica-proj/replicas", `{"name":"bad name","tier":"small"}`)
 	if invalidResponse.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid replica name 400, got %d: %s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+	invalidDNSLabelResponse := perform(server, http.MethodPost, "/v1/projects/replica-proj/replicas", `{"name":"east-","tier":"small"}`)
+	if invalidDNSLabelResponse.Code != http.StatusBadRequest || !strings.Contains(invalidDNSLabelResponse.Body.String(), "cannot start or end with a dash") {
+		t.Fatalf("expected invalid replica DNS label 400, got %d: %s", invalidDNSLabelResponse.Code, invalidDNSLabelResponse.Body.String())
+	}
+	tooLongPublicHostResponse := perform(server, http.MethodPost, "/v1/projects/replica-proj/replicas", `{"name":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"small"}`)
+	if tooLongPublicHostResponse.Code != http.StatusBadRequest || !strings.Contains(tooLongPublicHostResponse.Body.String(), "63-character DNS label limit") {
+		t.Fatalf("expected replica public DNS label 400, got %d: %s", tooLongPublicHostResponse.Code, tooLongPublicHostResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/replica-proj/replicas", `{"name":"east","host_id":"`+hostID+`","region":"us-east","tier":"small","read_weight":75,"failover_priority":2}`)
@@ -1158,11 +1663,28 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 		`"role":"read"`,
 		`"read_weight":75`,
 		`"failover_priority":2`,
-		`"read_uri":"postgres://postgres:${DB_PASSWORD}@east.replica-proj.replica.internal:5432/postgres"`,
+		`"read_uri":"postgres://postgres:${DB_PASSWORD}@db-replica-east-replica-proj.supadupa.test:5432/postgres?sslmode=require"`,
+		`"public_read_uri":"postgres://postgres:${DB_PASSWORD}@db-replica-east-replica-proj.supadupa.test:5432/postgres?sslmode=require"`,
+		`"internal_read_uri":"postgres://postgres:${DB_PASSWORD}@east.replica-proj.replica.internal:5432/postgres"`,
 	} {
 		if !strings.Contains(createResponse.Body.String(), expected) {
 			t.Fatalf("expected %s in replica create response: %s", expected, createResponse.Body.String())
 		}
+	}
+	manifestResponse := perform(server, http.MethodGet, "/v1/projects/replica-proj/route-manifest", "")
+	for _, expected := range []string{
+		`"name":"db-replica-east"`,
+		`"fqdn":"db-replica-east-replica-proj.supadupa.test"`,
+		`"entrypoint":"postgres"`,
+		`"upstream_address":"replica-proj-db-replica-east:5432"`,
+	} {
+		if !strings.Contains(manifestResponse.Body.String(), expected) {
+			t.Fatalf("expected route manifest value %s: %s", expected, manifestResponse.Body.String())
+		}
+	}
+	replicaReservedResponse := perform(server, http.MethodPost, "/v1/projects/replica-domain-other/domains", `{"fqdn":"db-replica-east-replica-proj.supadupa.test"}`)
+	if replicaReservedResponse.Code != http.StatusConflict {
+		t.Fatalf("expected replica generated domain conflict, got %d: %s", replicaReservedResponse.Code, replicaReservedResponse.Body.String())
 	}
 	westResponse := perform(server, http.MethodPost, "/v1/projects/replica-proj/replicas", `{"name":"west","host_id":"`+hostID+`","region":"us-west","tier":"small","read_weight":125,"failover_priority":1}`)
 	if westResponse.Code != http.StatusCreated {
@@ -1303,6 +1825,8 @@ func TestProjectScaleUpdatesTierCapacityAndAudit(t *testing.T) {
 func TestProjectCustomDomainsUpdateRoutes(t *testing.T) {
 	certRoot := t.TempDir()
 	t.Setenv("SUPADUPA_CERT_ROOT", certRoot)
+	t.Setenv("SUPADUPA_ADMIN_HOST", "admin.supadupa.test")
+	t.Setenv("SUPADUPA_API_HOST", "api.supadupa.test")
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
 
@@ -1346,6 +1870,42 @@ func TestProjectCustomDomainsUpdateRoutes(t *testing.T) {
 		t.Fatalf("expected duplicate domain conflict, got %d: %s", duplicateResponse.Code, duplicateResponse.Body.String())
 	}
 
+	collisionResponse := perform(server, http.MethodPost, "/v1/projects/domain-proj/domains", `{"fqdn":"api-example.com"}`)
+	if collisionResponse.Code != http.StatusConflict {
+		t.Fatalf("expected route-name collision conflict, got %d: %s", collisionResponse.Code, collisionResponse.Body.String())
+	}
+
+	secondProjectBody := `{"ref":"domain-proj-two","name":"Domain Two","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
+	secondProjectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", secondProjectBody)
+	if secondProjectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected second project status 201, got %d: %s", secondProjectResponse.Code, secondProjectResponse.Body.String())
+	}
+	crossProjectDuplicateResponse := perform(server, http.MethodPost, "/v1/projects/domain-proj-two/domains", `{"fqdn":"api.example.com"}`)
+	if crossProjectDuplicateResponse.Code != http.StatusConflict {
+		t.Fatalf("expected cross-project duplicate domain conflict, got %d: %s", crossProjectDuplicateResponse.Code, crossProjectDuplicateResponse.Body.String())
+	}
+
+	for _, reserved := range []string{
+		"admin.supadupa.test",
+		"api.supadupa.test",
+		"supadupa.test",
+		"domain-proj.supadupa.test",
+		"studio-domain-proj.supadupa.test",
+		"storage-domain-proj.supadupa.test",
+		"db-domain-proj.supadupa.test",
+		"pooler-domain-proj.supadupa.test",
+		"domain-proj-two.supadupa.test",
+		"studio-domain-proj-two.supadupa.test",
+		"storage-domain-proj-two.supadupa.test",
+		"db-domain-proj-two.supadupa.test",
+		"pooler-domain-proj-two.supadupa.test",
+	} {
+		reservedResponse := perform(server, http.MethodPost, "/v1/projects/domain-proj/domains", fmt.Sprintf(`{"fqdn":%q}`, reserved))
+		if reservedResponse.Code != http.StatusConflict {
+			t.Fatalf("expected reserved domain %s conflict, got %d: %s", reserved, reservedResponse.Code, reservedResponse.Body.String())
+		}
+	}
+
 	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/domain-proj/domains/api.example.com", "")
 	if deleteResponse.Code != http.StatusNoContent {
 		t.Fatalf("expected domain delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
@@ -1371,6 +1931,150 @@ func TestProjectCustomDomainsUpdateRoutes(t *testing.T) {
 	}
 }
 
+func TestProjectDomainBYOCertificateLifecycle(t *testing.T) {
+	certRoot := t.TempDir()
+	routeRoot := t.TempDir()
+	t.Setenv("SUPADUPA_CERT_ROOT", certRoot)
+	t.Setenv("SUPADUPA_ROUTES_ROOT", routeRoot)
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	enableOrgFeaturesForTest(t, store, orgID, "custom_domains")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"byo-domain","name":"BYO Domain","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	addResponse := perform(server, http.MethodPost, "/v1/projects/byo-domain/domains", `{"fqdn":"api.example.com"}`)
+	if addResponse.Code != http.StatusCreated {
+		t.Fatalf("expected domain create 201, got %d: %s", addResponse.Code, addResponse.Body.String())
+	}
+
+	certPEM, keyPEM := testServerDomainCertificate(t, []string{"api.example.com"}, time.Now().UTC().Add(time.Hour))
+	uploadBody, err := json.Marshal(control.ProjectDomainCertificateInput{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadResponse := perform(server, http.MethodPut, "/v1/projects/byo-domain/domains/api.example.com/certificate", string(uploadBody))
+	if uploadResponse.Code != http.StatusOK {
+		t.Fatalf("expected certificate upload 200, got %d: %s", uploadResponse.Code, uploadResponse.Body.String())
+	}
+	for _, expected := range []string{`"cert_status":"uploaded"`, `"cert_mode":"byo"`, `"cert_fingerprint":`, `"cert_not_after":`} {
+		if !strings.Contains(uploadResponse.Body.String(), expected) {
+			t.Fatalf("expected upload response to contain %s: %s", expected, uploadResponse.Body.String())
+		}
+	}
+	if strings.Contains(uploadResponse.Body.String(), "PRIVATE KEY") {
+		t.Fatalf("private key leaked in upload response: %s", uploadResponse.Body.String())
+	}
+	for _, path := range []string{
+		filepath.Join(certRoot, "byo-domain", "api.example.com.crt"),
+		filepath.Join(certRoot, "byo-domain", "api.example.com.key"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected uploaded certificate file %s: %v", path, err)
+		}
+	}
+	routePayload, err := os.ReadFile(filepath.Join(routeRoot, "byo-domain.yaml"))
+	if err != nil {
+		t.Fatalf("read route file: %v", err)
+	}
+	if !strings.Contains(string(routePayload), `certFile: "/certs/byo-domain/api.example.com.crt"`) || !strings.Contains(string(routePayload), `keyFile: "/certs/byo-domain/api.example.com.key"`) {
+		t.Fatalf("expected BYO cert route config, got:\n%s", routePayload)
+	}
+	connectResponse := perform(server, http.MethodGet, "/v1/projects/byo-domain/connect", "")
+	if connectResponse.Code != http.StatusOK {
+		t.Fatalf("expected connect payload 200, got %d: %s", connectResponse.Code, connectResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"api_url":"https://byo-domain.supadupa.test"`,
+		`"custom_api_urls":["https://api.example.com"]`,
+		`"fqdn":"api.example.com"`,
+		`"api_custom":"https://api.example.com"`,
+	} {
+		if !strings.Contains(connectResponse.Body.String(), expected) {
+			t.Fatalf("expected connect payload to contain %s: %s", expected, connectResponse.Body.String())
+		}
+	}
+	cliResponse := perform(server, http.MethodGet, "/v1/projects/byo-domain/connect/cli", "")
+	if cliResponse.Code != http.StatusOK {
+		t.Fatalf("expected cli profile 200, got %d: %s", cliResponse.Code, cliResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"api_url":"https://byo-domain.supadupa.test"`,
+		`"custom_api_urls":["https://api.example.com"]`,
+		`"SUPADUPA_CUSTOM_API_URL":"https://api.example.com"`,
+		`custom_api_urls = [\"https://api.example.com\"]`,
+	} {
+		if !strings.Contains(cliResponse.Body.String(), expected) {
+			t.Fatalf("expected cli profile to contain %s: %s", expected, cliResponse.Body.String())
+		}
+	}
+
+	badCert, badKey := testServerDomainCertificate(t, []string{"other.example.com"}, time.Now().UTC().Add(time.Hour))
+	badBody, err := json.Marshal(control.ProjectDomainCertificateInput{CertificatePEM: badCert, PrivateKeyPEM: badKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	badResponse := perform(server, http.MethodPut, "/v1/projects/byo-domain/domains/api.example.com/certificate", string(badBody))
+	if badResponse.Code != http.StatusBadRequest || !strings.Contains(badResponse.Body.String(), "not valid for api.example.com") {
+		t.Fatalf("expected hostname mismatch rejection, got %d: %s", badResponse.Code, badResponse.Body.String())
+	}
+
+	resetResponse := perform(server, http.MethodDelete, "/v1/projects/byo-domain/domains/api.example.com/certificate", "")
+	if resetResponse.Code != http.StatusOK || !strings.Contains(resetResponse.Body.String(), `"cert_mode":"manual"`) {
+		t.Fatalf("expected cert reset to manual plan, got %d: %s", resetResponse.Code, resetResponse.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(certRoot, "byo-domain", "api.example.com.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected uploaded key removed, got err=%v", err)
+	}
+
+	logsResponse := perform(server, http.MethodGet, "/v1/projects/byo-domain/logs", "")
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	if strings.Contains(logsResponse.Body.String(), "PRIVATE KEY") || strings.Contains(auditResponse.Body.String(), "PRIVATE KEY") {
+		t.Fatalf("private key leaked in logs or audit: logs=%s audit=%s", logsResponse.Body.String(), auditResponse.Body.String())
+	}
+}
+
+func TestProjectCustomDomainsReserveAppsControlPlaneTopology(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	enableOrgFeaturesForTest(t, store, orgID, "custom_domains")
+	collidingProjectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"admin","name":"Admin Collision","domain":"example.com"}`)
+	if collidingProjectResponse.Code != http.StatusConflict || !strings.Contains(collidingProjectResponse.Body.String(), "platform host topology") {
+		t.Fatalf("expected generated platform host conflict, got %d: %s", collidingProjectResponse.Code, collidingProjectResponse.Body.String())
+	}
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"apps-proj","name":"Apps Project","domain":"apps.example.com"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	for _, reserved := range []string{
+		"admin.example.com",
+		"api.example.com",
+		"apps.example.com",
+		"apps-proj.apps.example.com",
+		"studio-apps-proj.apps.example.com",
+		"storage-apps-proj.apps.example.com",
+		"db-apps-proj.apps.example.com",
+		"pooler-apps-proj.apps.example.com",
+	} {
+		response := perform(server, http.MethodPost, "/v1/projects/apps-proj/domains", fmt.Sprintf(`{"fqdn":%q}`, reserved))
+		if response.Code != http.StatusConflict {
+			t.Fatalf("expected reserved domain %s conflict, got %d: %s", reserved, response.Code, response.Body.String())
+		}
+	}
+
+	response := perform(server, http.MethodPost, "/v1/projects/apps-proj/domains", `{"fqdn":"app.example.net"}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected unrelated custom domain accepted, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestProjectConfigDefaultsUpdateAndAudit(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
@@ -1382,10 +2086,24 @@ func TestProjectConfigDefaultsUpdateAndAudit(t *testing.T) {
 	if projectResponse.Code != http.StatusCreated {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
+	seedProjectSecrets(t, store, "config-proj", "captcha-secret", "google-oauth-secret", "discord-secret", "figma-secret", "snapchat-secret", "messagebird-key", "twilio-token", "sms-test-otp", "smtp-password")
 
 	defaultResponse := perform(server, http.MethodGet, "/v1/projects/config-proj/config/auth", "")
 	if defaultResponse.Code != http.StatusOK || !strings.Contains(defaultResponse.Body.String(), `"email_enabled":"true"`) || !strings.Contains(defaultResponse.Body.String(), `"mfa_totp_enroll_enabled":"true"`) || !strings.Contains(defaultResponse.Body.String(), `"mfa_phone_otp_length":"6"`) || !strings.Contains(defaultResponse.Body.String(), `"captcha_secret_handle":""`) {
 		t.Fatalf("expected default auth config: %d %s", defaultResponse.Code, defaultResponse.Body.String())
+	}
+
+	defaultFunctionsResponse := perform(server, http.MethodGet, "/v1/projects/config-proj/config/functions", "")
+	if defaultFunctionsResponse.Code != http.StatusOK || !strings.Contains(defaultFunctionsResponse.Body.String(), `"worker_timeout_ms":"60000"`) {
+		t.Fatalf("expected default functions timeout config: %d %s", defaultFunctionsResponse.Code, defaultFunctionsResponse.Body.String())
+	}
+	invalidFunctionsTimeoutResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/functions", `{"config":{"worker_timeout_ms":"50"}}`)
+	if invalidFunctionsTimeoutResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid functions timeout 400, got %d: %s", invalidFunctionsTimeoutResponse.Code, invalidFunctionsTimeoutResponse.Body.String())
+	}
+	functionsPartialUpdateResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/functions", `{"config":{"deployment_policy":"locked"}}`)
+	if functionsPartialUpdateResponse.Code != http.StatusOK || !strings.Contains(functionsPartialUpdateResponse.Body.String(), `"worker_timeout_ms":"60000"`) || !strings.Contains(functionsPartialUpdateResponse.Body.String(), `"deployment_policy":"locked"`) {
+		t.Fatalf("expected functions config defaults to survive partial update: %d %s", functionsPartialUpdateResponse.Code, functionsPartialUpdateResponse.Body.String())
 	}
 
 	invalidMFAOTPResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth", `{"config":{"mfa_phone_otp_length":"3"}}`)
@@ -1424,7 +2142,7 @@ func TestProjectConfigDefaultsUpdateAndAudit(t *testing.T) {
 	}
 
 	providersDefaultResponse := perform(server, http.MethodGet, "/v1/projects/config-proj/config/auth_providers", "")
-	if providersDefaultResponse.Code != http.StatusOK || !strings.Contains(providersDefaultResponse.Body.String(), `"oauth_google_enabled":"false"`) || !strings.Contains(providersDefaultResponse.Body.String(), `"oauth_discord_enabled":"false"`) || !strings.Contains(providersDefaultResponse.Body.String(), `"saml_enabled":"false"`) {
+	if providersDefaultResponse.Code != http.StatusOK || !strings.Contains(providersDefaultResponse.Body.String(), `"oauth_google_enabled":"false"`) || !strings.Contains(providersDefaultResponse.Body.String(), `"oauth_discord_enabled":"false"`) || !strings.Contains(providersDefaultResponse.Body.String(), `"oauth_figma_enabled":"false"`) || !strings.Contains(providersDefaultResponse.Body.String(), `"oauth_snapchat_enabled":"false"`) || !strings.Contains(providersDefaultResponse.Body.String(), `"saml_enabled":"false"`) {
 		t.Fatalf("expected default auth provider config: %d %s", providersDefaultResponse.Code, providersDefaultResponse.Body.String())
 	}
 	invalidAuthProviderSecretResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth_providers", `{"config":{"oauth_google_client_secret_handle":"raw-secret"}}`)
@@ -1439,15 +2157,31 @@ func TestProjectConfigDefaultsUpdateAndAudit(t *testing.T) {
 	if invalidSMSKeyResponse.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid sms key handle 400, got %d: %s", invalidSMSKeyResponse.Code, invalidSMSKeyResponse.Body.String())
 	}
+	invalidSMSLengthResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth_providers", `{"config":{"sms_otp_length":"3"}}`)
+	if invalidSMSLengthResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid sms otp length 400, got %d: %s", invalidSMSLengthResponse.Code, invalidSMSLengthResponse.Body.String())
+	}
+	invalidSMSFrequencyResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth_providers", `{"config":{"sms_max_frequency":"often"}}`)
+	if invalidSMSFrequencyResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid sms frequency 400, got %d: %s", invalidSMSFrequencyResponse.Code, invalidSMSFrequencyResponse.Body.String())
+	}
+	invalidSMSTestOTPResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth_providers", `{"config":{"sms_test_otp_handle":"raw-test-otp"}}`)
+	if invalidSMSTestOTPResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid sms test otp handle 400, got %d: %s", invalidSMSTestOTPResponse.Code, invalidSMSTestOTPResponse.Body.String())
+	}
+	invalidSMSTestOTPExpiryResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth_providers", `{"config":{"sms_test_otp_valid_until":"tomorrow"}}`)
+	if invalidSMSTestOTPExpiryResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid sms test otp expiry 400, got %d: %s", invalidSMSTestOTPExpiryResponse.Code, invalidSMSTestOTPExpiryResponse.Body.String())
+	}
 	invalidOIDCIssuerResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth_providers", `{"config":{"oauth_oidc_issuer_url":"http://issuer.example.com"}}`)
 	if invalidOIDCIssuerResponse.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid oidc issuer 400, got %d: %s", invalidOIDCIssuerResponse.Code, invalidOIDCIssuerResponse.Body.String())
 	}
-	providersUpdateResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth_providers", `{"config":{"oauth_google_enabled":"true","oauth_google_client_id":"google-client","oauth_google_client_secret_handle":"secret://projects/config-proj/google-oauth-secret","oauth_discord_enabled":"true","oauth_discord_client_id":"discord-client","oauth_discord_client_secret_handle":"secret://projects/config-proj/discord-secret","oauth_gitlab_enabled":"true","oauth_gitlab_url":"https://gitlab.example.com","oauth_gitlab_redirect_uri":"https://app.example.com/auth/callback","oauth_gitlab_skip_nonce_check":"true","oauth_oidc_enabled":"true","oauth_oidc_issuer_url":"https://issuer.example.com","oauth_oidc_client_id":"oidc-client","oauth_oidc_client_secret_handle":"secret://projects/config-proj/oidc-secret","oauth_oidc_scopes":"openid email profile","phone_enabled":"true","sms_provider":"messagebird","sms_messagebird_originator":"Supadupa","sms_messagebird_access_key_handle":"secret://projects/config-proj/messagebird-key","sms_twilio_auth_token_handle":"secret://projects/config-proj/twilio-token","saml_enabled":"true","saml_metadata_url":"https://idp.example.com/metadata","third_party_jwt_issuer":"https://issuer.example.com","web3_ethereum_enabled":"true"}}`)
+	providersUpdateResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/auth_providers", `{"config":{"oauth_google_enabled":"true","oauth_google_client_id":"google-client","oauth_google_client_secret_handle":"secret://projects/config-proj/google-oauth-secret","oauth_discord_enabled":"true","oauth_discord_client_id":"discord-client","oauth_discord_client_secret_handle":"secret://projects/config-proj/discord-secret","oauth_figma_enabled":"true","oauth_figma_client_id":"figma-client","oauth_figma_client_secret_handle":"secret://projects/config-proj/figma-secret","oauth_gitlab_enabled":"true","oauth_gitlab_url":"https://gitlab.example.com","oauth_gitlab_redirect_uri":"https://app.example.com/auth/callback","oauth_gitlab_skip_nonce_check":"true","oauth_snapchat_enabled":"true","oauth_snapchat_client_id":"snapchat-client","oauth_snapchat_client_secret_handle":"secret://projects/config-proj/snapchat-secret","oauth_oidc_enabled":"true","oauth_oidc_issuer_url":"https://issuer.example.com","oauth_oidc_client_id":"oidc-client","oauth_oidc_client_secret_handle":"secret://projects/config-proj/oidc-secret","oauth_oidc_scopes":"openid email profile","phone_enabled":"true","sms_provider":"messagebird","sms_otp_exp":"90","sms_otp_length":"8","sms_max_frequency":"45s","sms_template":"Code: {{ .Code }}","sms_test_otp_handle":"secret://projects/config-proj/sms-test-otp","sms_test_otp_valid_until":"2026-12-31T23:59:59Z","sms_messagebird_originator":"Supadupa","sms_messagebird_access_key_handle":"secret://projects/config-proj/messagebird-key","sms_twilio_auth_token_handle":"secret://projects/config-proj/twilio-token","saml_enabled":"true","saml_metadata_url":"https://idp.example.com/metadata","third_party_jwt_issuer":"https://issuer.example.com","web3_ethereum_enabled":"true"}}`)
 	if providersUpdateResponse.Code != http.StatusOK {
 		t.Fatalf("expected auth providers update 200, got %d: %s", providersUpdateResponse.Code, providersUpdateResponse.Body.String())
 	}
-	for _, expected := range []string{`"oauth_google_enabled":"true"`, `"oauth_google_client_id":"google-client"`, `"oauth_google_client_secret_handle":"secret://projects/config-proj/google-oauth-secret"`, `"oauth_discord_client_secret_handle":"secret://projects/config-proj/discord-secret"`, `"oauth_gitlab_url":"https://gitlab.example.com"`, `"oauth_gitlab_skip_nonce_check":"true"`, `"oauth_oidc_enabled":"true"`, `"oauth_oidc_issuer_url":"https://issuer.example.com"`, `"oauth_oidc_client_secret_handle":"secret://projects/config-proj/oidc-secret"`, `"phone_enabled":"true"`, `"sms_provider":"messagebird"`, `"sms_messagebird_access_key_handle":"secret://projects/config-proj/messagebird-key"`, `"sms_twilio_auth_token_handle":"secret://projects/config-proj/twilio-token"`, `"saml_metadata_url":"https://idp.example.com/metadata"`, `"web3_ethereum_enabled":"true"`} {
+	for _, expected := range []string{`"oauth_google_enabled":"true"`, `"oauth_google_client_id":"google-client"`, `"oauth_google_client_secret_handle":"secret://projects/config-proj/google-oauth-secret"`, `"oauth_discord_client_secret_handle":"secret://projects/config-proj/discord-secret"`, `"oauth_figma_client_id":"figma-client"`, `"oauth_figma_client_secret_handle":"secret://projects/config-proj/figma-secret"`, `"oauth_gitlab_url":"https://gitlab.example.com"`, `"oauth_gitlab_skip_nonce_check":"true"`, `"oauth_snapchat_client_id":"snapchat-client"`, `"oauth_snapchat_client_secret_handle":"secret://projects/config-proj/snapchat-secret"`, `"oauth_oidc_enabled":"true"`, `"oauth_oidc_issuer_url":"https://issuer.example.com"`, `"oauth_oidc_client_secret_handle":"secret://projects/config-proj/oidc-secret"`, `"phone_enabled":"true"`, `"sms_provider":"messagebird"`, `"sms_otp_exp":"90"`, `"sms_otp_length":"8"`, `"sms_max_frequency":"45s"`, `"sms_template":"Code: {{ .Code }}"`, `"sms_test_otp_handle":"secret://projects/config-proj/sms-test-otp"`, `"sms_test_otp_valid_until":"2026-12-31T23:59:59Z"`, `"sms_messagebird_access_key_handle":"secret://projects/config-proj/messagebird-key"`, `"sms_twilio_auth_token_handle":"secret://projects/config-proj/twilio-token"`, `"saml_metadata_url":"https://idp.example.com/metadata"`, `"web3_ethereum_enabled":"true"`} {
 		if !strings.Contains(providersUpdateResponse.Body.String(), expected) {
 			t.Fatalf("expected %s in auth providers response: %s", expected, providersUpdateResponse.Body.String())
 		}
@@ -1504,11 +2238,15 @@ func TestProjectConfigDefaultsUpdateAndAudit(t *testing.T) {
 	if invalidPoolerResponse.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid pooler config 400, got %d: %s", invalidPoolerResponse.Code, invalidPoolerResponse.Body.String())
 	}
-	poolerUpdateResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/pooler", `{"config":{"dedicated_pooler_enabled":"true","dedicated_pooler_tier":"large","pool_mode":"both","default_pool_size":"50","max_client_connections":"500","transaction_port":"7654","session_port":"55432"}}`)
+	invalidPoolerPortResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/pooler", `{"config":{"transaction_port":"7654"}}`)
+	if invalidPoolerPortResponse.Code != http.StatusBadRequest || !strings.Contains(invalidPoolerPortResponse.Body.String(), "fixed at 6543") {
+		t.Fatalf("expected fixed pooler port rejection, got %d: %s", invalidPoolerPortResponse.Code, invalidPoolerPortResponse.Body.String())
+	}
+	poolerUpdateResponse := perform(server, http.MethodPut, "/v1/projects/config-proj/config/pooler", `{"config":{"dedicated_pooler_enabled":"true","dedicated_pooler_tier":"large","pool_mode":"both","default_pool_size":"50","max_client_connections":"500","transaction_port":"6543","session_port":"5432"}}`)
 	if poolerUpdateResponse.Code != http.StatusOK {
 		t.Fatalf("expected pooler config update 200, got %d: %s", poolerUpdateResponse.Code, poolerUpdateResponse.Body.String())
 	}
-	for _, expected := range []string{`"dedicated_pooler_enabled":"true"`, `"dedicated_pooler_tier":"large"`, `"pool_mode":"both"`, `"transaction_port":"7654"`, `"session_port":"55432"`} {
+	for _, expected := range []string{`"dedicated_pooler_enabled":"true"`, `"dedicated_pooler_tier":"large"`, `"pool_mode":"both"`, `"transaction_port":"6543"`, `"session_port":"5432"`} {
 		if !strings.Contains(poolerUpdateResponse.Body.String(), expected) {
 			t.Fatalf("expected %s in pooler config response: %s", expected, poolerUpdateResponse.Body.String())
 		}
@@ -1603,6 +2341,8 @@ func TestProjectConfigUpdateSyncsRuntimeProvisioner(t *testing.T) {
 }
 
 func TestProjectServicesUpdateSyncsRuntimeProvisioner(t *testing.T) {
+	routesRoot := t.TempDir()
+	t.Setenv("SUPADUPA_ROUTES_ROOT", routesRoot)
 	store := control.NewMemoryStore()
 	provisioner := &capturingProvisioner{}
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
@@ -1613,6 +2353,10 @@ func TestProjectServicesUpdateSyncsRuntimeProvisioner(t *testing.T) {
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
 	if projectResponse.Code != http.StatusCreated {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	routePath := filepath.Join(routesRoot, "runtime-services-proj.yaml")
+	if err := os.WriteFile(routePath, []byte("http:\n  routers: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	updateResponse := perform(server, http.MethodPut, "/v1/projects/runtime-services-proj/services", `{"services":{"storage":false,"functions":false}}`)
@@ -1631,9 +2375,55 @@ func TestProjectServicesUpdateSyncsRuntimeProvisioner(t *testing.T) {
 	if states["storage"] || states["functions"] || !states["auth"] {
 		t.Fatalf("expected synced service state, got %#v", states)
 	}
+	routePayload, err := os.ReadFile(routePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeBody := string(routePayload)
+	for _, expected := range []string{
+		"tcp:",
+		"HostSNI(`db-runtime-services-proj.supadupa.test`)",
+		"HostSNI(`pooler-runtime-services-proj.supadupa.test`)",
+		"runtime-services-proj-postgres-alpn",
+	} {
+		if !strings.Contains(routeBody, expected) {
+			t.Fatalf("expected refreshed route config to contain %q:\n%s", expected, routeBody)
+		}
+	}
 	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
-	if !strings.Contains(auditResponse.Body.String(), `"action":"project.services_update"`) || !strings.Contains(auditResponse.Body.String(), `"runtime_synced":"true"`) {
+	if !strings.Contains(auditResponse.Body.String(), `"action":"project.services_update"`) || !strings.Contains(auditResponse.Body.String(), `"runtime_synced":"true"`) || !strings.Contains(auditResponse.Body.String(), `"route_path":"`+routePath+`"`) {
 		t.Fatalf("expected services audit metadata: %s", auditResponse.Body.String())
+	}
+}
+
+func TestProjectServicesUpdateClearsStaleErrorAfterSuccessfulRuntimeSync(t *testing.T) {
+	routesRoot := t.TempDir()
+	t.Setenv("SUPADUPA_ROUTES_ROOT", routesRoot)
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"service-error-proj","name":"Service Error","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	if _, err := store.UpdateProjectStatus(context.Background(), "service-error-proj", control.ProjectError, "previous reconcile error"); err != nil {
+		t.Fatal(err)
+	}
+
+	updateResponse := perform(server, http.MethodPut, "/v1/projects/service-error-proj/services", `{"services":{"storage":true,"functions":true}}`)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("expected services update 200, got %d: %s", updateResponse.Code, updateResponse.Body.String())
+	}
+
+	project, err := store.GetProject(context.Background(), "service-error-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Status != control.ProjectHealthy || project.Message != "enabled services updated" {
+		t.Fatalf("expected services update to clear stale error, got status=%q message=%q", project.Status, project.Message)
 	}
 }
 
@@ -1702,7 +2492,7 @@ func TestProjectFunctionsDeployListDeleteAndAudit(t *testing.T) {
 	if createResponse.Code != http.StatusCreated {
 		t.Fatalf("expected function deploy 201, got %d: %s", createResponse.Code, createResponse.Body.String())
 	}
-	for _, expected := range []string{`"name":"hello-api"`, `"version":1`, `"status":"deployed"`, `"source_hash":"`, `"source_bytes":36`, `"api_key":"super-************cret"`} {
+	for _, expected := range []string{`"name":"hello-api"`, `"version":1`, `"status":"deployed"`, `"source_hash":"`, `"source_bytes":36`, `"API_KEY":"super-************cret"`} {
 		if !strings.Contains(createResponse.Body.String(), expected) {
 			t.Fatalf("expected function deploy value %s: %s", expected, createResponse.Body.String())
 		}
@@ -1722,7 +2512,7 @@ func TestProjectFunctionsDeployListDeleteAndAudit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected function secret artifact: %v", err)
 	}
-	for _, expected := range []string{"SUPABASE_FUNCTION_VERSION=1", "VERIFY_JWT=true", "api_key=super-secret"} {
+	for _, expected := range []string{"SUPABASE_FUNCTION_VERSION=1", "VERIFY_JWT=true", "API_KEY=super-secret"} {
 		if !strings.Contains(string(secretEnv), expected) {
 			t.Fatalf("expected function env %q, got:\n%s", expected, secretEnv)
 		}
@@ -1750,7 +2540,7 @@ func TestProjectFunctionsDeployListDeleteAndAudit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected redeployed function env artifact: %v", err)
 	}
-	if !strings.Contains(string(secretEnv), "SUPABASE_FUNCTION_VERSION=2") || strings.Contains(string(secretEnv), "api_key=super-secret") {
+	if !strings.Contains(string(secretEnv), "SUPABASE_FUNCTION_VERSION=2") || strings.Contains(string(secretEnv), "API_KEY=super-secret") {
 		t.Fatalf("expected redeploy env to update version and clear omitted secret, got:\n%s", secretEnv)
 	}
 
@@ -2304,7 +3094,8 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 	if functionResponse.Code != http.StatusCreated {
 		t.Fatalf("expected function deploy 201, got %d: %s", functionResponse.Code, functionResponse.Body.String())
 	}
-	telemetryResponse := perform(server, http.MethodPost, "/v1/projects/metrics-proj/telemetry", `{"source":"compose","cpu_percent":18.5,"memory_bytes":536870912,"memory_limit_bytes":2147483648,"disk_used_bytes":7516192768,"disk_limit_bytes":21474836480,"network_rx_bytes":123,"network_tx_bytes":456,"sampled_at":"2026-06-05T12:00:00Z"}`)
+	telemetryPayload := `{"source":"compose","cpu_percent":18.5,"memory_bytes":536870912,"memory_limit_bytes":2147483648,"disk_used_bytes":7516192768,"disk_limit_bytes":21474836480,"network_rx_bytes":123,"network_tx_bytes":456,"sampled_at":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
+	telemetryResponse := perform(server, http.MethodPost, "/v1/projects/metrics-proj/telemetry", telemetryPayload)
 	if telemetryResponse.Code != http.StatusCreated {
 		t.Fatalf("expected telemetry status 201, got %d: %s", telemetryResponse.Code, telemetryResponse.Body.String())
 	}
@@ -2366,14 +3157,27 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		"supadupa_function_deployments_total 1",
 		"supadupa_backup_storage_bytes 2048",
 		"supadupa_audit_verified 1",
+		"supadupa_project_resource_cpu{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 1",
+		"supadupa_project_resource_disk_iops{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 3000",
+		"supadupa_project_logs_total{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"}",
+		"supadupa_project_backups_total{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 1",
+		"supadupa_project_backup_storage_bytes{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 2048",
+		"supadupa_project_observed_cpu_percent{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",source=\"compose\",status=\"healthy\"} 18.5",
+		"supadupa_project_observed_memory_bytes{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",source=\"compose\",status=\"healthy\"} 536870912",
+		"supadupa_project_telemetry_sampled_at_unix{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",source=\"compose\",status=\"healthy\"}",
 	} {
 		if !strings.Contains(promResponse.Body.String(), expected) {
 			t.Fatalf("expected prometheus metric %s: %s", expected, promResponse.Body.String())
 		}
 	}
+	if strings.Count(promResponse.Body.String(), "# HELP supadupa_project_resource_cpu ") != 1 {
+		t.Fatalf("expected one HELP line for project CPU metric: %s", promResponse.Body.String())
+	}
 }
 
 func TestFleetAdvisorFindingsEndpoint(t *testing.T) {
+	t.Setenv("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS", "false")
+	t.Setenv("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP", "false")
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
 	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}`)
@@ -2410,7 +3214,11 @@ func TestFleetAdvisorFindingsEndpoint(t *testing.T) {
 	}
 	for _, expected := range []string{
 		`"project_ref":"advisor-proj"`,
+		`"project_ref":"platform"`,
 		`"severity":"critical"`,
+		`"title":"Recovery-ready target guard is disabled"`,
+		`"title":"Durable upgrade backup guard is disabled"`,
+		`"title":"No recovery-ready backup target"`,
 		`"title":"Project is not healthy"`,
 		`"title":"Backups are disabled"`,
 		`"title":"PITR is disabled"`,
@@ -2428,6 +3236,8 @@ func TestFleetAdvisorFindingsEndpoint(t *testing.T) {
 }
 
 func TestComplianceReportEndpoint(t *testing.T) {
+	t.Setenv("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS", "false")
+	t.Setenv("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP", "false")
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
 	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}`)
@@ -2470,6 +3280,13 @@ func TestComplianceReportEndpoint(t *testing.T) {
 		`"title":"Immutable audit chain"`,
 		`"status":"pass"`,
 		`"id":"COM-009"`,
+		`"title":"Hosted-grade recovery guards"`,
+		`"recovery-ready target guard enabled: false"`,
+		`"durable upgrade backup guard enabled: false"`,
+		`"id":"COM-010"`,
+		`"title":"Off-host recovery target readiness"`,
+		`"0 recovery-ready backup targets"`,
+		`"id":"COM-011"`,
 		`"status":"manual_review"`,
 		`"dpa_posture":"operator-owned: use these controls as evidence for the deploying organization's DPA and BAA posture"`,
 		`"certification":"not certified by supadupa; certification remains the operator's responsibility"`,
@@ -2481,6 +3298,59 @@ func TestComplianceReportEndpoint(t *testing.T) {
 		if !strings.Contains(response.Body.String(), expected) {
 			t.Fatalf("expected compliance report value %s: %s", expected, response.Body.String())
 		}
+	}
+}
+
+func TestProjectReplicasSyncRuntimeWhenProvisionerSupportsReplicaSyncer(t *testing.T) {
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10}}`)
+	if hostResponse.Code != http.StatusCreated {
+		t.Fatalf("expected host create 201, got %d: %s", hostResponse.Code, hostResponse.Body.String())
+	}
+	hostID := extractString(t, hostResponse.Body.String(), "id")
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	enableOrgFeaturesForTest(t, store, orgID, "read_replicas")
+	projectBody := `{"ref":"replica-sync","name":"Replica Sync","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/replica-sync/replicas", `{"name":"east","host_id":"`+hostID+`","region":"us-east","tier":"small","read_weight":75,"failover_priority":2}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected replica create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	eastID := extractString(t, createResponse.Body.String(), "id")
+	if provisioner.syncedReplicasRef != "replica-sync" || len(provisioner.syncedReplicas) != 1 || provisioner.syncedReplicas[0].Name != "east" {
+		t.Fatalf("expected replica create to sync runtime replicas, got ref=%s replicas=%#v", provisioner.syncedReplicasRef, provisioner.syncedReplicas)
+	}
+
+	promoteResponse := perform(server, http.MethodPost, "/v1/projects/replica-sync/replicas/"+eastID+"/promote", `{"reason":"planned"}`)
+	if promoteResponse.Code != http.StatusOK {
+		t.Fatalf("expected replica promote 200, got %d: %s", promoteResponse.Code, promoteResponse.Body.String())
+	}
+	if len(provisioner.syncedReplicas) != 1 || provisioner.syncedReplicas[0].Role != "primary" {
+		t.Fatalf("expected promote to sync primary role, got %#v", provisioner.syncedReplicas)
+	}
+
+	westResponse := perform(server, http.MethodPost, "/v1/projects/replica-sync/replicas", `{"name":"west","host_id":"`+hostID+`","region":"us-west","tier":"small","read_weight":50,"failover_priority":3}`)
+	if westResponse.Code != http.StatusCreated {
+		t.Fatalf("expected west replica create 201, got %d: %s", westResponse.Code, westResponse.Body.String())
+	}
+	westID := extractString(t, westResponse.Body.String(), "id")
+	if len(provisioner.syncedReplicas) != 2 {
+		t.Fatalf("expected west create to sync two replicas, got %#v", provisioner.syncedReplicas)
+	}
+
+	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/replica-sync/replicas/"+westID, "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected replica delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	if provisioner.syncedReplicasRef != "replica-sync" || len(provisioner.syncedReplicas) != 1 || provisioner.syncedReplicas[0].ID != eastID {
+		t.Fatalf("expected delete to sync remaining replicas before metadata removal, got ref=%s replicas=%#v", provisioner.syncedReplicasRef, provisioner.syncedReplicas)
 	}
 }
 
@@ -2792,6 +3662,145 @@ func TestProjectStorageBucketsCreateListDeleteMetricsAndAudit(t *testing.T) {
 	}
 }
 
+func TestProjectStorageBucketsApplyToStorageDataPlane(t *testing.T) {
+	t.Setenv("SUPADUPA_STORAGE_APPLY", "true")
+	var requestsMu sync.Mutex
+	requests := []string{}
+	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsMu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization"))
+		requestsMu.Unlock()
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || r.Header.Get("apikey") == "" {
+			http.Error(w, "missing service role", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/storage/v1/bucket":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if payload["id"] != "assets" || payload["name"] != "assets" || payload["public"] != true {
+				http.Error(w, fmt.Sprintf("unexpected payload %#v", payload), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"assets"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/storage/v1/bucket/assets":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer storageServer.Close()
+	t.Setenv("SUPADUPA_STORAGE_APPLY_BASE_URL", storageServer.URL)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"storage-live","name":"Storage Live","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/storage-live/storage/buckets", `{"name":"assets","public":true}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected storage bucket create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/storage-live/storage/buckets/assets", "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected storage bucket delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+
+	requestsMu.Lock()
+	defer requestsMu.Unlock()
+	if len(requests) != 2 || !strings.HasPrefix(requests[0], "POST /storage/v1/bucket Bearer ") || !strings.HasPrefix(requests[1], "DELETE /storage/v1/bucket/assets Bearer ") {
+		t.Fatalf("unexpected storage data-plane requests: %#v", requests)
+	}
+}
+
+func TestProjectStorageBucketCreateRollsBackMetadataWhenDataPlaneFails(t *testing.T) {
+	t.Setenv("SUPADUPA_STORAGE_APPLY", "true")
+	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "storage unavailable", http.StatusBadGateway)
+	}))
+	defer storageServer.Close()
+	t.Setenv("SUPADUPA_STORAGE_APPLY_BASE_URL", storageServer.URL)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"storage-fail","name":"Storage Fail","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/storage-fail/storage/buckets", `{"name":"assets","public":true}`)
+	if createResponse.Code != http.StatusConflict {
+		t.Fatalf("expected storage bucket create conflict, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/storage-fail/storage/buckets", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"name":"assets"`) {
+		t.Fatalf("expected failed bucket create to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+}
+
+func TestProjectStorageBucketDeleteCleansMetadataWhenDataPlaneBucketAlreadyMissing(t *testing.T) {
+	t.Setenv("SUPADUPA_STORAGE_APPLY", "true")
+	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/storage/v1/bucket":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"assets"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/storage/v1/bucket/assets":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"statusCode":"404","error":"Bucket not found","message":"Bucket not found"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer storageServer.Close()
+	t.Setenv("SUPADUPA_STORAGE_APPLY_BASE_URL", storageServer.URL)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"storage-missing","name":"Storage Missing","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/storage-missing/storage/buckets", `{"name":"assets","public":true}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected storage bucket create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/storage-missing/storage/buckets/assets", "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected storage bucket delete 204 despite missing data-plane bucket, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/storage-missing/storage/buckets", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"name":"assets"`) {
+		t.Fatalf("expected metadata cleanup after missing data-plane bucket, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+}
+
+func TestStorageDataPlaneNotFoundAcceptsSupabaseStorageShape(t *testing.T) {
+	if !storageDataPlaneNotFound(http.StatusNotFound, []byte(`not found`)) {
+		t.Fatalf("expected HTTP 404 to be treated as not found")
+	}
+	if !storageDataPlaneNotFound(http.StatusBadRequest, []byte(`{"statusCode":"404","error":"Bucket not found","message":"Bucket not found"}`)) {
+		t.Fatalf("expected Supabase Storage bucket-not-found body to be treated as not found")
+	}
+	if storageDataPlaneNotFound(http.StatusBadRequest, []byte(`{"statusCode":"400","message":"bad request"}`)) {
+		t.Fatalf("expected generic bad request to remain an error")
+	}
+}
+
 func TestProjectDatabaseExtensionsListUpdateMetricsAndAudit(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
@@ -2854,6 +3863,101 @@ func TestProjectDatabaseExtensionsListUpdateMetricsAndAudit(t *testing.T) {
 	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
 	if !strings.Contains(auditResponse.Body.String(), `"action":"project.database_extension_update"`) {
 		t.Fatalf("expected extension audit action: %s", auditResponse.Body.String())
+	}
+}
+
+func TestProjectDatabaseExtensionUpdateAppliesLiveDDL(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "extension-live")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	argsPath := filepath.Join(root, "compose.args")
+	stdinPath := filepath.Join(root, "compose.stdin")
+	composePath := filepath.Join(root, "fake-compose")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuoteForTest(argsPath) + "\ncat > " + shellQuoteForTest(stdinPath) + "\n"
+	if err := os.WriteFile(composePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"extension-live","name":"Extension Live","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	updateResponse := perform(server, http.MethodPut, "/v1/projects/extension-live/database/extensions/uuid-ossp", `{"enabled":true,"schema":"extensions"}`)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("expected extension update 200, got %d: %s", updateResponse.Code, updateResponse.Body.String())
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read fake compose args: %v", err)
+	}
+	for _, expected := range []string{"-p extension-live", "-f " + filepath.Join(projectDir, "compose.yaml"), "exec -T db sh -c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql`} {
+		if !strings.Contains(string(args), expected) {
+			t.Fatalf("expected fake compose args to contain %q, got %s", expected, string(args))
+		}
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read fake compose stdin: %v", err)
+	}
+	for _, expected := range []string{`CREATE SCHEMA IF NOT EXISTS "extensions";`, `CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";`} {
+		if !strings.Contains(string(stdin), expected) {
+			t.Fatalf("expected extension DDL %q, got:\n%s", expected, stdin)
+		}
+	}
+}
+
+func TestProjectDatabaseExtensionUpdateRollsBackMetadataWhenApplyFails(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "extension-fail")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"extension-fail","name":"Extension Fail","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	disableResponse := perform(server, http.MethodPut, "/v1/projects/extension-fail/database/extensions/pg_cron", `{"enabled":false,"schema":"extensions"}`)
+	if disableResponse.Code != http.StatusOK {
+		t.Fatalf("expected initial extension update 200, got %d: %s", disableResponse.Code, disableResponse.Body.String())
+	}
+
+	composePath := filepath.Join(root, "fake-compose")
+	script := "#!/bin/sh\necho 'extension install failed' >&2\nexit 1\n"
+	if err := os.WriteFile(composePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	enableResponse := perform(server, http.MethodPut, "/v1/projects/extension-fail/database/extensions/pg_cron", `{"enabled":true,"schema":"extensions"}`)
+	if enableResponse.Code != http.StatusConflict || !strings.Contains(enableResponse.Body.String(), "extension install failed") {
+		t.Fatalf("expected extension apply conflict, got %d: %s", enableResponse.Code, enableResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/extension-fail/database/extensions", "")
+	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), `"name":"pg_cron"`) || !strings.Contains(listResponse.Body.String(), `"enabled":false`) {
+		t.Fatalf("expected failed extension update to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
 	}
 }
 
@@ -2932,6 +4036,138 @@ func TestProjectDatabaseCronJobsCreateListDeleteMetricsAndAudit(t *testing.T) {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected audit action %s: %s", action, auditResponse.Body.String())
 		}
+	}
+}
+
+func TestProjectDatabaseCronJobCreateDeleteAppliesLiveDDL(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "cron-live")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	stdinPath := filepath.Join(root, "compose.stdin")
+	composePath := filepath.Join(root, "fake-compose")
+	script := "#!/bin/sh\ncat >> " + shellQuoteForTest(stdinPath) + "\nprintf '\\n-- call --\\n' >> " + shellQuoteForTest(stdinPath) + "\n"
+	if err := os.WriteFile(composePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"cron-live","name":"Cron Live","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/cron-live/database/cron-jobs", `{"name":"refresh-rollups","schedule":"*/15 * * * *","command":"select public.refresh_rollups();","database":"postgres","username":"postgres","active":true}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected cron create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/cron-live/database/cron-jobs/refresh-rollups", "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected cron delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read fake compose stdin: %v", err)
+	}
+	for _, expected := range []string{
+		`CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA extensions;`,
+		`SELECT cron.schedule_in_database('refresh-rollups', '*/15 * * * *', 'select public.refresh_rollups();', 'postgres', 'postgres', true);`,
+		`SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'refresh-rollups';`,
+	} {
+		if !strings.Contains(string(stdin), expected) {
+			t.Fatalf("expected cron DDL %q, got:\n%s", expected, stdin)
+		}
+	}
+}
+
+func TestProjectDatabaseCronJobCreateRollsBackMetadataWhenApplyFails(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "cron-fail")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	composePath := filepath.Join(root, "fake-compose")
+	if err := os.WriteFile(composePath, []byte("#!/bin/sh\necho 'cron schedule failed' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"cron-fail","name":"Cron Fail","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/cron-fail/database/cron-jobs", `{"name":"refresh-rollups","schedule":"*/15 * * * *","command":"select 1;","active":true}`)
+	if createResponse.Code != http.StatusConflict || !strings.Contains(createResponse.Body.String(), "cron schedule failed") {
+		t.Fatalf("expected cron apply conflict, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/cron-fail/database/cron-jobs", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"name":"refresh-rollups"`) {
+		t.Fatalf("expected failed cron create to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+}
+
+func TestProjectConfigRuntimeSecretResolutionAndRollback(t *testing.T) {
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"runtime-secret-proj","name":"Runtime Secret","domain":"supadupa.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	missingResponse := perform(server, http.MethodPut, "/v1/projects/runtime-secret-proj/config/smtp", `{"config":{"enabled":"true","host":"smtp.example.com","password_handle":"secret://projects/runtime-secret-proj/smtp-password"}}`)
+	if missingResponse.Code != http.StatusConflict || !strings.Contains(missingResponse.Body.String(), "secret smtp-password") {
+		t.Fatalf("expected missing secret conflict, got %d: %s", missingResponse.Code, missingResponse.Body.String())
+	}
+	getResponse := perform(server, http.MethodGet, "/v1/projects/runtime-secret-proj/config/smtp", "")
+	if strings.Contains(getResponse.Body.String(), "secret://projects/runtime-secret-proj/smtp-password") {
+		t.Fatalf("expected failed config sync to roll back metadata, got %s", getResponse.Body.String())
+	}
+
+	upsertResponse := perform(server, http.MethodPut, "/v1/projects/runtime-secret-proj/secrets/smtp-password", `{"value":"smtp-secret-value"}`)
+	if upsertResponse.Code != http.StatusOK || strings.Contains(upsertResponse.Body.String(), "smtp-secret-value") || !strings.Contains(upsertResponse.Body.String(), `"kind":"smtp-password"`) {
+		t.Fatalf("expected masked custom secret upsert, got %d: %s", upsertResponse.Code, upsertResponse.Body.String())
+	}
+	updateResponse := perform(server, http.MethodPut, "/v1/projects/runtime-secret-proj/config/smtp", `{"config":{"enabled":"true","host":"smtp.example.com","password_handle":"secret://projects/runtime-secret-proj/smtp-password"}}`)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("expected smtp config update after secret upsert, got %d: %s", updateResponse.Code, updateResponse.Body.String())
+	}
+	if provisioner.syncedConfig.Config["__resolved_password_handle"] != "smtp-secret-value" {
+		t.Fatalf("expected runtime config to include resolved secret value, got %#v", provisioner.syncedConfig.Config)
+	}
+	if strings.Contains(updateResponse.Body.String(), "smtp-secret-value") || !strings.Contains(updateResponse.Body.String(), `"password_handle":"secret://projects/runtime-secret-proj/smtp-password"`) {
+		t.Fatalf("expected response to keep handle and hide secret value: %s", updateResponse.Body.String())
+	}
+	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/runtime-secret-proj/secrets/smtp-password", "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected custom secret delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	revealDeletedResponse := perform(server, http.MethodGet, "/v1/projects/runtime-secret-proj/secrets/smtp-password/reveal", "")
+	if revealDeletedResponse.Code != http.StatusNotFound {
+		t.Fatalf("expected deleted custom secret reveal 404, got %d: %s", revealDeletedResponse.Code, revealDeletedResponse.Body.String())
 	}
 }
 
@@ -3033,6 +4269,7 @@ func TestProjectAuthHooksCreateListDeleteMetricsAndAudit(t *testing.T) {
 	if projectResponse.Code != http.StatusCreated {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
+	seedProjectSecrets(t, store, "authhook-proj", "auth-hook-secret", "auth-hook-auth")
 
 	invalidSecret := perform(server, http.MethodPost, "/v1/projects/authhook-proj/auth/hooks", `{"hook_type":"custom_access_token","enabled":true,"target_uri":"https://hooks.example.com/token","secret_handle":"raw-secret"}`)
 	if invalidSecret.Code != http.StatusBadRequest {
@@ -3043,7 +4280,7 @@ func TestProjectAuthHooksCreateListDeleteMetricsAndAudit(t *testing.T) {
 		t.Fatalf("expected raw authorization header 400, got %d: %s", invalidHeader.Code, invalidHeader.Body.String())
 	}
 
-	createBody := `{"hook_type":"custom_access_token","enabled":true,"target_uri":"https://hooks.example.com/token","secret_handle":"secret://projects/authhook-proj/auth/hook-secret","headers":{"authorization":"secret://projects/authhook-proj/auth/hook-auth","x-trace":"supadupa"},"timeout_ms":7000,"retry_attempts":2}`
+	createBody := `{"hook_type":"custom_access_token","enabled":true,"target_uri":"https://hooks.example.com/token","secret_handle":"secret://projects/authhook-proj/auth-hook-secret","headers":{"authorization":"secret://projects/authhook-proj/auth-hook-auth","x-trace":"supadupa"},"timeout_ms":7000,"retry_attempts":2}`
 	createResponse := perform(server, http.MethodPost, "/v1/projects/authhook-proj/auth/hooks", createBody)
 	if createResponse.Code != http.StatusCreated {
 		t.Fatalf("expected auth hook create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
@@ -3059,8 +4296,8 @@ func TestProjectAuthHooksCreateListDeleteMetricsAndAudit(t *testing.T) {
 	if provisioner.syncedAuthHooksRef != "authhook-proj" || len(provisioner.syncedAuthHooks) != 1 || provisioner.syncedAuthHooks[0].HookType != "custom_access_token" {
 		t.Fatalf("expected auth hook create to sync runtime hooks, got ref=%s hooks=%#v", provisioner.syncedAuthHooksRef, provisioner.syncedAuthHooks)
 	}
-	if provisioner.syncedAuthHooks[0].SecretHandle != "secret://projects/authhook-proj/auth/hook-secret" || provisioner.syncedAuthHooks[0].Headers["authorization"] != "secret://projects/authhook-proj/auth/hook-auth" {
-		t.Fatalf("expected auth hook runtime sync to keep secret handles, got %#v", provisioner.syncedAuthHooks[0])
+	if provisioner.syncedAuthHooks[0].SecretHandle != "secret://projects/authhook-proj/auth-hook-secret" || provisioner.syncedAuthHooks[0].RuntimeSecret != "auth-hook-secret-value" || provisioner.syncedAuthHooks[0].Headers["authorization"] != "secret://projects/authhook-proj/auth-hook-auth" || provisioner.syncedAuthHooks[0].RuntimeHeaders["authorization"] != "auth-hook-auth-value" {
+		t.Fatalf("expected auth hook runtime sync to keep handles and include resolved runtime secrets, got %#v", provisioner.syncedAuthHooks[0])
 	}
 
 	updateResponse := perform(server, http.MethodPost, "/v1/projects/authhook-proj/auth/hooks", `{"hook_type":"custom_access_token","enabled":false,"edge_function":"token-hook","headers":{"x-trace":"disabled"}}`)
@@ -3114,6 +4351,48 @@ func TestProjectAuthHooksCreateListDeleteMetricsAndAudit(t *testing.T) {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected audit action %s: %s", action, auditResponse.Body.String())
 		}
+	}
+}
+
+func TestProjectAuthHookCreateRollsBackWhenSecretResolutionFails(t *testing.T) {
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}`)
+	if hostResponse.Code != http.StatusCreated {
+		t.Fatalf("expected host status 201, got %d: %s", hostResponse.Code, hostResponse.Body.String())
+	}
+	hostID := extractString(t, hostResponse.Body.String(), "id")
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectBody := `{"ref":"authhook-fail","name":"Auth Hooks","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createBody := `{"hook_type":"custom_access_token","enabled":true,"target_uri":"https://hooks.example.com/token","secret_handle":"secret://projects/authhook-fail/missing-hook-secret","timeout_ms":7000,"retry_attempts":2}`
+	createResponse := perform(server, http.MethodPost, "/v1/projects/authhook-fail/auth/hooks", createBody)
+	if createResponse.Code != http.StatusConflict {
+		t.Fatalf("expected auth hook unresolved secret 409, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	if !strings.Contains(createResponse.Body.String(), "auth hook secret_handle") || !strings.Contains(createResponse.Body.String(), "missing-hook-secret") {
+		t.Fatalf("expected unresolved auth hook secret error, got %s", createResponse.Body.String())
+	}
+	if provisioner.syncedAuthHooksRef != "" || len(provisioner.syncedAuthHooks) != 0 {
+		t.Fatalf("expected unresolved auth hook to skip runtime sync, got ref=%s hooks=%#v", provisioner.syncedAuthHooksRef, provisioner.syncedAuthHooks)
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/authhook-fail/auth/hooks", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"hook_type":"custom_access_token"`) {
+		t.Fatalf("expected unresolved auth hook to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+	logsResponse := perform(server, http.MethodGet, "/v1/projects/authhook-fail/logs", "")
+	if !strings.Contains(logsResponse.Body.String(), "Auth hooks sync failed") {
+		t.Fatalf("expected auth hook sync failure log, got %s", logsResponse.Body.String())
+	}
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	if !strings.Contains(auditResponse.Body.String(), `"action":"project.auth_hooks_sync_failed"`) {
+		t.Fatalf("expected auth hook sync failure audit, got %s", auditResponse.Body.String())
 	}
 }
 
@@ -3195,6 +4474,96 @@ func TestProjectDatabaseQueuesCreateListDeleteMetricsAndAudit(t *testing.T) {
 	}
 }
 
+func TestProjectDatabaseQueueCreateDeleteAppliesLiveDDL(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "queue-live")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	stdinPath := filepath.Join(root, "compose.stdin")
+	composePath := filepath.Join(root, "fake-compose")
+	script := "#!/bin/sh\ncat >> " + shellQuoteForTest(stdinPath) + "\nprintf '\\n-- call --\\n' >> " + shellQuoteForTest(stdinPath) + "\n"
+	if err := os.WriteFile(composePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"queue-live","name":"Queue Live","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/queue-live/database/queues", `{"name":"events","schema":"pgmq","dead_letter_queue":"events-dlq","active":true}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected queue create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/queue-live/database/queues/events", "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected queue delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read fake compose stdin: %v", err)
+	}
+	for _, expected := range []string{
+		`CREATE SCHEMA IF NOT EXISTS "pgmq";`,
+		`CREATE EXTENSION IF NOT EXISTS pgmq WITH SCHEMA "pgmq";`,
+		`SELECT pgmq.create('events-dlq');`,
+		`SELECT pgmq.create('events');`,
+		`SELECT pgmq.drop_queue('events');`,
+		`SELECT pgmq.drop_queue('events-dlq');`,
+	} {
+		if !strings.Contains(string(stdin), expected) {
+			t.Fatalf("expected queue DDL %q, got:\n%s", expected, stdin)
+		}
+	}
+}
+
+func TestProjectDatabaseQueueCreateRollsBackMetadataWhenApplyFails(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "queue-fail")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	composePath := filepath.Join(root, "fake-compose")
+	if err := os.WriteFile(composePath, []byte("#!/bin/sh\necho 'queue create failed' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"queue-fail","name":"Queue Fail","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/queue-fail/database/queues", `{"name":"events","schema":"pgmq","active":true}`)
+	if createResponse.Code != http.StatusConflict || !strings.Contains(createResponse.Body.String(), "queue create failed") {
+		t.Fatalf("expected queue apply conflict, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/queue-fail/database/queues", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"name":"events"`) {
+		t.Fatalf("expected failed queue create to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+}
+
 func TestProjectDatabaseWebhooksCreateListDeleteMetricsAndAudit(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
@@ -3270,6 +4639,145 @@ func TestProjectDatabaseWebhooksCreateListDeleteMetricsAndAudit(t *testing.T) {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected audit action %s: %s", action, auditResponse.Body.String())
 		}
+	}
+}
+
+func TestProjectDatabaseWebhookCreateDeleteAppliesLiveDDL(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "webhook-live")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	stdinPath := filepath.Join(root, "compose.stdin")
+	composePath := filepath.Join(root, "fake-compose")
+	script := "#!/bin/sh\ncat >> " + shellQuoteForTest(stdinPath) + "\nprintf '\\n-- call --\\n' >> " + shellQuoteForTest(stdinPath) + "\n"
+	if err := os.WriteFile(composePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"webhook-live","name":"Webhook Live","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	seedProjectSecrets(t, store, "webhook-live", "orders-token")
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/webhook-live/database/webhooks", `{"name":"orders-events","schema":"public","table":"orders","events":["insert","update"],"endpoint":"https://hooks.example.com/orders","http_method":"POST","headers":{"Authorization":"secret://projects/webhook-live/orders-token","X-Source":"supadupa"},"timeout_seconds":15,"active":true}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected webhook create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/webhook-live/database/webhooks/orders-events", "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected webhook delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read fake compose stdin: %v", err)
+	}
+	sql := string(stdin)
+	for _, expected := range []string{
+		`CREATE SCHEMA IF NOT EXISTS supadupa;`,
+		`CREATE EXTENSION IF NOT EXISTS pg_net;`,
+		`CREATE OR REPLACE FUNCTION supadupa."webhook_orders_events"()`,
+		`"authorization":"orders-token-value"`,
+		`"x-source":"supadupa"`,
+		`PERFORM net.http_post(`,
+		`url := 'https://hooks.example.com/orders'`,
+		`timeout_milliseconds := 15000`,
+		`CREATE TRIGGER "supadupa_webhook_orders_events_insert"`,
+		`AFTER INSERT ON "public"."orders"`,
+		`CREATE TRIGGER "supadupa_webhook_orders_events_update"`,
+		`AFTER UPDATE ON "public"."orders"`,
+		`DROP TRIGGER IF EXISTS "supadupa_webhook_orders_events_insert" ON "public"."orders"`,
+		`DROP FUNCTION IF EXISTS supadupa."webhook_orders_events"();`,
+	} {
+		if !strings.Contains(sql, expected) {
+			t.Fatalf("expected webhook DDL %q, got:\n%s", expected, sql)
+		}
+	}
+	if strings.Contains(sql, "secret://projects") {
+		t.Fatalf("expected live webhook DDL to contain resolved secrets, got:\n%s", sql)
+	}
+}
+
+func TestProjectDatabaseWebhookCreateRollsBackMetadataWhenApplyFails(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "webhook-fail")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	composePath := filepath.Join(root, "fake-compose")
+	if err := os.WriteFile(composePath, []byte("#!/bin/sh\necho 'webhook create failed' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"webhook-fail","name":"Webhook Fail","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/webhook-fail/database/webhooks", `{"name":"orders-events","schema":"public","table":"orders","endpoint":"https://hooks.example.com/orders","active":true}`)
+	if createResponse.Code != http.StatusConflict || !strings.Contains(createResponse.Body.String(), "webhook create failed") {
+		t.Fatalf("expected webhook apply conflict, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/webhook-fail/database/webhooks", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"name":"orders-events"`) {
+		t.Fatalf("expected failed webhook create to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+}
+
+func TestProjectDatabaseWebhookCreateRequiresRevealableSecretHeadersWhenApplyEnabled(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "webhook-secret")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	composePath := filepath.Join(root, "fake-compose")
+	if err := os.WriteFile(composePath, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"webhook-secret","name":"Webhook Secret","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/webhook-secret/database/webhooks", `{"name":"orders-events","schema":"public","table":"orders","endpoint":"https://hooks.example.com/orders","headers":{"Authorization":"secret://projects/webhook-secret/webhooks/orders-token"},"active":true}`)
+	if createResponse.Code != http.StatusConflict || !strings.Contains(createResponse.Body.String(), "not revealable") {
+		t.Fatalf("expected unrevealable header conflict, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/webhook-secret/database/webhooks", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"name":"orders-events"`) {
+		t.Fatalf("expected failed webhook create to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
 	}
 }
 
@@ -3355,6 +4863,95 @@ func TestProjectDatabaseSchemasCreateListDeleteMetricsAndAudit(t *testing.T) {
 	}
 }
 
+func TestProjectDatabaseSchemaCreateAppliesActiveSQLToProjectDatabase(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "schema-live")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	argsPath := filepath.Join(root, "compose.args")
+	stdinPath := filepath.Join(root, "compose.stdin")
+	composePath := filepath.Join(root, "fake-compose")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuoteForTest(argsPath) + "\ncat > " + shellQuoteForTest(stdinPath) + "\n"
+	if err := os.WriteFile(composePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"schema-live","name":"Schema Live","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	sql := "create table public.live_schema_probe(id uuid primary key);"
+	createResponse := perform(server, http.MethodPost, "/v1/projects/schema-live/database/schemas", `{"name":"live-schema","version":"20260606_001","schema":"public","sql":"`+sql+`","active":true}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected schema create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read fake compose args: %v", err)
+	}
+	for _, expected := range []string{"-p schema-live", "-f " + filepath.Join(projectDir, "compose.yaml"), "exec -T db sh -c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql`, "-v ON_ERROR_STOP=1", "-U supabase_admin", "-d postgres"} {
+		if !strings.Contains(string(args), expected) {
+			t.Fatalf("expected fake compose args to contain %q, got %s", expected, string(args))
+		}
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read fake compose stdin: %v", err)
+	}
+	if strings.TrimSpace(string(stdin)) != sql {
+		t.Fatalf("expected SQL stdin %q, got %q", sql, strings.TrimSpace(string(stdin)))
+	}
+}
+
+func TestProjectDatabaseSchemaCreateRollsBackMetadataWhenApplyFails(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "schema-fail")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	composePath := filepath.Join(root, "fake-compose")
+	script := "#!/bin/sh\necho 'syntax error near bad_sql' >&2\nexit 1\n"
+	if err := os.WriteFile(composePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"schema-fail","name":"Schema Fail","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/schema-fail/database/schemas", `{"name":"bad-schema","version":"20260606_001","schema":"public","sql":"select bad_sql();","active":true}`)
+	if createResponse.Code != http.StatusConflict || !strings.Contains(createResponse.Body.String(), "syntax error near bad_sql") {
+		t.Fatalf("expected schema apply conflict, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/schema-fail/database/schemas", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"name":"bad-schema"`) {
+		t.Fatalf("expected failed schema create to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+}
+
 func TestProjectDatabaseRolesCreateListDeleteMetricsAndAudit(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
@@ -3427,6 +5024,139 @@ func TestProjectDatabaseRolesCreateListDeleteMetricsAndAudit(t *testing.T) {
 	}
 }
 
+func TestProjectDatabaseRoleCreateDeleteAppliesLiveDDL(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "role-live")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	stdinPath := filepath.Join(root, "compose.stdin")
+	composePath := filepath.Join(root, "fake-compose")
+	script := "#!/bin/sh\ncat >> " + shellQuoteForTest(stdinPath) + "\nprintf '\\n-- call --\\n' >> " + shellQuoteForTest(stdinPath) + "\n"
+	if err := os.WriteFile(composePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"role-live","name":"Role Live","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/role-live/database/roles", `{"name":"app_reader","login":false,"bypass_rls":false,"connection_limit":25,"member_of":["authenticated"],"schema_grants":{"public":"usage,select"}}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected role create 201, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/role-live/database/roles/app_reader", "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected role delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read fake compose stdin: %v", err)
+	}
+	for _, expected := range []string{
+		`CREATE ROLE "app_reader";`,
+		`ALTER ROLE "app_reader" NOLOGIN INHERIT NOBYPASSRLS CONNECTION LIMIT 25;`,
+		`GRANT "authenticated" TO "app_reader";`,
+		`GRANT USAGE ON SCHEMA "public" TO "app_reader";`,
+		`GRANT SELECT ON ALL TABLES IN SCHEMA "public" TO "app_reader";`,
+		`REVOKE SELECT ON ALL TABLES IN SCHEMA "public" FROM "app_reader";`,
+		`REVOKE USAGE ON SCHEMA "public" FROM "app_reader";`,
+		`REVOKE "authenticated" FROM "app_reader";`,
+		`DROP ROLE IF EXISTS "app_reader";`,
+	} {
+		if !strings.Contains(string(stdin), expected) {
+			t.Fatalf("expected role DDL %q, got:\n%s", expected, stdin)
+		}
+	}
+}
+
+func TestProjectDatabaseRoleCreateRollsBackMetadataWhenApplyFails(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "role-fail")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	composePath := filepath.Join(root, "fake-compose")
+	if err := os.WriteFile(composePath, []byte("#!/bin/sh\necho 'role create failed' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"role-fail","name":"Role Fail","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	createResponse := perform(server, http.MethodPost, "/v1/projects/role-fail/database/roles", `{"name":"app_reader","login":false,"schema_grants":{"public":"usage"}}`)
+	if createResponse.Code != http.StatusConflict || !strings.Contains(createResponse.Body.String(), "role create failed") {
+		t.Fatalf("expected role apply conflict, got %d: %s", createResponse.Code, createResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/role-fail/database/roles", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"name":"app_reader"`) {
+		t.Fatalf("expected failed role create to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+}
+
+func TestProjectDatabaseRoleLoginCreateRequiresRevealableProjectSecret(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "role-secret")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	composePath := filepath.Join(root, "fake-compose")
+	if err := os.WriteFile(composePath, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o700); err != nil {
+		t.Fatalf("write fake compose: %v", err)
+	}
+	t.Setenv("SUPADUPA_DATABASE_APPLY", "true")
+	t.Setenv("SUPADUPA_PROJECT_ROOT", root)
+	t.Setenv("SUPADUPA_COMPOSE_COMMAND", composePath)
+
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"role-secret","name":"Role Secret","domain":"apps.example.test"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	unrevealableResponse := perform(server, http.MethodPost, "/v1/projects/role-secret/database/roles", `{"name":"app_login","login":true,"password_secret_handle":"secret://projects/role-secret/db/app-login"}`)
+	if unrevealableResponse.Code != http.StatusConflict || !strings.Contains(unrevealableResponse.Body.String(), "not revealable") {
+		t.Fatalf("expected unrevealable secret conflict, got %d: %s", unrevealableResponse.Code, unrevealableResponse.Body.String())
+	}
+	crossProjectResponse := perform(server, http.MethodPost, "/v1/projects/role-secret/database/roles", `{"name":"other_login","login":true,"password_secret_handle":"secret://projects/other/db_password"}`)
+	if crossProjectResponse.Code != http.StatusConflict || !strings.Contains(crossProjectResponse.Body.String(), "must reference project role-secret") {
+		t.Fatalf("expected cross-project secret conflict, got %d: %s", crossProjectResponse.Code, crossProjectResponse.Body.String())
+	}
+	listResponse := perform(server, http.MethodGet, "/v1/projects/role-secret/database/roles", "")
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), `"login":true`) {
+		t.Fatalf("expected failed login role creates to roll back metadata, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+}
+
 func TestProjectCDNPolicyInvalidationsRoutesMetricsAndAudit(t *testing.T) {
 	t.Setenv("SUPADUPA_ROUTES_ROOT", t.TempDir())
 	store := control.NewMemoryStore()
@@ -3460,6 +5190,7 @@ func TestProjectCDNPolicyInvalidationsRoutesMetricsAndAudit(t *testing.T) {
 		`"enabled":true`,
 		`"browser_ttl_seconds":300`,
 		`"edge_ttl_seconds":600`,
+		`"excluded_paths":[]`,
 		`"smart_revalidation":true`,
 		`"cache_control":"public, max-age=300, s-maxage=600, stale-while-revalidate=30"`,
 	} {
@@ -3720,7 +5451,27 @@ func TestProjectBackupsAndLogs(t *testing.T) {
 	if backupsResponse.Code != http.StatusOK || !strings.Contains(backupsResponse.Body.String(), `"kind":"logical"`) {
 		t.Fatalf("expected logical backup in response: %d %s", backupsResponse.Code, backupsResponse.Body.String())
 	}
+	hostedBackupsResponse := perform(server, http.MethodGet, "/v1/projects/backup-proj/database/backups", "")
+	if hostedBackupsResponse.Code != http.StatusOK || !strings.Contains(hostedBackupsResponse.Body.String(), `"kind":"logical"`) {
+		t.Fatalf("expected hosted-shaped logical backup list response: %d %s", hostedBackupsResponse.Code, hostedBackupsResponse.Body.String())
+	}
 	backupID := extractString(t, backupResponse.Body.String(), "id")
+
+	recoverabilityResponse := perform(server, http.MethodGet, "/v1/projects/backup-proj/recoverability", "")
+	if recoverabilityResponse.Code != http.StatusOK {
+		t.Fatalf("expected recoverability status 200, got %d: %s", recoverabilityResponse.Code, recoverabilityResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"status":"local-backup-only"`,
+		`"off_host_backup_configured":false`,
+		`"off_host_backup_verified":false`,
+		`"restore_to_time_available":false`,
+		`"restore_to_time_unavailable":"physical base backup plus WAL replay is not configured"`,
+	} {
+		if !strings.Contains(recoverabilityResponse.Body.String(), expected) {
+			t.Fatalf("expected recoverability response to include %s: %s", expected, recoverabilityResponse.Body.String())
+		}
+	}
 
 	restoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/restore", `{"backup_id":"`+backupID+`"}`)
 	if restoreResponse.Code != http.StatusAccepted {
@@ -3733,6 +5484,14 @@ func TestProjectBackupsAndLogs(t *testing.T) {
 	missingRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/restore", `{"backup_id":"missing"}`)
 	if missingRestoreResponse.Code != http.StatusNotFound {
 		t.Fatalf("expected missing restore backup 404, got %d: %s", missingRestoreResponse.Code, missingRestoreResponse.Body.String())
+	}
+	invalidPITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"not-a-timestamp"}`)
+	if invalidPITRRestoreResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid PITR restore timestamp 400, got %d: %s", invalidPITRRestoreResponse.Code, invalidPITRRestoreResponse.Body.String())
+	}
+	unavailablePITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"1735689600"}`)
+	if unavailablePITRRestoreResponse.Code != http.StatusConflict || !strings.Contains(unavailablePITRRestoreResponse.Body.String(), `"restore_to_time_available":false`) || !strings.Contains(unavailablePITRRestoreResponse.Body.String(), `"status":"local-backup-only"`) {
+		t.Fatalf("expected unavailable PITR restore conflict with recoverability: %d %s", unavailablePITRRestoreResponse.Code, unavailablePITRRestoreResponse.Body.String())
 	}
 
 	logsResponse := perform(server, http.MethodGet, "/v1/projects/backup-proj/logs", "")
@@ -3789,6 +5548,40 @@ func TestProjectBackupsAndLogs(t *testing.T) {
 	}
 }
 
+func TestProjectPhysicalBackupPolicyAndTrigger(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", root)
+	t.Setenv("SUPADUPA_PHYSICAL_BACKUP_COMMAND", "printf 'physical backup for %s\\n' {{ref}}")
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"physical-api","name":"Physical","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	policyResponse := perform(server, http.MethodPut, "/v1/projects/physical-api/backups/policy", `{"enabled":true,"schedule":"daily","kind":"physical"}`)
+	if policyResponse.Code != http.StatusOK || !strings.Contains(policyResponse.Body.String(), `"kind":"physical"`) {
+		t.Fatalf("expected physical backup policy: %d %s", policyResponse.Code, policyResponse.Body.String())
+	}
+	backupResponse := perform(server, http.MethodPost, "/v1/projects/physical-api/backups", "")
+	if backupResponse.Code != http.StatusCreated || !strings.Contains(backupResponse.Body.String(), `"kind":"physical"`) || !strings.Contains(backupResponse.Body.String(), `physical.base`) {
+		t.Fatalf("expected physical backup response: %d %s", backupResponse.Code, backupResponse.Body.String())
+	}
+	backupPath := extractString(t, backupResponse.Body.String(), "location")
+	payload, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "physical backup for physical-api") {
+		t.Fatalf("expected physical backup artifact body, got:\n%s", string(payload))
+	}
+	logsResponse := perform(server, http.MethodGet, "/v1/projects/physical-api/logs", "")
+	if !strings.Contains(logsResponse.Body.String(), "Physical backup completed") {
+		t.Fatalf("expected physical backup log: %s", logsResponse.Body.String())
+	}
+}
+
 func TestProjectPITRPolicyAndWALArchives(t *testing.T) {
 	t.Setenv("SUPADUPA_WAL_ARCHIVE_DRY_RUN", "true")
 	store := control.NewMemoryStore()
@@ -3817,6 +5610,31 @@ func TestProjectPITRPolicyAndWALArchives(t *testing.T) {
 		t.Fatalf("expected missing archive bucket 400, got %d: %s", invalidPolicyResponse.Code, invalidPolicyResponse.Body.String())
 	}
 
+	target, err := store.CreateBackupStorageTarget(context.Background(), control.BackupStorageTargetInput{
+		Name:            "Archive",
+		Type:            "s3",
+		Endpoint:        "https://s3.example.test",
+		Region:          "us-east-1",
+		Bucket:          "backups",
+		Prefix:          "supadupa",
+		AccessKeyID:     "access-key",
+		SecretAccessKey: "secret-key",
+		Default:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateBackupPolicy(context.Background(), "pitr-proj", control.BackupPolicyInput{Enabled: true, Schedule: "daily", Kind: "logical", StorageTargetID: target.ID}); err != nil {
+		t.Fatal(err)
+	}
+	derivedPolicyResponse := perform(server, http.MethodPut, "/v1/projects/pitr-proj/pitr/policy", `{"enabled":true,"archive_bucket":"","retention_days":7}`)
+	if derivedPolicyResponse.Code != http.StatusOK || !strings.Contains(derivedPolicyResponse.Body.String(), `"archive_bucket":"s3://backups/supadupa/projects/pitr-proj/wal"`) {
+		t.Fatalf("expected derived PITR archive bucket from backup target: %d %s", derivedPolicyResponse.Code, derivedPolicyResponse.Body.String())
+	}
+	if err := store.DeleteBackupStorageTarget(context.Background(), target.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	updatePolicyResponse := perform(server, http.MethodPut, "/v1/projects/pitr-proj/pitr/policy", `{"enabled":true,"archive_bucket":"s3://archive/pitr-proj","retention_days":14}`)
 	if updatePolicyResponse.Code != http.StatusOK || !strings.Contains(updatePolicyResponse.Body.String(), `"enabled":true`) || !strings.Contains(updatePolicyResponse.Body.String(), `"retention_days":14`) || !strings.Contains(updatePolicyResponse.Body.String(), `"archive_bucket":"s3://archive/pitr-proj"`) {
 		t.Fatalf("expected enabled PITR policy: %d %s", updatePolicyResponse.Code, updatePolicyResponse.Body.String())
@@ -3831,6 +5649,28 @@ func TestProjectPITRPolicyAndWALArchives(t *testing.T) {
 	archivesResponse := perform(server, http.MethodGet, "/v1/projects/pitr-proj/pitr/wal", "")
 	if archivesResponse.Code != http.StatusOK || !strings.Contains(archivesResponse.Body.String(), archiveID) {
 		t.Fatalf("expected WAL archive in list: %d %s", archivesResponse.Code, archivesResponse.Body.String())
+	}
+
+	recoverabilityResponse := perform(server, http.MethodGet, "/v1/projects/pitr-proj/recoverability", "")
+	if recoverabilityResponse.Code != http.StatusOK {
+		t.Fatalf("expected recoverability status 200, got %d: %s", recoverabilityResponse.Code, recoverabilityResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"pitr_enabled":true`,
+		`"latest_wal_archive"`,
+		`"wal_archive_off_host_verified":false`,
+		`"restore_to_time_configured":false`,
+		`"restore_to_time_available":false`,
+		`"verified WAL archives exist only on local disk"`,
+		`"no verified physical base backup is available for PITR restore"`,
+	} {
+		if !strings.Contains(recoverabilityResponse.Body.String(), expected) {
+			t.Fatalf("expected recoverability response to include %s: %s", expected, recoverabilityResponse.Body.String())
+		}
+	}
+	unavailablePITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/pitr-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"1735689600"}`)
+	if unavailablePITRRestoreResponse.Code != http.StatusConflict || !strings.Contains(unavailablePITRRestoreResponse.Body.String(), `"recoverability"`) || !strings.Contains(unavailablePITRRestoreResponse.Body.String(), `"pitr_enabled":true`) {
+		t.Fatalf("expected PITR restore conflict with recoverability: %d %s", unavailablePITRRestoreResponse.Code, unavailablePITRRestoreResponse.Body.String())
 	}
 
 	policyResponse = perform(server, http.MethodGet, "/v1/projects/pitr-proj/pitr/policy", "")
@@ -3868,6 +5708,100 @@ func TestProjectPITRPolicyAndWALArchives(t *testing.T) {
 	}
 }
 
+func TestProjectPITRRestoreAPI(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", root)
+	t.Setenv("SUPADUPA_PITR_RESTORE_COMMAND", "printf 'pitr restore %s %s %s\\n' {{recovery_time_target_unix}} {{backup_path}} {{wal_segment}}")
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"pitr-restore","name":"PITR Restore","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	target, err := store.CreateBackupStorageTarget(context.Background(), control.BackupStorageTargetInput{
+		Name:            "Archive",
+		Type:            "s3",
+		Endpoint:        "https://s3.example.test",
+		Region:          "us-east-1",
+		Bucket:          "backups",
+		Prefix:          "supadupa",
+		AccessKeyID:     "access-key",
+		SecretAccessKey: "secret-key",
+		Default:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateBackupStorageTargetTestResult(context.Background(), target.ID, time.Now().UTC(), "passed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateBackupPolicy(context.Background(), "pitr-restore", control.BackupPolicyInput{Enabled: true, Schedule: "daily", Kind: "logical", StorageTargetID: target.ID}); err != nil {
+		t.Fatal(err)
+	}
+	basePath := filepath.Join(root, "base.tar")
+	basePayload := []byte("physical base backup")
+	if err := os.WriteFile(basePath, basePayload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseHash := sha256.Sum256(basePayload)
+	now := time.Now().UTC()
+	if _, err := store.CreateBackup(context.Background(), control.BackupInput{
+		ProjectRef:      "pitr-restore",
+		Kind:            "physical",
+		Location:        basePath,
+		RemoteLocation:  "s3://backups/supadupa/projects/pitr-restore/backups/base.tar",
+		StorageTargetID: target.ID,
+		SizeBytes:       int64(len(basePayload)),
+		ChecksumSHA256:  hex.EncodeToString(baseHash[:]),
+		Status:          "completed",
+		VerifiedAt:      &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdatePITRPolicy(context.Background(), "pitr-restore", control.PITRPolicyInput{Enabled: true, ArchiveBucket: "s3://archive/pitr-restore", RetentionDays: 7}); err != nil {
+		t.Fatal(err)
+	}
+	walPath := filepath.Join(root, "wal")
+	walPayload := []byte("wal archive")
+	if err := os.WriteFile(walPath, walPayload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	walHash := sha256.Sum256(walPayload)
+	archive, err := store.CreateWALArchive(context.Background(), control.WALArchiveInput{
+		ProjectRef:      "pitr-restore",
+		Segment:         "000000010000000000000001",
+		SegmentSource:   "postgres",
+		Location:        walPath,
+		RemoteLocation:  "s3://backups/supadupa/projects/pitr-restore/wal/000000010000000000000001.wal",
+		StorageTargetID: target.ID,
+		SizeBytes:       int64(len(walPayload)),
+		ChecksumSHA256:  hex.EncodeToString(walHash[:]),
+		Status:          "archived",
+		VerifiedAt:      &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreResponse := perform(server, http.MethodPost, "/v1/projects/pitr-restore/database/backups/restore-pitr", `{"recovery_time_target_unix":"`+fmt.Sprintf("%d", archive.CreatedAt.Unix())+`"}`)
+	if restoreResponse.Code != http.StatusCreated || !strings.Contains(restoreResponse.Body.String(), `"restore_state":"completed"`) || !strings.Contains(restoreResponse.Body.String(), `"recovery_time_target_unix":`+fmt.Sprintf("%d", archive.CreatedAt.Unix())) {
+		t.Fatalf("expected created PITR restore response: %d %s", restoreResponse.Code, restoreResponse.Body.String())
+	}
+	restorePath := extractString(t, restoreResponse.Body.String(), "restore_path")
+	transcript, err := os.ReadFile(restorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(transcript), "pitr restore "+fmt.Sprintf("%d", archive.CreatedAt.Unix())) || !strings.Contains(string(transcript), basePath) || !strings.Contains(string(transcript), archive.Segment) {
+		t.Fatalf("expected PITR restore transcript, got:\n%s", string(transcript))
+	}
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	if !strings.Contains(auditResponse.Body.String(), `"action":"project.restore_pitr"`) {
+		t.Fatalf("expected PITR restore audit event: %s", auditResponse.Body.String())
+	}
+}
+
 func TestProjectSecretsMaskedAndRevealAudited(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
@@ -3894,10 +5828,11 @@ func TestProjectSecretsMaskedAndRevealAudited(t *testing.T) {
 	if revealResponse.Code != http.StatusOK {
 		t.Fatalf("expected reveal status 200, got %d: %s", revealResponse.Code, revealResponse.Body.String())
 	}
-	if !strings.Contains(revealResponse.Body.String(), `"value":"svc_`) {
-		t.Fatalf("expected revealed service key value: %s", revealResponse.Body.String())
+	serviceValue := extractString(t, revealResponse.Body.String(), "value")
+	if strings.Count(serviceValue, ".") != 2 {
+		t.Fatalf("expected revealed service key to be a JWT, got: %s", revealResponse.Body.String())
 	}
-	firstValue := extractString(t, revealResponse.Body.String(), "value")
+	firstValue := serviceValue
 
 	copyResponse := perform(server, http.MethodPost, "/v1/projects/secret-proj/secrets/service_role/copy", "")
 	if copyResponse.Code != http.StatusNoContent {
@@ -3986,17 +5921,22 @@ func TestProjectCreatePassesGeneratedSecretsToProvisioner(t *testing.T) {
 		"REALTIME_JWT_SECRET":              "jwt_",
 		"SUPADUPA_JWT_SIGNING_KEY_CURRENT": "{",
 		"SUPADUPA_JWT_SIGNING_KEY_NEXT":    "{",
-		"ANON_KEY":                         "anon_",
-		"SERVICE_ROLE_KEY":                 "svc_",
 		"SUPABASE_PUBLISHABLE_KEY":         "pub_",
 		"SUPABASE_SECRET_KEY":              "sec_",
-		"POSTGRES_PASSWORD":                "db_",
 		"S3_ACCESS_KEY":                    "s3ak_",
 		"S3_SECRET_KEY":                    "s3sk_",
 	} {
 		value := provisioner.spec.Environment[key]
 		if !strings.HasPrefix(value, prefix) {
 			t.Fatalf("expected provisioner env %s to have prefix %q, got %q in %#v", key, prefix, value, provisioner.spec.Environment)
+		}
+	}
+	if value := provisioner.spec.Environment["POSTGRES_PASSWORD"]; len(value) != 48 || !isLowerHexForTest(value) {
+		t.Fatalf("expected provisioner env POSTGRES_PASSWORD to be 48 lowercase hex chars, got %q in %#v", value, provisioner.spec.Environment)
+	}
+	for _, key := range []string{"ANON_KEY", "SERVICE_ROLE_KEY"} {
+		if strings.Count(provisioner.spec.Environment[key], ".") != 2 {
+			t.Fatalf("expected provisioner env %s to be a JWT, got %q in %#v", key, provisioner.spec.Environment[key], provisioner.spec.Environment)
 		}
 	}
 	if provisioner.spec.Environment["POSTGRES_PASSWORD"] == "caller-should-not-win" {
@@ -4031,7 +5971,7 @@ func TestProjectSecretRotateSyncsProvisionerSecrets(t *testing.T) {
 		t.Fatalf("expected provisioner sync for rotate-sync-proj, got %q", provisioner.syncedRef)
 	}
 	nextServiceKey := provisioner.syncedSpec.Environment["SERVICE_ROLE_KEY"]
-	if !strings.HasPrefix(nextServiceKey, "svc_") || nextServiceKey == createdServiceKey {
+	if strings.Count(nextServiceKey, ".") != 2 || nextServiceKey == createdServiceKey {
 		t.Fatalf("expected rotated service key in synced spec, old=%q new=%q env=%#v", createdServiceKey, nextServiceKey, provisioner.syncedSpec.Environment)
 	}
 	for _, key := range []string{"JWT_SECRET", "SUPADUPA_JWT_SIGNING_KEY_CURRENT", "SUPADUPA_JWT_SIGNING_KEY_NEXT", "POSTGRES_PASSWORD", "ANON_KEY", "S3_ACCESS_KEY", "S3_SECRET_KEY"} {
@@ -4044,8 +5984,10 @@ func TestProjectSecretRotateSyncsProvisionerSecrets(t *testing.T) {
 func TestProjectLifecycleActions(t *testing.T) {
 	routesRoot := t.TempDir()
 	certRoot := t.TempDir()
+	backupRoot := t.TempDir()
 	t.Setenv("SUPADUPA_ROUTES_ROOT", routesRoot)
 	t.Setenv("SUPADUPA_CERT_ROOT", certRoot)
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
@@ -4118,6 +6060,525 @@ func TestProjectLifecycleActions(t *testing.T) {
 	}
 }
 
+func TestProjectUpgradeCreatesPreUpgradeBackupAndReturnsRollbackMetadata(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-safe","name":"Upgrade Safe","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-safe/upgrade", `{"version":"15.8.1.085"}`)
+	if upgradeResponse.Code != http.StatusOK {
+		t.Fatalf("expected upgrade status 200, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"previous_version":"15.8.1.060"`,
+		`"target_version":"15.8.1.085"`,
+		`"rollback_available":true`,
+		`"backup":{`,
+		`"status":"completed"`,
+		`"stack_version":"15.8.1.085"`,
+	} {
+		if !strings.Contains(upgradeResponse.Body.String(), expected) {
+			t.Fatalf("expected %s in upgrade response: %s", expected, upgradeResponse.Body.String())
+		}
+	}
+	if strings.Join(provisioner.upgradeVersions, ",") != "15.8.1.085" {
+		t.Fatalf("expected one provisioner upgrade to target version, got %#v", provisioner.upgradeVersions)
+	}
+	backups, err := store.ListBackups(context.Background(), "upgrade-safe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 || backups[0].Status != "completed" {
+		t.Fatalf("expected completed pre-upgrade backup, got %#v", backups)
+	}
+	if _, err := os.Stat(backups[0].Location); err != nil {
+		t.Fatalf("expected backup artifact to exist: %v", err)
+	}
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	for _, action := range []string{"project.upgrade_backup", "project.upgrade"} {
+		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
+			t.Fatalf("expected %s audit event: %s", action, auditResponse.Body.String())
+		}
+	}
+}
+
+func TestProjectUpgradeRejectsUnsupportedStackVersionBeforeBackup(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-reject","name":"Upgrade Reject","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-reject/upgrade", `{"version":"nightly"}`)
+	if upgradeResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected upgrade status 400, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	if !strings.Contains(upgradeResponse.Body.String(), "unsupported stack version") {
+		t.Fatalf("expected unsupported version error: %s", upgradeResponse.Body.String())
+	}
+	if len(provisioner.upgradeVersions) != 0 {
+		t.Fatalf("provisioner should not run for unsupported version, got %#v", provisioner.upgradeVersions)
+	}
+	backups, err := store.ListBackups(context.Background(), "upgrade-reject")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("backup should not run for unsupported version, got %#v", backups)
+	}
+}
+
+func TestProjectUpgradeUsesVerifiedBackupID(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-with-backup","name":"Upgrade With Backup","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	artifact := filepath.Join(backupRoot, "verified.sql")
+	body := []byte("-- verified backup\n")
+	if err := os.WriteFile(artifact, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	now := time.Now().UTC()
+	backup, err := store.CreateBackup(context.Background(), control.BackupInput{
+		ProjectRef:     "upgrade-with-backup",
+		Kind:           "logical",
+		Location:       artifact,
+		SizeBytes:      int64(len(body)),
+		ChecksumSHA256: hex.EncodeToString(sum[:]),
+		Status:         "completed",
+		VerifiedAt:     &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-with-backup/upgrade", `{"version":"15.8.1.085","backup_id":"`+backup.ID+`"}`)
+	if upgradeResponse.Code != http.StatusOK {
+		t.Fatalf("expected upgrade status 200, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	if !strings.Contains(upgradeResponse.Body.String(), `"id":"`+backup.ID+`"`) {
+		t.Fatalf("expected supplied backup in response: %s", upgradeResponse.Body.String())
+	}
+	if strings.Join(provisioner.upgradeVersions, ",") != "15.8.1.085" {
+		t.Fatalf("expected one provisioner upgrade to target version, got %#v", provisioner.upgradeVersions)
+	}
+	backups, err := store.ListBackups(context.Background(), "upgrade-with-backup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("expected no extra pre-upgrade backup when backup_id is supplied, got %#v", backups)
+	}
+}
+
+func TestProjectUpgradeRequiresDurableBackupWhenConfigured(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	t.Setenv("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP", "true")
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-durable-required","name":"Upgrade Durable Required","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-durable-required/upgrade", `{"version":"15.8.1.085"}`)
+	if upgradeResponse.Code != http.StatusConflict {
+		t.Fatalf("expected upgrade status 409, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	if !strings.Contains(upgradeResponse.Body.String(), "local-only") || !strings.Contains(upgradeResponse.Body.String(), "SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP") {
+		t.Fatalf("expected durable backup requirement error: %s", upgradeResponse.Body.String())
+	}
+	if len(provisioner.upgradeVersions) != 0 {
+		t.Fatalf("provisioner should not run without durable backup, got %#v", provisioner.upgradeVersions)
+	}
+	backups, err := store.ListBackups(context.Background(), "upgrade-durable-required")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 || backups[0].RemoteLocation != "" {
+		t.Fatalf("expected one rejected local pre-upgrade backup artifact, got %#v", backups)
+	}
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	if !strings.Contains(auditResponse.Body.String(), `"action":"project.upgrade_backup_failed"`) || !strings.Contains(auditResponse.Body.String(), `"durable_required":"true"`) {
+		t.Fatalf("expected durable backup failure audit: %s", auditResponse.Body.String())
+	}
+}
+
+func TestProjectUpgradeRejectsUntestedRemoteBackupWhenDurableRequired(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	t.Setenv("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP", "true")
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-untested-target","name":"Upgrade Untested Target","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+	target, err := store.CreateBackupStorageTarget(context.Background(), control.BackupStorageTargetInput{
+		Name:            "Off-host",
+		Type:            "s3",
+		Region:          "us-east-1",
+		Bucket:          "supadupa-upgrade-backups",
+		AccessKeyID:     "access-key",
+		SecretAccessKey: "secret-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := createVerifiedUpgradeBackup(t, store, backupRoot, "upgrade-untested-target", target.ID, "s3://supadupa-upgrade-backups/projects/upgrade-untested-target/backups/verified.sql")
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-untested-target/upgrade", `{"version":"15.8.1.085","backup_id":"`+backup.ID+`"}`)
+	if upgradeResponse.Code != http.StatusConflict {
+		t.Fatalf("expected upgrade status 409, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	if !strings.Contains(upgradeResponse.Body.String(), "validation-pending") {
+		t.Fatalf("expected target validation-pending error: %s", upgradeResponse.Body.String())
+	}
+	if len(provisioner.upgradeVersions) != 0 {
+		t.Fatalf("provisioner should not run without tested durable target, got %#v", provisioner.upgradeVersions)
+	}
+}
+
+func TestProjectUpgradeAllowsTestedRemoteBackupWhenDurableRequired(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	t.Setenv("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP", "true")
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-durable-ok","name":"Upgrade Durable OK","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+	target, err := store.CreateBackupStorageTarget(context.Background(), control.BackupStorageTargetInput{
+		Name:            "Off-host",
+		Type:            "s3",
+		Region:          "us-east-1",
+		Bucket:          "supadupa-upgrade-backups",
+		AccessKeyID:     "access-key",
+		SecretAccessKey: "secret-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateBackupStorageTargetTestResult(context.Background(), target.ID, time.Now().UTC(), "passed", "ok"); err != nil {
+		t.Fatal(err)
+	}
+	backup := createVerifiedUpgradeBackup(t, store, backupRoot, "upgrade-durable-ok", target.ID, "s3://supadupa-upgrade-backups/projects/upgrade-durable-ok/backups/verified.sql")
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-durable-ok/upgrade", `{"version":"15.8.1.085","backup_id":"`+backup.ID+`"}`)
+	if upgradeResponse.Code != http.StatusOK {
+		t.Fatalf("expected upgrade status 200, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	if !strings.Contains(upgradeResponse.Body.String(), `"id":"`+backup.ID+`"`) || !strings.Contains(upgradeResponse.Body.String(), `"remote_location":"s3://supadupa-upgrade-backups/projects/upgrade-durable-ok/backups/verified.sql"`) {
+		t.Fatalf("expected durable supplied backup in response: %s", upgradeResponse.Body.String())
+	}
+	if strings.Join(provisioner.upgradeVersions, ",") != "15.8.1.085" {
+		t.Fatalf("expected one provisioner upgrade to target version, got %#v", provisioner.upgradeVersions)
+	}
+}
+
+func TestProjectUpgradeRejectsInvalidBackupIDArtifact(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-bad-backup","name":"Upgrade Bad Backup","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	artifact := filepath.Join(backupRoot, "corrupt.sql")
+	if err := os.WriteFile(artifact, []byte("-- corrupt backup\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	backup, err := store.CreateBackup(context.Background(), control.BackupInput{
+		ProjectRef:     "upgrade-bad-backup",
+		Kind:           "logical",
+		Location:       artifact,
+		SizeBytes:      18,
+		ChecksumSHA256: strings.Repeat("0", 64),
+		Status:         "completed",
+		VerifiedAt:     &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-bad-backup/upgrade", `{"version":"15.8.1.085","backup_id":"`+backup.ID+`"}`)
+	if upgradeResponse.Code != http.StatusConflict {
+		t.Fatalf("expected upgrade status 409, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	if !strings.Contains(upgradeResponse.Body.String(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch error: %s", upgradeResponse.Body.String())
+	}
+	if len(provisioner.upgradeVersions) != 0 {
+		t.Fatalf("provisioner should not run for invalid backup, got %#v", provisioner.upgradeVersions)
+	}
+}
+
+func createVerifiedUpgradeBackup(t *testing.T, store control.Store, backupRoot string, ref string, storageTargetID string, remoteLocation string) control.Backup {
+	t.Helper()
+	artifact := filepath.Join(backupRoot, ref+"-verified.sql")
+	body := []byte("-- verified backup for " + ref + "\n")
+	if err := os.WriteFile(artifact, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	now := time.Now().UTC()
+	backup, err := store.CreateBackup(context.Background(), control.BackupInput{
+		ProjectRef:      ref,
+		Kind:            "logical",
+		Location:        artifact,
+		RemoteLocation:  remoteLocation,
+		StorageTargetID: storageTargetID,
+		SizeBytes:       int64(len(body)),
+		ChecksumSHA256:  hex.EncodeToString(sum[:]),
+		Status:          "completed",
+		VerifiedAt:      &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backup
+}
+
+func TestProjectUpgradeFailureAttemptsRollbackToPreviousVersion(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{upgradeErr: errors.New("apply failed")}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-fail","name":"Upgrade Fail","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-fail/upgrade", `{"version":"15.8.1.085"}`)
+	if upgradeResponse.Code != http.StatusConflict {
+		t.Fatalf("expected upgrade status 409, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"error":"apply failed"`,
+		`"backup":{`,
+		`"previous_version":"15.8.1.060"`,
+		`"target_version":"15.8.1.085"`,
+		`"rollback_available":true`,
+		`"rollback_attempted":true`,
+	} {
+		if !strings.Contains(upgradeResponse.Body.String(), expected) {
+			t.Fatalf("expected %s in failed upgrade response: %s", expected, upgradeResponse.Body.String())
+		}
+	}
+	if strings.Join(provisioner.upgradeVersions, ",") != "15.8.1.085,15.8.1.060" {
+		t.Fatalf("expected target upgrade then rollback to previous version, got %#v", provisioner.upgradeVersions)
+	}
+	project, err := store.GetProject(context.Background(), "upgrade-fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Spec.StackVersion != "15.8.1.060" {
+		t.Fatalf("store version should remain previous after failed upgrade, got %q", project.Spec.StackVersion)
+	}
+	backups, err := store.ListBackups(context.Background(), "upgrade-fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 || backups[0].Status != "completed" {
+		t.Fatalf("expected pre-upgrade backup retained after failure, got %#v", backups)
+	}
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	if !strings.Contains(auditResponse.Body.String(), `"action":"project.upgrade_failed"`) || !strings.Contains(auditResponse.Body.String(), `"rollback":"attempted"`) {
+		t.Fatalf("expected failed upgrade audit with rollback metadata: %s", auditResponse.Body.String())
+	}
+}
+
+func TestProjectUpgradeFailureAutoRestoresPreUpgradeBackupWhenEnabled(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	t.Setenv("SUPADUPA_LOGICAL_BACKUP_COMMAND", "printf 'backup for %s\\n' {{ref}}")
+	t.Setenv("SUPADUPA_LOGICAL_RESTORE_COMMAND", "printf 'restored %s from %s\\n' {{ref}} {{backup_id}}")
+	t.Setenv("SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE", "true")
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{upgradeErr: errors.New("apply failed")}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-autorestore","name":"Upgrade Auto Restore","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-autorestore/upgrade", `{"version":"15.8.1.085"}`)
+	if upgradeResponse.Code != http.StatusConflict {
+		t.Fatalf("expected upgrade status 409, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"error":"apply failed"`,
+		`"rollback_attempted":true`,
+		`"restore_attempted":true`,
+		`"restore_state":"completed"`,
+	} {
+		if !strings.Contains(upgradeResponse.Body.String(), expected) {
+			t.Fatalf("expected %s in failed upgrade response: %s", expected, upgradeResponse.Body.String())
+		}
+	}
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	if !strings.Contains(auditResponse.Body.String(), `"action":"project.upgrade_failed"`) ||
+		!strings.Contains(auditResponse.Body.String(), `"restore":"attempted"`) ||
+		!strings.Contains(auditResponse.Body.String(), `"restore_state":"completed"`) {
+		t.Fatalf("expected failed upgrade audit with restore metadata: %s", auditResponse.Body.String())
+	}
+}
+
+func TestProjectUpgradeFailureAutoRestoreReportsDryRunAsRestoreError(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	t.Setenv("SUPADUPA_LOGICAL_BACKUP_COMMAND", "printf 'backup for %s\\n' {{ref}}")
+	t.Setenv("SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE", "true")
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{upgradeErr: errors.New("apply failed")}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-autorestore-dry","name":"Upgrade Auto Restore Dry","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-autorestore-dry/upgrade", `{"version":"15.8.1.085"}`)
+	if upgradeResponse.Code != http.StatusConflict {
+		t.Fatalf("expected upgrade status 409, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"restore_attempted":true`,
+		`"restore_state":"dry-run"`,
+		`"restore_error":"logical restore returned state \"dry-run\"`,
+	} {
+		if !strings.Contains(upgradeResponse.Body.String(), expected) {
+			t.Fatalf("expected %s in failed upgrade response: %s", expected, upgradeResponse.Body.String())
+		}
+	}
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	if !strings.Contains(auditResponse.Body.String(), `"restore_state":"dry-run"`) ||
+		!strings.Contains(auditResponse.Body.String(), `"restore_error":"logical restore returned state \"dry-run\"`) {
+		t.Fatalf("expected failed upgrade audit with dry-run restore error metadata: %s", auditResponse.Body.String())
+	}
+}
+
+func TestProjectUpgradeFailureReportsRollbackAttemptEvenWhenRollbackFails(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{
+		upgradeErr:  errors.New("apply failed"),
+		rollbackErr: errors.New("rollback failed"),
+	}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-rollback-fail","name":"Upgrade Rollback Fail","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-rollback-fail/upgrade", `{"version":"15.8.1.085"}`)
+	if upgradeResponse.Code != http.StatusConflict {
+		t.Fatalf("expected upgrade status 409, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"error":"apply failed"`,
+		`"rollback_available":true`,
+		`"rollback_attempted":true`,
+		`"rollback_error":"rollback failed"`,
+		`"previous_version":"15.8.1.060"`,
+		`"target_version":"15.8.1.085"`,
+	} {
+		if !strings.Contains(upgradeResponse.Body.String(), expected) {
+			t.Fatalf("expected %s in failed rollback response: %s", expected, upgradeResponse.Body.String())
+		}
+	}
+	if strings.Join(provisioner.upgradeVersions, ",") != "15.8.1.085,15.8.1.060" {
+		t.Fatalf("expected target upgrade then rollback attempt, got %#v", provisioner.upgradeVersions)
+	}
+	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
+	if !strings.Contains(auditResponse.Body.String(), `"action":"project.upgrade_failed"`) || !strings.Contains(auditResponse.Body.String(), `"rollback_error":"rollback failed"`) {
+		t.Fatalf("expected failed upgrade audit with rollback error: %s", auditResponse.Body.String())
+	}
+}
+
+func TestProjectUpgradeCompatFailureInjectionRequiresHeader(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	t.Setenv("SUPADUPA_COMPAT_UPGRADE_FAILURE_TARGETS", "15.8.1.085")
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-inject","name":"Upgrade Inject","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
+		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	}
+
+	normalResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-inject/upgrade", `{"version":"15.8.1.085"}`)
+	if normalResponse.Code != http.StatusOK {
+		t.Fatalf("expected normal upgrade status 200, got %d: %s", normalResponse.Code, normalResponse.Body.String())
+	}
+	if strings.Join(provisioner.upgradeVersions, ",") != "15.8.1.085" {
+		t.Fatalf("expected normal upgrade to run once, got %#v", provisioner.upgradeVersions)
+	}
+
+	if _, err := store.UpdateProjectStackVersion(context.Background(), "upgrade-inject", "15.8.1.060"); err != nil {
+		t.Fatal(err)
+	}
+	injectedResponse := performWithHeader(server, http.MethodPost, "/v1/projects/upgrade-inject/upgrade", `{"version":"15.8.1.085"}`, "X-Supadupa-Compat-Inject-Upgrade-Failure", "true")
+	if injectedResponse.Code != http.StatusConflict {
+		t.Fatalf("expected injected upgrade status 409, got %d: %s", injectedResponse.Code, injectedResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"error":"compat upgrade failure injection for 15.8.1.085"`,
+		`"backup":{`,
+		`"previous_version":"15.8.1.060"`,
+		`"target_version":"15.8.1.085"`,
+		`"rollback_attempted":true`,
+	} {
+		if !strings.Contains(injectedResponse.Body.String(), expected) {
+			t.Fatalf("expected %s in injected response: %s", expected, injectedResponse.Body.String())
+		}
+	}
+	if strings.Join(provisioner.upgradeVersions, ",") != "15.8.1.085,15.8.1.060" {
+		t.Fatalf("expected rollback after injected failure, got %#v", provisioner.upgradeVersions)
+	}
+}
+
 func TestProjectDestroySurfacesRouteCleanupFailure(t *testing.T) {
 	routesRoot := t.TempDir()
 	certRoot := t.TempDir()
@@ -4179,11 +6640,111 @@ func TestProjectDestroyPassesRetainVolumesOption(t *testing.T) {
 	}
 }
 
+func TestReconcilePlatformRestoreRuntimeRecreatesAndStopsProjects(t *testing.T) {
+	ctx := context.Background()
+	routesRoot := t.TempDir()
+	certRoot := t.TempDir()
+	t.Setenv("SUPADUPA_ROUTES_ROOT", routesRoot)
+	t.Setenv("SUPADUPA_CERT_ROOT", certRoot)
+	store := control.NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := store.CreateProject(ctx, control.CreateProjectRequest{OrgID: org.ID, Ref: "restored-proj", Name: "Restored", Domain: "apps.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisioner := &restoreRuntimeProvisioner{}
+	beforeProjects := []control.Project{
+		restored,
+		{
+			Ref: "stale-proj",
+			Spec: control.ProjectSpec{
+				Ref:    "stale-proj",
+				OrgID:  org.ID,
+				Name:   "Stale",
+				Domain: "apps.example.test",
+			},
+		},
+	}
+	staleRoutePath := filepath.Join(routesRoot, "stale-proj.yaml")
+	if err := os.WriteFile(staleRoutePath, []byte("project_ref: stale-proj\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleCertDir := filepath.Join(certRoot, "stale-proj")
+	if err := os.MkdirAll(staleCertDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleCertDir, "stale.example.test.json"), []byte(`{"state":"ready"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	summary := reconcilePlatformRestoreRuntime(ctx, store, provisioner, beforeProjects)
+
+	if summary.Reconciled != 1 || summary.Destroyed != 1 || len(summary.Errors) != 0 {
+		t.Fatalf("unexpected restore runtime summary: %#v", summary)
+	}
+	if len(provisioner.createdRefs) != 1 || provisioner.createdRefs[0] != "restored-proj" {
+		t.Fatalf("expected restored project reconcile, got %#v", provisioner.createdRefs)
+	}
+	if provisioner.destroyedRef != "stale-proj" || !provisioner.destroyOpts.RetainVolumes {
+		t.Fatalf("expected stale project retained destroy, ref=%q opts=%#v", provisioner.destroyedRef, provisioner.destroyOpts)
+	}
+	if _, err := os.Stat(staleRoutePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale route artifact removed, got err=%v", err)
+	}
+	if _, err := os.Stat(staleCertDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale certificate directory removed, got err=%v", err)
+	}
+	logs, err := store.ListProjectLogs(ctx, "restored-proj", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) == 0 || !strings.Contains(logs[0].Message, "Runtime reconciled after control-plane restore") {
+		t.Fatalf("expected restored project reconcile log, got %#v", logs)
+	}
+	audit, err := store.ListAuditEvents(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenStaleDestroy := false
+	for _, event := range audit {
+		if event.Action == "project.restore_stale_destroyed" && event.Target == "project:stale-proj" && event.Metadata["retain_volumes"] == "true" {
+			seenStaleDestroy = true
+			break
+		}
+	}
+	if !seenStaleDestroy {
+		t.Fatalf("expected stale destroy audit event, got %#v", audit)
+	}
+}
+
 func perform(server *http.Server, method string, path string, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+	return response
+}
+
+func seedProjectSecrets(t *testing.T, store control.Store, ref string, kinds ...string) {
+	t.Helper()
+	for _, kind := range kinds {
+		if _, err := store.UpsertProjectSecret(context.Background(), ref, kind, control.ProjectSecretInput{Value: kind + "-value"}); err != nil {
+			t.Fatalf("seed project secret %s: %v", kind, err)
+		}
+	}
+}
+
+func performWithHeader(server *http.Server, method string, path string, body string, header string, value string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	request.Header.Set(header, value)
 	response := httptest.NewRecorder()
 	server.Handler.ServeHTTP(response, request)
 	return response
@@ -4263,6 +6824,30 @@ func testSAMLSigningCertificate(t *testing.T) (*rsa.PrivateKey, string) {
 	return privateKey, certificate
 }
 
+func testServerDomainCertificate(t *testing.T, dnsNames []string, notAfter time.Time) (string, string) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rsa key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: dnsNames[0]},
+		DNSNames:     dnsNames,
+		NotBefore:    time.Now().UTC().Add(-time.Hour),
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	certificate := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	privateKeyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}))
+	return certificate, privateKeyPEM
+}
+
 func signSAMLAssertion(t *testing.T, privateKey *rsa.PrivateKey, assertion control.PlatformSSOAssertion) string {
 	t.Helper()
 	sum := sha256.Sum256(control.PlatformSSOAssertionSignaturePayload(assertion))
@@ -4271,6 +6856,10 @@ func signSAMLAssertion(t *testing.T, privateKey *rsa.PrivateKey, assertion contr
 		t.Fatalf("sign assertion: %v", err)
 	}
 	return base64.StdEncoding.EncodeToString(signature)
+}
+
+func shellQuoteForTest(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 type fakeProvisioner struct{}
@@ -4319,6 +6908,24 @@ func (p *retainDestroyProvisioner) DestroyWithOptions(ctx context.Context, ref s
 	return nil
 }
 
+type restoreRuntimeProvisioner struct {
+	fakeProvisioner
+	createdRefs  []string
+	destroyedRef string
+	destroyOpts  control.DestroyOptions
+}
+
+func (p *restoreRuntimeProvisioner) Create(ctx context.Context, spec control.ProjectSpec) error {
+	p.createdRefs = append(p.createdRefs, spec.Ref)
+	return nil
+}
+
+func (p *restoreRuntimeProvisioner) DestroyWithOptions(ctx context.Context, ref string, opts control.DestroyOptions) error {
+	p.destroyedRef = ref
+	p.destroyOpts = opts
+	return nil
+}
+
 type capturingProvisioner struct {
 	fakeProvisioner
 	spec               control.ProjectSpec
@@ -4330,7 +6937,12 @@ type capturingProvisioner struct {
 	syncedServicesSpec control.ProjectSpec
 	syncedAuthHooksRef string
 	syncedAuthHooks    []control.ProjectAuthHook
+	syncedReplicasRef  string
+	syncedReplicas     []control.ProjectReplica
 	clonedBranch       control.BranchCloneOptions
+	upgradeVersions    []string
+	upgradeErr         error
+	rollbackErr        error
 }
 
 func (p *capturingProvisioner) Create(ctx context.Context, spec control.ProjectSpec) error {
@@ -4360,14 +6972,37 @@ func (p *capturingProvisioner) SyncAuthHooks(ctx context.Context, ref string, ho
 	p.syncedAuthHooksRef = ref
 	p.syncedAuthHooks = append([]control.ProjectAuthHook(nil), hooks...)
 	for index := range p.syncedAuthHooks {
-		if p.syncedAuthHooks[index].Headers == nil {
-			continue
+		if p.syncedAuthHooks[index].Headers != nil {
+			headers := make(map[string]string, len(p.syncedAuthHooks[index].Headers))
+			for key, value := range p.syncedAuthHooks[index].Headers {
+				headers[key] = value
+			}
+			p.syncedAuthHooks[index].Headers = headers
 		}
-		headers := make(map[string]string, len(p.syncedAuthHooks[index].Headers))
-		for key, value := range p.syncedAuthHooks[index].Headers {
-			headers[key] = value
+		if p.syncedAuthHooks[index].RuntimeHeaders != nil {
+			headers := make(map[string]string, len(p.syncedAuthHooks[index].RuntimeHeaders))
+			for key, value := range p.syncedAuthHooks[index].RuntimeHeaders {
+				headers[key] = value
+			}
+			p.syncedAuthHooks[index].RuntimeHeaders = headers
 		}
-		p.syncedAuthHooks[index].Headers = headers
+	}
+	return nil
+}
+
+func (p *capturingProvisioner) SyncReplicas(ctx context.Context, ref string, replicas []control.ProjectReplica) error {
+	p.syncedReplicasRef = ref
+	p.syncedReplicas = append([]control.ProjectReplica(nil), replicas...)
+	return nil
+}
+
+func (p *capturingProvisioner) Upgrade(ctx context.Context, ref string, version string) error {
+	p.upgradeVersions = append(p.upgradeVersions, version)
+	if len(p.upgradeVersions) == 1 && p.upgradeErr != nil {
+		return p.upgradeErr
+	}
+	if len(p.upgradeVersions) > 1 && p.rollbackErr != nil {
+		return p.rollbackErr
 	}
 	return nil
 }
@@ -4390,4 +7025,13 @@ func TestProvisionerEndpoint(t *testing.T) {
 	if body := response.Body.String(); body != "{\"provisioner\":\"compose\"}\n" {
 		t.Fatalf("unexpected body: %s", body)
 	}
+}
+
+func isLowerHexForTest(value string) bool {
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

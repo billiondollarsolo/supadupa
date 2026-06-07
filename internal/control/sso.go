@@ -1,8 +1,11 @@
 package control
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"net/url"
@@ -31,6 +34,7 @@ func normalizePlatformSSOInput(input PlatformSSOConfigInput) (PlatformSSOConfig,
 		EmailDomain:   strings.TrimPrefix(strings.ToLower(strings.TrimSpace(input.EmailDomain)), "@"),
 		AutoProvision: input.AutoProvision,
 		DefaultRole:   strings.ToLower(strings.TrimSpace(input.DefaultRole)),
+		SCIMEnabled:   input.SCIMEnabled,
 		UpdatedAt:     time.Now().UTC(),
 	}
 	if config.DefaultRole == "" {
@@ -70,6 +74,10 @@ func normalizePlatformSSOInput(input PlatformSSOConfigInput) (PlatformSSOConfig,
 			return PlatformSSOConfig{}, fmt.Errorf("metadata_url must be a valid URL")
 		}
 	}
+	if strings.TrimSpace(input.SCIMToken) != "" {
+		config.SCIMTokenHash = HashPlatformSCIMToken(input.SCIMToken)
+		config.SCIMTokenConfigured = true
+	}
 	return config, nil
 }
 
@@ -84,7 +92,23 @@ func normalizedPlatformSSOConfig(config PlatformSSOConfig) PlatformSSOConfig {
 		config.UpdatedAt = time.Now().UTC()
 	}
 	config.EmailDomain = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(config.EmailDomain)), "@")
+	config.SCIMTokenHash = strings.TrimSpace(config.SCIMTokenHash)
+	config.SCIMTokenConfigured = config.SCIMTokenHash != ""
 	return config
+}
+
+func HashPlatformSCIMToken(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
+}
+
+func VerifyPlatformSCIMToken(config PlatformSSOConfig, token string) bool {
+	config = normalizedPlatformSSOConfig(config)
+	token = strings.TrimSpace(token)
+	if !config.SCIMEnabled || config.SCIMTokenHash == "" || token == "" {
+		return false
+	}
+	return hmac.Equal([]byte(config.SCIMTokenHash), []byte(HashPlatformSCIMToken(token)))
 }
 
 func PlatformSSOAssertionSignaturePayload(assertion PlatformSSOAssertion) []byte {

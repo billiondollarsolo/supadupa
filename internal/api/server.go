@@ -1,15 +1,21 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +26,8 @@ import (
 type contextKey string
 
 const tokenClaimsKey contextKey = "token_claims"
+
+const authCookieName = "supadupa_session"
 
 type Config struct {
 	Addr         string
@@ -50,35 +58,47 @@ func NewServer(cfg Config) *http.Server {
 	mux.HandleFunc("GET /v1/health", healthHandler)
 	mux.HandleFunc("GET /metrics", prometheusMetricsHandler(store))
 	mux.HandleFunc("GET /v1/metrics", getFleetMetricsHandler(store))
+	mux.HandleFunc("GET /v1/runtime-config", getRuntimeConfigHandler(cfg.Provisioner))
 	mux.HandleFunc("GET /v1/advisor", getAdvisorFindingsHandler(store))
 	mux.HandleFunc("GET /v1/compliance/report", getComplianceReportHandler(store))
 	mux.HandleFunc("GET /v1/auth/state", authStateHandler(store, cfg.AuthRequired))
 	mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapHandler(store, auth))
 	mux.HandleFunc("POST /v1/auth/login", loginHandler(store, auth))
+	mux.HandleFunc("POST /v1/auth/logout", logoutHandler())
+	mux.HandleFunc("GET /v1/auth/studio/verify", studioForwardAuthHandler(store, auth))
 	mux.HandleFunc("GET /v1/auth/sso/saml/start", startPlatformSSOHandler(store))
 	mux.HandleFunc("POST /v1/auth/sso/saml/callback", platformSSOCallbackHandler(store, auth))
 	mux.HandleFunc("GET /v1/account/mfa", getAccountMFAHandler(store))
 	mux.HandleFunc("POST /v1/account/mfa/enroll", enrollAccountMFAHandler(store))
 	mux.HandleFunc("POST /v1/account/mfa/verify", verifyAccountMFAHandler(store))
 	mux.HandleFunc("DELETE /v1/account/mfa", disableAccountMFAHandler(store))
-	mux.HandleFunc("GET /v1/users", listUsersHandler(store))
+	mux.HandleFunc("GET /v1/users", listUsersHandler(store, auth))
 	mux.HandleFunc("POST /v1/users", createUserHandler(store))
-	mux.HandleFunc("GET /v1/scim/v2/ServiceProviderConfig", scimServiceProviderConfigHandler())
-	mux.HandleFunc("GET /v1/scim/v2/Users", listSCIMUsersHandler(store))
-	mux.HandleFunc("POST /v1/scim/v2/Users", createSCIMUserHandler(store))
-	mux.HandleFunc("GET /v1/scim/v2/Users/{id}", getSCIMUserHandler(store))
-	mux.HandleFunc("PUT /v1/scim/v2/Users/{id}", replaceSCIMUserHandler(store))
-	mux.HandleFunc("PATCH /v1/scim/v2/Users/{id}", patchSCIMUserHandler(store))
-	mux.HandleFunc("DELETE /v1/scim/v2/Users/{id}", deleteSCIMUserHandler(store))
-	mux.HandleFunc("GET /v1/scim/v2/Groups", listSCIMGroupsHandler(store))
-	mux.HandleFunc("POST /v1/scim/v2/Groups", createSCIMGroupHandler(store))
-	mux.HandleFunc("GET /v1/scim/v2/Groups/{id}", getSCIMGroupHandler(store))
-	mux.HandleFunc("DELETE /v1/scim/v2/Groups/{id}", deleteSCIMGroupHandler(store))
+	mux.HandleFunc("GET /v1/scim/v2/ServiceProviderConfig", scimServiceProviderConfigHandler(store, auth))
+	mux.HandleFunc("GET /v1/scim/v2/Users", listSCIMUsersHandler(store, auth))
+	mux.HandleFunc("POST /v1/scim/v2/Users", createSCIMUserHandler(store, auth))
+	mux.HandleFunc("GET /v1/scim/v2/Users/{id}", getSCIMUserHandler(store, auth))
+	mux.HandleFunc("PUT /v1/scim/v2/Users/{id}", replaceSCIMUserHandler(store, auth))
+	mux.HandleFunc("PATCH /v1/scim/v2/Users/{id}", patchSCIMUserHandler(store, auth))
+	mux.HandleFunc("DELETE /v1/scim/v2/Users/{id}", deleteSCIMUserHandler(store, auth))
+	mux.HandleFunc("GET /v1/scim/v2/Groups", listSCIMGroupsHandler(store, auth))
+	mux.HandleFunc("POST /v1/scim/v2/Groups", createSCIMGroupHandler(store, auth))
+	mux.HandleFunc("GET /v1/scim/v2/Groups/{id}", getSCIMGroupHandler(store, auth))
+	mux.HandleFunc("DELETE /v1/scim/v2/Groups/{id}", deleteSCIMGroupHandler(store, auth))
 	mux.HandleFunc("GET /v1/provisioner", provisionerHandler(cfg.Provisioner))
+	mux.HandleFunc("GET /v1/stack-releases", listStackReleasesHandler())
 	mux.HandleFunc("GET /v1/settings/defaults", getPlatformDefaultsHandler(store))
 	mux.HandleFunc("PUT /v1/settings/defaults", updatePlatformDefaultsHandler(store))
 	mux.HandleFunc("GET /v1/settings/sso", getPlatformSSOHandler(store))
 	mux.HandleFunc("PUT /v1/settings/sso", updatePlatformSSOHandler(store))
+	mux.HandleFunc("GET /v1/backup-storage-targets", listBackupStorageTargetsHandler(store))
+	mux.HandleFunc("POST /v1/backup-storage-targets", createBackupStorageTargetHandler(store))
+	mux.HandleFunc("PUT /v1/backup-storage-targets/{id}", updateBackupStorageTargetHandler(store))
+	mux.HandleFunc("POST /v1/backup-storage-targets/{id}/test", testBackupStorageTargetHandler(store))
+	mux.HandleFunc("DELETE /v1/backup-storage-targets/{id}", deleteBackupStorageTargetHandler(store))
+	mux.HandleFunc("GET /v1/platform/backups", listPlatformBackupsHandler(store))
+	mux.HandleFunc("POST /v1/platform/backups", triggerPlatformBackupHandler(store))
+	mux.HandleFunc("POST /v1/platform/backups/{id}/restore", restorePlatformBackupHandler(store, cfg.Provisioner))
 	mux.HandleFunc("GET /v1/audit-events", listAuditEventsHandler(store))
 	mux.HandleFunc("GET /v1/audit-events/integrity", getAuditIntegrityHandler(store))
 	mux.HandleFunc("GET /v1/hosts", listHostsHandler(store))
@@ -118,12 +138,16 @@ func NewServer(cfg Config) *http.Server {
 	mux.HandleFunc("POST /v1/projects/{ref}/telemetry", recordProjectTelemetryHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/connect", getConnectHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/connect/cli", getCLIProfileHandler(store))
+	mux.HandleFunc("GET /v1/projects/{ref}/studio-session", createProjectStudioSessionHandler(store, auth))
 	mux.HandleFunc("GET /v1/projects/{ref}/access", listProjectAccessHandler(store))
 	mux.HandleFunc("PUT /v1/projects/{ref}/access", upsertProjectAccessHandler(store))
 	mux.HandleFunc("DELETE /v1/projects/{ref}/access/{subjectType}/{subjectID}", deleteProjectAccessHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/routes", listProjectRoutesHandler(store))
+	mux.HandleFunc("GET /v1/projects/{ref}/route-manifest", getProjectRouteManifestHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/domains", listProjectDomainsHandler(store))
 	mux.HandleFunc("POST /v1/projects/{ref}/domains", addProjectDomainHandler(store))
+	mux.HandleFunc("PUT /v1/projects/{ref}/domains/{fqdn}/certificate", uploadProjectDomainCertificateHandler(store))
+	mux.HandleFunc("DELETE /v1/projects/{ref}/domains/{fqdn}/certificate", resetProjectDomainCertificateHandler(store))
 	mux.HandleFunc("DELETE /v1/projects/{ref}/domains/{fqdn}", deleteProjectDomainHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/services", getProjectServicesHandler(store))
 	mux.HandleFunc("PUT /v1/projects/{ref}/services", updateProjectServicesHandler(store, cfg.Provisioner))
@@ -141,9 +165,9 @@ func NewServer(cfg Config) *http.Server {
 	mux.HandleFunc("GET /v1/projects/{ref}/replicas", listProjectReplicasHandler(store))
 	mux.HandleFunc("POST /v1/projects/{ref}/replicas", createProjectReplicaHandler(store, cfg.Provisioner))
 	mux.HandleFunc("GET /v1/projects/{ref}/replicas/routing", getProjectReplicaRoutingHandler(store))
-	mux.HandleFunc("POST /v1/projects/{ref}/replicas/failover", failoverProjectReplicaHandler(store))
-	mux.HandleFunc("POST /v1/projects/{ref}/replicas/{id}/promote", promoteProjectReplicaHandler(store))
-	mux.HandleFunc("DELETE /v1/projects/{ref}/replicas/{id}", deleteProjectReplicaHandler(store))
+	mux.HandleFunc("POST /v1/projects/{ref}/replicas/failover", failoverProjectReplicaHandler(store, cfg.Provisioner))
+	mux.HandleFunc("POST /v1/projects/{ref}/replicas/{id}/promote", promoteProjectReplicaHandler(store, cfg.Provisioner))
+	mux.HandleFunc("DELETE /v1/projects/{ref}/replicas/{id}", deleteProjectReplicaHandler(store, cfg.Provisioner))
 	mux.HandleFunc("GET /v1/projects/{ref}/functions", listProjectFunctionsHandler(store))
 	mux.HandleFunc("POST /v1/projects/{ref}/functions", deployProjectFunctionHandler(store))
 	mux.HandleFunc("DELETE /v1/projects/{ref}/functions/{name}", deleteProjectFunctionHandler(store))
@@ -198,12 +222,17 @@ func NewServer(cfg Config) *http.Server {
 	mux.HandleFunc("POST /v1/projects/{ref}/log-drains", createProjectLogDrainHandler(store))
 	mux.HandleFunc("DELETE /v1/projects/{ref}/log-drains/{id}", deleteProjectLogDrainHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/secrets", listProjectSecretsHandler(store))
+	mux.HandleFunc("PUT /v1/projects/{ref}/secrets/{kind}", upsertProjectSecretHandler(store))
+	mux.HandleFunc("DELETE /v1/projects/{ref}/secrets/{kind}", deleteProjectSecretHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/secrets/{kind}/reveal", revealProjectSecretHandler(store))
 	mux.HandleFunc("POST /v1/projects/{ref}/secrets/{kind}/copy", auditProjectSecretCopyHandler(store))
 	mux.HandleFunc("POST /v1/projects/{ref}/keys/rotate", rotateProjectSecretHandler(store, cfg.Provisioner))
 	mux.HandleFunc("GET /v1/projects/{ref}/backups", listBackupsHandler(store))
+	mux.HandleFunc("GET /v1/projects/{ref}/database/backups", listBackupsHandler(store))
 	mux.HandleFunc("POST /v1/projects/{ref}/backups", triggerBackupHandler(store))
 	mux.HandleFunc("POST /v1/projects/{ref}/restore", restoreBackupHandler(store))
+	mux.HandleFunc("POST /v1/projects/{ref}/database/backups/restore-pitr", restorePITRBackupHandler(store))
+	mux.HandleFunc("GET /v1/projects/{ref}/recoverability", getProjectRecoverabilityHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/backups/policy", getBackupPolicyHandler(store))
 	mux.HandleFunc("PUT /v1/projects/{ref}/backups/policy", updateBackupPolicyHandler(store))
 	mux.HandleFunc("GET /v1/projects/{ref}/pitr/policy", getPITRPolicyHandler(store))
@@ -251,6 +280,63 @@ func provisionerHandler(provisioner control.Provisioner) http.HandlerFunc {
 			name = provisioner.Name()
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"provisioner": name})
+	}
+}
+
+func getRuntimeConfigHandler(provisioner control.Provisioner) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		name := "unconfigured"
+		if provisioner != nil {
+			name = provisioner.Name()
+		}
+		composeApply := envBoolValue(os.Getenv("SUPADUPA_COMPOSE_APPLY"))
+		kubernetesApply := envBoolValue(os.Getenv("SUPADUPA_K8S_APPLY"))
+		composeBackupDefaults := composeApply && !envFalseValue(os.Getenv("SUPADUPA_COMPOSE_BACKUP_DEFAULTS"))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"provisioner": name,
+			"apply": map[string]bool{
+				"compose":            composeApply,
+				"kubernetes":         kubernetesApply,
+				"storage_data_plane": storageDataPlaneApplyEnabled(),
+			},
+			"backup": map[string]bool{
+				"compose_defaults":           composeBackupDefaults,
+				"logical_configured":         strings.TrimSpace(os.Getenv("SUPADUPA_LOGICAL_BACKUP_COMMAND")) != "" || composeBackupDefaults,
+				"physical_configured":        strings.TrimSpace(os.Getenv("SUPADUPA_PHYSICAL_BACKUP_COMMAND")) != "" || composeBackupDefaults,
+				"wal_archive_configured":     strings.TrimSpace(os.Getenv("SUPADUPA_WAL_ARCHIVE_COMMAND")) != "" || composeBackupDefaults,
+				"logical_restore_configured": strings.TrimSpace(os.Getenv("SUPADUPA_LOGICAL_RESTORE_COMMAND")) != "" || composeBackupDefaults,
+				"pitr_restore_configured":    strings.TrimSpace(os.Getenv("SUPADUPA_PITR_RESTORE_COMMAND")) != "" || composeBackupDefaults,
+				"backup_dry_run":             envBoolValue(os.Getenv("SUPADUPA_BACKUP_DRY_RUN")),
+				"restore_dry_run":            envBoolValue(os.Getenv("SUPADUPA_RESTORE_DRY_RUN")),
+				"wal_archive_dry_run":        envBoolValue(os.Getenv("SUPADUPA_WAL_ARCHIVE_DRY_RUN")),
+			},
+			"recovery": map[string]bool{
+				"require_recovery_ready_targets": envBoolValue(os.Getenv("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS")),
+			},
+			"upgrade": map[string]bool{
+				"require_durable_backup": envBoolValue(os.Getenv("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP")),
+				"failure_auto_restore":   envBoolValue(os.Getenv("SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE")),
+			},
+		})
+	}
+}
+
+func listStackReleasesHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		versions := control.SupportedStackReleaseVersionsFromEnv(os.Getenv)
+		releases := make([]control.StackReleaseManifest, 0, len(versions))
+		for _, version := range versions {
+			if manifest, ok := control.ResolveStackReleaseManifestFromEnv(os.Getenv, version); ok {
+				releases = append(releases, manifest)
+			}
+		}
+		writeJSON(w, http.StatusOK, releases)
 	}
 }
 
@@ -306,9 +392,23 @@ func prometheusMetricsHandler(store control.Store) http.HandlerFunc {
 			writeStoreError(w, err)
 			return
 		}
+		projects, err := store.ListProjects(r.Context())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		projectMetrics := make([]control.ProjectMetrics, 0, len(projects))
+		for _, project := range projects {
+			metrics, err := store.GetProjectMetrics(r.Context(), project.Ref)
+			if err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			projectMetrics = append(projectMetrics, metrics)
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(renderPrometheusMetrics(metrics)))
+		_, _ = w.Write([]byte(renderPrometheusMetrics(metrics, projectMetrics)))
 	}
 }
 
@@ -385,13 +485,292 @@ func updatePlatformSSOHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		control.Audit(r.Context(), store, "settings.sso_update", "platform:sso", map[string]string{
-			"enabled":      fmt.Sprintf("%t", config.Enabled),
-			"provider":     config.Provider,
-			"idp_entity":   config.IDPEntityID,
-			"email_domain": config.EmailDomain,
+			"enabled":               fmt.Sprintf("%t", config.Enabled),
+			"provider":              config.Provider,
+			"idp_entity":            config.IDPEntityID,
+			"email_domain":          config.EmailDomain,
+			"scim_enabled":          fmt.Sprintf("%t", config.SCIMEnabled),
+			"scim_token_configured": fmt.Sprintf("%t", config.SCIMTokenConfigured),
 		})
 		writeJSON(w, http.StatusOK, config)
 	}
+}
+
+func listBackupStorageTargetsHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		targets, err := store.ListBackupStorageTargets(r.Context())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, targets)
+	}
+}
+
+func createBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		var payload control.BackupStorageTargetInput
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		target, err := store.CreateBackupStorageTarget(r.Context(), payload)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		control.Audit(r.Context(), store, "settings.backup_storage_target_create", "backup-storage-target:"+target.ID, backupStorageTargetAuditMetadata(target))
+		writeJSON(w, http.StatusCreated, target)
+	}
+}
+
+func updateBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		var payload control.BackupStorageTargetInput
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		target, err := store.UpdateBackupStorageTarget(r.Context(), r.PathValue("id"), payload)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		control.Audit(r.Context(), store, "settings.backup_storage_target_update", "backup-storage-target:"+target.ID, backupStorageTargetAuditMetadata(target))
+		writeJSON(w, http.StatusOK, target)
+	}
+}
+
+func testBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		id := r.PathValue("id")
+		target, err := store.GetBackupStorageTarget(r.Context(), id)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		testedAt := time.Now().UTC()
+		status := "passed"
+		message := ""
+		if err := control.TestBackupStorageTarget(r.Context(), target); err != nil {
+			status = "failed"
+			message = err.Error()
+		}
+		updated, err := store.UpdateBackupStorageTargetTestResult(r.Context(), id, testedAt, status, message)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		metadata := backupStorageTargetAuditMetadata(updated)
+		metadata["test_status"] = status
+		if message != "" {
+			metadata["test_error"] = message
+		}
+		control.Audit(r.Context(), store, "settings.backup_storage_target_test", "backup-storage-target:"+updated.ID, metadata)
+		writeJSON(w, http.StatusOK, updated)
+	}
+}
+
+func deleteBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		id := r.PathValue("id")
+		if err := store.DeleteBackupStorageTarget(r.Context(), id); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		control.Audit(r.Context(), store, "settings.backup_storage_target_delete", "backup-storage-target:"+id, map[string]string{"id": id})
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func backupStorageTargetAuditMetadata(target control.BackupStorageTarget) map[string]string {
+	return map[string]string{
+		"id":               target.ID,
+		"name":             target.Name,
+		"type":             target.Type,
+		"endpoint":         target.Endpoint,
+		"region":           target.Region,
+		"bucket":           target.Bucket,
+		"prefix":           target.Prefix,
+		"default":          strconv.FormatBool(target.Default),
+		"force_path_style": strconv.FormatBool(target.ForcePathStyle),
+	}
+}
+
+func listPlatformBackupsHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		backups, err := store.ListPlatformBackups(r.Context())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, backups)
+	}
+}
+
+func triggerPlatformBackupHandler(store control.Store) http.HandlerFunc {
+	backupService := control.NewBackupService("")
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		backup, err := backupService.TriggerPlatformBackup(r.Context(), store)
+		if err != nil {
+			control.Audit(r.Context(), store, "platform.backup_failed", "platform:control-plane", map[string]string{"error": err.Error()})
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		control.Audit(r.Context(), store, "platform.backup", "platform:control-plane", map[string]string{
+			"backup_id":         backup.ID,
+			"storage_target_id": backup.StorageTargetID,
+			"remote_location":   backup.RemoteLocation,
+		})
+		writeJSON(w, http.StatusCreated, backup)
+	}
+}
+
+func restorePlatformBackupHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
+	backupService := control.NewBackupService("")
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
+		var payload restorePlatformBackupRequest
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if strings.TrimSpace(payload.Confirm) != "restore-control-plane" {
+			writeError(w, http.StatusBadRequest, `confirm must be "restore-control-plane"`)
+			return
+		}
+		beforeProjects, err := store.ListProjects(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		backup, restore, err := backupService.RestorePlatformBackup(r.Context(), store, r.PathValue("id"))
+		if err != nil {
+			control.Audit(r.Context(), store, "platform.restore_failed", "platform:control-plane", map[string]string{"backup_id": r.PathValue("id"), "error": err.Error()})
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		runtime := reconcilePlatformRestoreRuntime(r.Context(), store, provisioner, beforeProjects)
+		state := restore.State
+		if provisioner != nil && len(runtime.Errors) == 0 {
+			state = "reconciled"
+		}
+		if len(runtime.Errors) > 0 {
+			state = "metadata-restored-runtime-errors"
+		}
+		control.Audit(r.Context(), store, "platform.restore", "platform:control-plane", map[string]string{
+			"backup_id":           backup.ID,
+			"state":               state,
+			"runtime_reconciled":  strconv.Itoa(runtime.Reconciled),
+			"runtime_destroyed":   strconv.Itoa(runtime.Destroyed),
+			"runtime_error_count": strconv.Itoa(len(runtime.Errors)),
+		})
+		writeJSON(w, http.StatusAccepted, restorePlatformBackupResponse{
+			Backup:            backup,
+			RestorePath:       restore.Path,
+			RestoreState:      state,
+			RuntimeReconciled: runtime.Reconciled,
+			RuntimeDestroyed:  runtime.Destroyed,
+			RuntimeErrors:     runtime.Errors,
+		})
+	}
+}
+
+type platformRuntimeRestoreSummary struct {
+	Reconciled int
+	Destroyed  int
+	Errors     []string
+}
+
+func reconcilePlatformRestoreRuntime(ctx context.Context, store control.Store, provisioner control.Provisioner, beforeProjects []control.Project) platformRuntimeRestoreSummary {
+	var summary platformRuntimeRestoreSummary
+	if provisioner == nil {
+		return summary
+	}
+	afterProjects, err := store.ListProjects(ctx)
+	if err != nil {
+		summary.Errors = append(summary.Errors, err.Error())
+		return summary
+	}
+	beforeRefs := map[string]struct{}{}
+	for _, project := range beforeProjects {
+		beforeRefs[project.Ref] = struct{}{}
+	}
+	afterRefs := map[string]struct{}{}
+	for _, project := range afterProjects {
+		afterRefs[project.Ref] = struct{}{}
+		if project.Status == control.ProjectDestroying {
+			continue
+		}
+		if err := provisioner.Create(ctx, project.Spec); err != nil {
+			message := fmt.Sprintf("reconcile restored project %s: %v", project.Ref, err)
+			summary.Errors = append(summary.Errors, message)
+			control.LogProject(ctx, store, project.Ref, "error", "Runtime restore reconcile failed", map[string]string{"error": err.Error()})
+			control.Audit(ctx, store, "project.restore_reconcile_failed", "project:"+project.Ref, map[string]string{"error": err.Error()})
+			continue
+		}
+		summary.Reconciled++
+		control.LogProject(ctx, store, project.Ref, "info", "Runtime reconciled after control-plane restore", map[string]string{"provisioner": provisioner.Name()})
+	}
+	for ref := range beforeRefs {
+		if _, ok := afterRefs[ref]; ok {
+			continue
+		}
+		var err error
+		if destroyer, ok := provisioner.(control.OptionedDestroyer); ok {
+			err = destroyer.DestroyWithOptions(ctx, ref, control.DestroyOptions{RetainVolumes: true})
+		} else {
+			err = provisioner.Destroy(ctx, ref)
+		}
+		if err != nil {
+			message := fmt.Sprintf("stop stale restored-away project %s: %v", ref, err)
+			summary.Errors = append(summary.Errors, message)
+			control.Audit(ctx, store, "project.restore_stale_destroy_failed", "project:"+ref, map[string]string{"error": err.Error()})
+			continue
+		}
+		if err := cleanupProjectRuntimeArtifacts(ctx, ref); err != nil {
+			message := fmt.Sprintf("cleanup stale restored-away project %s: %v", ref, err)
+			summary.Errors = append(summary.Errors, message)
+			control.Audit(ctx, store, "project.restore_stale_cleanup_failed", "project:"+ref, map[string]string{"error": err.Error()})
+			continue
+		}
+		summary.Destroyed++
+		control.Audit(ctx, store, "project.restore_stale_destroyed", "project:"+ref, map[string]string{"retain_volumes": "true"})
+	}
+	return summary
+}
+
+func cleanupProjectRuntimeArtifacts(ctx context.Context, ref string) error {
+	if err := control.NewRoutingService("").RemoveProject(ref); err != nil {
+		return fmt.Errorf("remove routes: %w", err)
+	}
+	if err := control.NewCertificateService().RemoveProject(ctx, ref); err != nil {
+		return fmt.Errorf("remove certificates: %w", err)
+	}
+	return nil
 }
 
 type createOrgRequest struct {
@@ -421,7 +800,29 @@ type mfaCodeRequest struct {
 }
 
 type upgradeProjectRequest struct {
-	Version string `json:"version"`
+	Version  string `json:"version"`
+	BackupID string `json:"backup_id,omitempty"`
+}
+
+type upgradeProjectResponse struct {
+	Project           control.Project `json:"project"`
+	Backup            control.Backup  `json:"backup"`
+	PreviousVersion   string          `json:"previous_version"`
+	TargetVersion     string          `json:"target_version"`
+	RollbackAvailable bool            `json:"rollback_available"`
+}
+
+type upgradeProjectFailureResponse struct {
+	Error             string         `json:"error"`
+	Backup            control.Backup `json:"backup"`
+	PreviousVersion   string         `json:"previous_version"`
+	TargetVersion     string         `json:"target_version"`
+	RollbackAvailable bool           `json:"rollback_available"`
+	RollbackAttempted bool           `json:"rollback_attempted"`
+	RollbackError     string         `json:"rollback_error,omitempty"`
+	RestoreAttempted  bool           `json:"restore_attempted,omitempty"`
+	RestoreState      string         `json:"restore_state,omitempty"`
+	RestoreError      string         `json:"restore_error,omitempty"`
 }
 
 type scaleProjectRequest struct {
@@ -436,6 +837,41 @@ type restoreBackupResponse struct {
 	Backup       control.Backup `json:"backup"`
 	RestorePath  string         `json:"restore_path"`
 	RestoreState string         `json:"restore_state"`
+}
+
+type restorePITRBackupRequest struct {
+	RecoveryTimeTargetUnix string `json:"recovery_time_target_unix"`
+}
+
+type restorePITRBackupResponse struct {
+	ProjectRef             string    `json:"project_ref"`
+	RecoveryTimeTargetUnix int64     `json:"recovery_time_target_unix"`
+	RecoveryTimeTarget     time.Time `json:"recovery_time_target"`
+	RestorePath            string    `json:"restore_path"`
+	RestoreState           string    `json:"restore_state"`
+}
+
+type restorePITRBackupUnavailableResponse struct {
+	Error          string                              `json:"error"`
+	Recoverability control.ProjectRecoverabilityStatus `json:"recoverability"`
+}
+
+type restorePlatformBackupRequest struct {
+	Confirm string `json:"confirm"`
+}
+
+type restorePlatformBackupResponse struct {
+	Backup            control.PlatformBackup `json:"backup"`
+	RestorePath       string                 `json:"restore_path"`
+	RestoreState      string                 `json:"restore_state"`
+	RuntimeReconciled int                    `json:"runtime_reconciled"`
+	RuntimeDestroyed  int                    `json:"runtime_destroyed"`
+	RuntimeErrors     []string               `json:"runtime_errors,omitempty"`
+}
+
+type projectStudioSessionResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type createBranchResponse struct {
@@ -562,6 +998,7 @@ func bootstrapHandler(store control.Store, auth *control.AuthService) http.Handl
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		setAuthCookie(w, r, token, 24*time.Hour)
 		control.Audit(r.Context(), store, "user.bootstrap", "user:"+user.ID, map[string]string{"email": user.Email})
 		writeJSON(w, http.StatusCreated, authResponse{Token: token, User: user})
 	}
@@ -590,8 +1027,16 @@ func loginHandler(store control.Store, auth *control.AuthService) http.HandlerFu
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		setAuthCookie(w, r, token, 24*time.Hour)
 		control.Audit(r.Context(), store, "user.login", "user:"+user.ID, map[string]string{"email": user.Email})
 		writeJSON(w, http.StatusOK, authResponse{Token: token, User: user})
+	}
+}
+
+func logoutHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clearAuthCookie(w, r)
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -637,6 +1082,7 @@ func platformSSOCallbackHandler(store control.Store, auth *control.AuthService) 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		setAuthCookie(w, r, token, 24*time.Hour)
 		control.Audit(r.Context(), store, "user.sso_login", "user:"+user.ID, map[string]string{
 			"email":   user.Email,
 			"issuer":  assertion.Issuer,
@@ -644,6 +1090,100 @@ func platformSSOCallbackHandler(store control.Store, auth *control.AuthService) 
 		})
 		writeJSON(w, http.StatusOK, platformSSOCallbackResponse{Token: token, User: user, SSO: "saml"})
 	}
+}
+
+func studioForwardAuthHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		project, ok := projectFromForwardedStudioRequest(r, store)
+		if !ok {
+			writeError(w, http.StatusNotFound, "studio project route not found")
+			return
+		}
+		var claims control.TokenClaims
+		studioToken := studioTokenFromForwardedRequest(r)
+		if studioToken != "" {
+			var err error
+			claims, err = auth.VerifyStudio(studioToken, project.Ref)
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "invalid supadupa studio session")
+				return
+			}
+		} else {
+			token := tokenFromRequest(r)
+			if token == "" {
+				writeError(w, http.StatusUnauthorized, "missing supadupa session")
+				return
+			}
+			var err error
+			claims, err = auth.Verify(token)
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "invalid supadupa session")
+				return
+			}
+		}
+		if !strings.EqualFold(claims.Role, "admin") {
+			reqWithClaims := r.WithContext(context.WithValue(r.Context(), tokenClaimsKey, claims))
+			if _, ok := requireProjectRole(w, reqWithClaims, store, project.Ref, roleViewer); !ok {
+				return
+			}
+		}
+		w.Header().Set("X-Supadupa-User", claims.Email)
+		w.Header().Set("X-Supadupa-Project", project.Ref)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func studioTokenFromForwardedRequest(r *http.Request) string {
+	for _, raw := range []string{r.URL.RawQuery, strings.TrimSpace(r.Header.Get("X-Forwarded-Uri"))} {
+		if raw == "" {
+			continue
+		}
+		query := raw
+		if strings.Contains(raw, "?") {
+			_, query, _ = strings.Cut(raw, "?")
+		}
+		values, err := url.ParseQuery(query)
+		if err != nil {
+			continue
+		}
+		if token := strings.TrimSpace(values.Get("supadupa_studio_token")); token != "" {
+			return token
+		}
+		if token := strings.TrimSpace(values.Get("studio_token")); token != "" {
+			return token
+		}
+	}
+	return ""
+}
+
+func projectFromForwardedStudioRequest(r *http.Request, store control.Store) (control.Project, bool) {
+	if ref := strings.TrimSpace(r.URL.Query().Get("project_ref")); ref != "" {
+		project, err := store.GetProject(r.Context(), ref)
+		return project, err == nil
+	}
+	host := forwardedHost(r)
+	uri := r.Header.Get("X-Forwarded-Uri")
+	projects, err := store.ListProjects(r.Context())
+	if err != nil {
+		return control.Project{}, false
+	}
+	for _, project := range projects {
+		if strings.EqualFold(host, fmt.Sprintf("studio-%s.%s", project.Ref, project.Spec.Domain)) {
+			return project, true
+		}
+		if strings.HasPrefix(uri, "/projects/"+project.Ref+"/studio") {
+			return project, true
+		}
+	}
+	return control.Project{}, false
+}
+
+func forwardedHost(r *http.Request) string {
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	return strings.ToLower(strings.Split(host, ":")[0])
 }
 
 func getAccountMFAHandler(store control.Store) http.HandlerFunc {
@@ -743,9 +1283,9 @@ func createUserHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func listUsersHandler(store control.Store) http.HandlerFunc {
+func listUsersHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		users, err := store.ListUsers(r.Context())
@@ -757,9 +1297,9 @@ func listUsersHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func scimServiceProviderConfigHandler() http.HandlerFunc {
+func scimServiceProviderConfigHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -777,9 +1317,9 @@ func scimServiceProviderConfigHandler() http.HandlerFunc {
 	}
 }
 
-func listSCIMUsersHandler(store control.Store) http.HandlerFunc {
+func listSCIMUsersHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		users, err := store.ListUsers(r.Context())
@@ -795,9 +1335,9 @@ func listSCIMUsersHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func createSCIMUserHandler(store control.Store) http.HandlerFunc {
+func createSCIMUserHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		var payload scimUserRequest
@@ -837,9 +1377,9 @@ func createSCIMUserHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func getSCIMUserHandler(store control.Store) http.HandlerFunc {
+func getSCIMUserHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		user, err := store.GetUserByID(r.Context(), r.PathValue("id"))
@@ -851,9 +1391,9 @@ func getSCIMUserHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func replaceSCIMUserHandler(store control.Store) http.HandlerFunc {
+func replaceSCIMUserHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		var payload scimUserRequest
@@ -892,9 +1432,9 @@ func replaceSCIMUserHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func patchSCIMUserHandler(store control.Store) http.HandlerFunc {
+func patchSCIMUserHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		id := r.PathValue("id")
@@ -908,8 +1448,16 @@ func patchSCIMUserHandler(store control.Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		nextEmail := user.Email
+		nextRole := user.Role
+		changed := false
 		for _, operation := range payload.Operations {
-			if strings.EqualFold(operation.Path, "active") && !scimBoolValue(operation.Value, true) {
+			if operation.Op != "" && !strings.EqualFold(operation.Op, "replace") {
+				writeError(w, http.StatusBadRequest, "only SCIM replace operations are supported")
+				return
+			}
+			path := strings.ToLower(strings.TrimSpace(operation.Path))
+			if path == "active" && !scimBoolValue(operation.Value, true) {
 				if err := store.DeleteUser(r.Context(), id); err != nil {
 					writeStoreError(w, err)
 					return
@@ -918,14 +1466,51 @@ func patchSCIMUserHandler(store control.Store) http.HandlerFunc {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+			switch path {
+			case "username", "userName":
+				email := strings.ToLower(strings.TrimSpace(scimStringValue(operation.Value)))
+				if email == "" {
+					writeError(w, http.StatusBadRequest, "SCIM userName value is required")
+					return
+				}
+				nextEmail = email
+				changed = true
+			case "role", strings.ToLower(scimUserExtension + ".role"), strings.ToLower(scimUserExtension + ":role"):
+				role := strings.TrimSpace(scimStringValue(operation.Value))
+				if role == "" {
+					writeError(w, http.StatusBadRequest, "SCIM role value is required")
+					return
+				}
+				nextRole = role
+				changed = true
+			case "":
+				email, role, hasChange := scimPatchObjectValues(operation.Value)
+				if email != "" {
+					nextEmail = email
+				}
+				if role != "" {
+					nextRole = role
+				}
+				changed = changed || hasChange
+			}
+		}
+		if changed {
+			updated, err := store.UpdateUser(r.Context(), id, control.UpdateUserRequest{Email: nextEmail, Role: nextRole})
+			if err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			control.Audit(r.Context(), store, "scim.user_patch", "user:"+updated.ID, map[string]string{"email": updated.Email, "role": updated.Role})
+			writeJSON(w, http.StatusOK, scimUserFromControl(r, updated))
+			return
 		}
 		writeJSON(w, http.StatusOK, scimUserFromControl(r, user))
 	}
 }
 
-func deleteSCIMUserHandler(store control.Store) http.HandlerFunc {
+func deleteSCIMUserHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		id := r.PathValue("id")
@@ -943,9 +1528,9 @@ func deleteSCIMUserHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func listSCIMGroupsHandler(store control.Store) http.HandlerFunc {
+func listSCIMGroupsHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		orgs, err := store.ListOrgs(r.Context())
@@ -977,9 +1562,9 @@ func listSCIMGroupsHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func createSCIMGroupHandler(store control.Store) http.HandlerFunc {
+func createSCIMGroupHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		var payload scimGroupRequest
@@ -1018,9 +1603,9 @@ func createSCIMGroupHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func getSCIMGroupHandler(store control.Store) http.HandlerFunc {
+func getSCIMGroupHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		team, err := findSCIMTeam(r.Context(), store, r.PathValue("id"))
@@ -1037,9 +1622,9 @@ func getSCIMGroupHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func deleteSCIMGroupHandler(store control.Store) http.HandlerFunc {
+func deleteSCIMGroupHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requireSCIMOrPlatformAdmin(w, r, store, auth) {
 			return
 		}
 		team, err := findSCIMTeam(r.Context(), store, r.PathValue("id"))
@@ -1779,7 +2364,12 @@ func getConnectHandler(store control.Store) http.HandlerFunc {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, control.ConnectPayloadForProjectWithConfigs(project, poolerConfig, databaseConfig, secrets...))
+		domains, err := store.ListProjectDomains(r.Context(), project.Ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, control.ConnectPayloadForProjectWithConfigsAndDomains(project, poolerConfig, databaseConfig, domains, secrets...))
 	}
 }
 
@@ -1804,7 +2394,36 @@ func getCLIProfileHandler(store control.Store) http.HandlerFunc {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, control.ProjectCLIProfileForProjectWithConfigs(project, poolerConfig, databaseConfig, secrets...))
+		domains, err := store.ListProjectDomains(r.Context(), project.Ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, control.ProjectCLIProfileForProjectWithConfigsAndDomains(project, poolerConfig, databaseConfig, domains, secrets...))
+	}
+}
+
+func createProjectStudioSessionHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		project, ok := requireProjectRole(w, r, store, r.PathValue("ref"), roleViewer)
+		if !ok {
+			return
+		}
+		claims, ok := claimsFromRequest(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "missing token claims")
+			return
+		}
+		ttl := 5 * time.Minute
+		token, err := auth.IssueStudio(claims, project.Ref, ttl)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, projectStudioSessionResponse{
+			Token:     token,
+			ExpiresAt: time.Now().UTC().Add(ttl),
+		})
 	}
 }
 
@@ -1876,6 +2495,32 @@ func listProjectRoutesHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
+func getProjectRouteManifestHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ref := r.PathValue("ref")
+		project, ok := requireProjectRole(w, r, store, ref, roleViewer)
+		if !ok {
+			return
+		}
+		routes, err := store.ListProjectRoutes(r.Context(), ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		networkConfig, err := store.GetProjectConfig(r.Context(), ref, "network")
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		replicas, err := store.ListProjectReplicas(r.Context(), ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, control.RouteManifestForProjectWithNetworkAndReplicas(project, routes, networkConfig, replicas))
+	}
+}
+
 func listProjectDomainsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
@@ -1913,14 +2558,14 @@ func addProjectDomainHandler(store control.Store) http.HandlerFunc {
 		}
 		cert, certErr := control.NewCertificateService().Provision(r.Context(), domain)
 		if certErr != nil {
-			updated, updateErr := store.UpdateProjectDomainCertStatus(r.Context(), ref, domain.FQDN, "failed")
+			updated, updateErr := store.UpdateProjectDomainCertificate(r.Context(), ref, domain.FQDN, control.ProjectDomainCertificateMetadata{Status: "failed", Mode: certModeFromState(cert.State)})
 			if updateErr == nil {
 				domain = updated
 			}
 			control.LogProject(r.Context(), store, ref, "error", "Custom domain certificate failed", map[string]string{"fqdn": domain.FQDN, "error": certErr.Error(), "cert_path": cert.Path})
 			control.Audit(r.Context(), store, "project.domain_cert_failed", "project:"+ref, map[string]string{"fqdn": domain.FQDN, "error": certErr.Error(), "cert_path": cert.Path})
 		} else {
-			updated, updateErr := store.UpdateProjectDomainCertStatus(r.Context(), ref, domain.FQDN, cert.Status)
+			updated, updateErr := store.UpdateProjectDomainCertificate(r.Context(), ref, domain.FQDN, control.ProjectDomainCertificateMetadata{Status: cert.Status, Mode: certModeFromState(cert.State)})
 			if updateErr != nil {
 				writeStoreError(w, updateErr)
 				return
@@ -1936,6 +2581,19 @@ func addProjectDomainHandler(store control.Store) http.HandlerFunc {
 		control.LogProject(r.Context(), store, ref, "info", "Custom domain added", certMetadata)
 		control.Audit(r.Context(), store, "project.domain_create", "project:"+ref, certMetadata)
 		writeJSON(w, http.StatusCreated, domain)
+	}
+}
+
+func certModeFromState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "manual":
+		return "manual"
+	case "completed":
+		return "command"
+	case "byo":
+		return "byo"
+	default:
+		return "acme"
 	}
 }
 
@@ -1965,6 +2623,129 @@ func deleteProjectDomainHandler(store control.Store) http.HandlerFunc {
 		control.Audit(r.Context(), store, "project.domain_delete", "project:"+ref, map[string]string{"fqdn": fqdn})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func uploadProjectDomainCertificateHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ref := r.PathValue("ref")
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
+			return
+		}
+		if !requireProjectFeature(w, r, store, project, "custom_domains") {
+			return
+		}
+		domain, err := findProjectDomain(r.Context(), store, ref, r.PathValue("fqdn"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		var payload control.ProjectDomainCertificateInput
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		cert, err := control.NewCertificateService().Upload(r.Context(), domain, payload.CertificatePEM, payload.PrivateKeyPEM)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		updated, err := store.UpdateProjectDomainCertificate(r.Context(), ref, domain.FQDN, control.ProjectDomainCertificateMetadata{
+			Status:      cert.Status,
+			Mode:        "byo",
+			Fingerprint: cert.Fingerprint,
+			NotAfter:    cert.NotAfter,
+		})
+		if err != nil {
+			_ = control.NewCertificateService().Remove(r.Context(), ref, domain.FQDN)
+			writeStoreError(w, err)
+			return
+		}
+		routePath, err := reconcileProjectRoutes(r, store, ref)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		metadata := map[string]string{
+			"fqdn":             updated.FQDN,
+			"route_path":       routePath,
+			"cert_status":      updated.CertStatus,
+			"cert_mode":        updated.CertMode,
+			"cert_fingerprint": updated.CertFingerprint,
+		}
+		control.LogProject(r.Context(), store, ref, "info", "Custom domain certificate uploaded", metadata)
+		control.Audit(r.Context(), store, "project.domain_cert_upload", "project:"+ref, metadata)
+		writeJSON(w, http.StatusOK, updated)
+	}
+}
+
+func resetProjectDomainCertificateHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ref := r.PathValue("ref")
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
+			return
+		}
+		if !requireProjectFeature(w, r, store, project, "custom_domains") {
+			return
+		}
+		domain, err := findProjectDomain(r.Context(), store, ref, r.PathValue("fqdn"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		certService := control.NewCertificateService()
+		if err := certService.Remove(r.Context(), ref, domain.FQDN); err != nil && !errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		cert, certErr := certService.Provision(r.Context(), domain)
+		status := cert.Status
+		mode := "acme"
+		if cert.State == "manual" {
+			mode = "manual"
+		}
+		if certErr != nil {
+			status = "failed"
+		}
+		updated, err := store.UpdateProjectDomainCertificate(r.Context(), ref, domain.FQDN, control.ProjectDomainCertificateMetadata{
+			Status: status,
+			Mode:   mode,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		routePath, err := reconcileProjectRoutes(r, store, ref)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		metadata := map[string]string{"fqdn": updated.FQDN, "route_path": routePath, "cert_status": updated.CertStatus, "cert_mode": updated.CertMode, "cert_path": cert.Path, "cert_state": cert.State}
+		if certErr != nil {
+			metadata["error"] = certErr.Error()
+			control.LogProject(r.Context(), store, ref, "error", "Custom domain certificate reset failed", metadata)
+			control.Audit(r.Context(), store, "project.domain_cert_reset_failed", "project:"+ref, metadata)
+		} else {
+			control.LogProject(r.Context(), store, ref, "info", "Custom domain certificate reset", metadata)
+			control.Audit(r.Context(), store, "project.domain_cert_reset", "project:"+ref, metadata)
+		}
+		writeJSON(w, http.StatusOK, updated)
+	}
+}
+
+func findProjectDomain(ctx context.Context, store control.Store, ref string, fqdn string) (control.ProjectDomain, error) {
+	needle := strings.Trim(strings.ToLower(strings.TrimSpace(fqdn)), ".")
+	domains, err := store.ListProjectDomains(ctx, ref)
+	if err != nil {
+		return control.ProjectDomain{}, err
+	}
+	for _, domain := range domains {
+		if domain.FQDN == needle {
+			return domain, nil
+		}
+	}
+	return control.ProjectDomain{}, fmt.Errorf("%w: domain %s for project %s", control.ErrNotFound, fqdn, ref)
 }
 
 func getProjectConfigHandler(store control.Store) http.HandlerFunc {
@@ -2023,6 +2804,17 @@ func updateProjectServicesHandler(store control.Store, provisioner control.Provi
 			}
 			metadata["runtime_synced"] = "true"
 		}
+		routePath, err := reconcileProjectRoutes(r, store, ref)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		metadata["route_path"] = routePath
+		project, err = store.UpdateProjectStatus(r.Context(), ref, control.ProjectHealthy, "enabled services updated")
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
 		control.LogProject(r.Context(), store, ref, "info", "Project services updated", metadata)
 		control.Audit(r.Context(), store, "project.services_update", "project:"+ref, metadata)
 		writeJSON(w, http.StatusOK, control.ProjectServices{ProjectRef: project.Ref, Services: control.ProjectServiceStates(project.Spec.Services), UpdatedAt: project.UpdatedAt})
@@ -2034,6 +2826,11 @@ func updateProjectConfigHandler(store control.Store, provisioner control.Provisi
 		ref := r.PathValue("ref")
 		area := r.PathValue("area")
 		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+			return
+		}
+		previousConfig, err := store.GetProjectConfig(r.Context(), ref, area)
+		if err != nil {
+			writeStoreError(w, err)
 			return
 		}
 		var payload control.ProjectConfigInput
@@ -2056,7 +2853,16 @@ func updateProjectConfigHandler(store control.Store, provisioner control.Provisi
 			metadata["route_path"] = routePath
 		}
 		if syncer, ok := provisioner.(control.ConfigSyncer); ok {
-			if err := syncer.SyncConfig(r.Context(), ref, config); err != nil {
+			runtimeConfig, err := materializeProjectConfigForRuntime(r.Context(), store, ref, config)
+			if err != nil {
+				rollbackProjectConfig(r.Context(), store, ref, previousConfig)
+				control.LogProject(r.Context(), store, ref, "error", "Project config secret resolution failed", map[string]string{"area": config.Area, "error": err.Error()})
+				control.Audit(r.Context(), store, "project.config_secret_resolution_failed", "project:"+ref, map[string]string{"area": config.Area, "error": err.Error()})
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
+			if err := syncer.SyncConfig(r.Context(), ref, runtimeConfig); err != nil {
+				rollbackProjectConfig(r.Context(), store, ref, previousConfig)
 				control.LogProject(r.Context(), store, ref, "error", "Project config sync failed", map[string]string{"area": config.Area, "error": err.Error()})
 				control.Audit(r.Context(), store, "project.config_sync_failed", "project:"+ref, map[string]string{"area": config.Area, "error": err.Error()})
 				writeError(w, http.StatusConflict, err.Error())
@@ -2068,6 +2874,84 @@ func updateProjectConfigHandler(store control.Store, provisioner control.Provisi
 		control.Audit(r.Context(), store, "project.config_update", "project:"+ref, metadata)
 		writeJSON(w, http.StatusOK, config)
 	}
+}
+
+func rollbackProjectConfig(ctx context.Context, store control.Store, ref string, previous control.ProjectConfig) {
+	_, _ = store.UpdateProjectConfig(ctx, ref, previous.Area, control.ProjectConfigInput{Config: previous.Config})
+}
+
+func materializeProjectConfigForRuntime(ctx context.Context, store control.Store, ref string, config control.ProjectConfig) (control.ProjectConfig, error) {
+	runtimeConfig := config
+	runtimeConfig.Config = cloneRuntimeConfigMap(config.Config)
+	for _, key := range runtimeSecretHandleKeys(config.Area) {
+		handle := strings.TrimSpace(config.Config[key])
+		if handle == "" {
+			continue
+		}
+		value, err := resolveProjectSecretHandleValue(ctx, store, ref, handle, key)
+		if err != nil {
+			return control.ProjectConfig{}, err
+		}
+		runtimeConfig.Config[runtimeResolvedSecretKey(key)] = value
+	}
+	return runtimeConfig, nil
+}
+
+func runtimeSecretHandleKeys(area string) []string {
+	switch area {
+	case "auth":
+		return []string{"captcha_secret_handle"}
+	case "auth_providers":
+		keys := []string{
+			"oauth_google_client_secret_handle",
+			"oauth_github_client_secret_handle",
+			"oauth_azure_client_secret_handle",
+			"sms_test_otp_handle",
+			"sms_twilio_auth_token_handle",
+			"sms_messagebird_access_key_handle",
+			"sms_textlocal_api_key_handle",
+			"sms_vonage_api_secret_handle",
+		}
+		for _, provider := range []string{
+			"apple",
+			"bitbucket",
+			"discord",
+			"facebook",
+			"figma",
+			"gitlab",
+			"kakao",
+			"keycloak",
+			"linkedin_oidc",
+			"notion",
+			"snapchat",
+			"slack_oidc",
+			"spotify",
+			"twitch",
+			"twitter",
+			"workos",
+			"zoom",
+		} {
+			keys = append(keys, "oauth_"+provider+"_client_secret_handle")
+		}
+		sort.Strings(keys)
+		return keys
+	case "smtp":
+		return []string{"password_handle"}
+	default:
+		return nil
+	}
+}
+
+func runtimeResolvedSecretKey(handleKey string) string {
+	return "__resolved_" + handleKey
+}
+
+func cloneRuntimeConfigMap(input map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
 }
 
 func listProjectAuthClientsHandler(store control.Store) http.HandlerFunc {
@@ -2166,6 +3050,11 @@ func createProjectAuthHookHandler(store control.Store, provisioner control.Provi
 		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
 			return
 		}
+		previousHooks, err := store.ListProjectAuthHooks(r.Context(), ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
 		var payload control.ProjectAuthHookInput
 		if err := decodeJSON(r, &payload); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -2183,6 +3072,7 @@ func createProjectAuthHookHandler(store control.Store, provisioner control.Provi
 		}
 		if syncer, ok := provisioner.(control.AuthHookSyncer); ok {
 			if err := syncProjectAuthHooks(r, store, syncer, ref); err != nil {
+				restoreProjectAuthHooks(r.Context(), store, ref, previousHooks)
 				control.LogProject(r.Context(), store, ref, "error", "Auth hooks sync failed", map[string]string{"hook_type": hook.HookType, "error": err.Error()})
 				control.Audit(r.Context(), store, "project.auth_hooks_sync_failed", "project:"+ref, map[string]string{"hook_type": hook.HookType, "error": err.Error()})
 				writeError(w, http.StatusConflict, err.Error())
@@ -2202,6 +3092,11 @@ func deleteProjectAuthHookHandler(store control.Store, provisioner control.Provi
 		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
 			return
 		}
+		previousHooks, err := store.ListProjectAuthHooks(r.Context(), ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
 		hookType := r.PathValue("hook_type")
 		if err := store.DeleteProjectAuthHook(r.Context(), ref, hookType); err != nil {
 			writeStoreError(w, err)
@@ -2210,6 +3105,7 @@ func deleteProjectAuthHookHandler(store control.Store, provisioner control.Provi
 		metadata := map[string]string{"hook_type": hookType}
 		if syncer, ok := provisioner.(control.AuthHookSyncer); ok {
 			if err := syncProjectAuthHooks(r, store, syncer, ref); err != nil {
+				restoreProjectAuthHooks(r.Context(), store, ref, previousHooks)
 				control.LogProject(r.Context(), store, ref, "error", "Auth hooks sync failed", map[string]string{"hook_type": hookType, "error": err.Error()})
 				control.Audit(r.Context(), store, "project.auth_hooks_sync_failed", "project:"+ref, map[string]string{"hook_type": hookType, "error": err.Error()})
 				writeError(w, http.StatusConflict, err.Error())
@@ -2228,7 +3124,65 @@ func syncProjectAuthHooks(r *http.Request, store control.Store, syncer control.A
 	if err != nil {
 		return err
 	}
-	return syncer.SyncAuthHooks(r.Context(), ref, hooks)
+	runtimeHooks, err := materializeProjectAuthHooksForRuntime(r.Context(), store, ref, hooks)
+	if err != nil {
+		return err
+	}
+	return syncer.SyncAuthHooks(r.Context(), ref, runtimeHooks)
+}
+
+func materializeProjectAuthHooksForRuntime(ctx context.Context, store control.Store, ref string, hooks []control.ProjectAuthHook) ([]control.ProjectAuthHook, error) {
+	out := append([]control.ProjectAuthHook(nil), hooks...)
+	for index := range out {
+		out[index].Headers = cloneRuntimeConfigMap(out[index].Headers)
+		out[index].RuntimeHeaders = cloneRuntimeConfigMap(out[index].Headers)
+		if !out[index].Enabled {
+			continue
+		}
+		if handle := strings.TrimSpace(out[index].SecretHandle); handle != "" {
+			resolved, err := resolveProjectSecretHandleValue(ctx, store, ref, handle, "auth hook secret_handle")
+			if err != nil {
+				return nil, fmt.Errorf("auth hook secret_handle: %w", err)
+			}
+			out[index].RuntimeSecret = resolved
+		}
+		for key, value := range out[index].Headers {
+			if !isSensitiveAuthHookHeaderKey(key) || strings.TrimSpace(value) == "" {
+				continue
+			}
+			resolved, err := resolveProjectSecretHandleValue(ctx, store, ref, value, "auth hook header "+key)
+			if err != nil {
+				return nil, fmt.Errorf("auth hook header %s: %w", key, err)
+			}
+			out[index].RuntimeHeaders[key] = resolved
+		}
+	}
+	return out, nil
+}
+
+func restoreProjectAuthHooks(ctx context.Context, store control.Store, ref string, hooks []control.ProjectAuthHook) {
+	current, err := store.ListProjectAuthHooks(ctx, ref)
+	if err == nil {
+		for _, hook := range current {
+			_ = store.DeleteProjectAuthHook(ctx, ref, hook.HookType)
+		}
+	}
+	for _, hook := range hooks {
+		_, _ = store.CreateProjectAuthHook(ctx, ref, authHookInputFromHook(hook))
+	}
+}
+
+func authHookInputFromHook(hook control.ProjectAuthHook) control.ProjectAuthHookInput {
+	return control.ProjectAuthHookInput{
+		HookType:      hook.HookType,
+		Enabled:       hook.Enabled,
+		TargetURI:     hook.TargetURI,
+		EdgeFunction:  hook.EdgeFunction,
+		SecretHandle:  hook.SecretHandle,
+		Headers:       cloneRuntimeConfigMap(hook.Headers),
+		TimeoutMS:     hook.TimeoutMS,
+		RetryAttempts: hook.RetryAttempts,
+	}
 }
 
 func authHookTargetForMetadata(hook control.ProjectAuthHook) string {
@@ -2326,13 +3280,33 @@ func createProjectBranchHandler(store control.Store, provisioner control.Provisi
 			writeJSON(w, http.StatusAccepted, createBranchResponse{Branch: branch, Project: sanitizeProjectForResponse(project)})
 			return
 		}
-		cloneMetadata := map[string]string{"branch_ref": branch.ProjectRef}
-		if cloner, ok := provisioner.(control.BranchCloner); ok {
+		cloneMetadata := map[string]string{
+			"branch_ref": branch.ProjectRef,
+			"with_data":  fmt.Sprintf("%t", branch.WithData),
+		}
+		if branch.WithData {
+			control.LogProject(r.Context(), store, project.Ref, "info", "Branch data clone requested", map[string]string{"source_ref": sourceRef})
+		} else {
+			control.LogProject(r.Context(), store, project.Ref, "info", "Branch created without source data", map[string]string{"source_ref": sourceRef})
+		}
+		if branch.WithData {
+			cloner, ok := provisioner.(control.BranchCloner)
+			if !ok {
+				project.Status = control.ProjectError
+				project.Message = "branch data clone is not supported by this provisioner"
+				branch.Status = string(control.ProjectError)
+				_, _ = store.UpdateProjectStatus(r.Context(), project.Ref, control.ProjectError, project.Message)
+				control.LogProject(r.Context(), store, sourceRef, "error", "Branch clone failed", map[string]string{"branch_ref": branch.ProjectRef, "error": project.Message})
+				control.Audit(r.Context(), store, "project.branch_clone_failed", "project:"+sourceRef, map[string]string{"branch_ref": branch.ProjectRef, "error": project.Message})
+				writeJSON(w, http.StatusAccepted, createBranchResponse{Branch: branch, Project: sanitizeProjectForResponse(project)})
+				return
+			}
 			clone, err := cloner.CloneBranch(r.Context(), control.BranchCloneOptions{
 				SourceRef: sourceRef,
 				BranchRef: branch.ProjectRef,
 				BranchID:  branch.ID,
 				Name:      branch.Name,
+				WithData:  branch.WithData,
 				ExpiresAt: branch.ExpiresAt,
 			})
 			if err != nil {
@@ -2454,7 +3428,7 @@ func getProjectReplicaRoutingHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
-func promoteProjectReplicaHandler(store control.Store) http.HandlerFunc {
+func promoteProjectReplicaHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
 		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
@@ -2472,30 +3446,72 @@ func promoteProjectReplicaHandler(store control.Store) http.HandlerFunc {
 			writeStoreError(w, err)
 			return
 		}
-		control.LogProject(r.Context(), store, ref, "warning", "Read replica promoted", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "reason": replica.Message})
-		control.Audit(r.Context(), store, "project.replica_promote", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "reason": replica.Message})
+		if err := syncProjectReplicas(r, store, provisioner, ref); err != nil {
+			control.LogProject(r.Context(), store, ref, "error", "Read replica sync failed", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "error": err.Error()})
+			control.Audit(r.Context(), store, "project.replica_sync_failed", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "error": err.Error()})
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		routePath, err := reconcileProjectRoutes(r, store, ref)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		control.LogProject(r.Context(), store, ref, "warning", "Read replica promoted", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "reason": replica.Message, "route_path": routePath})
+		control.Audit(r.Context(), store, "project.replica_promote", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "reason": replica.Message, "route_path": routePath})
 		writeJSON(w, http.StatusOK, replica)
 	}
 }
 
-func deleteProjectReplicaHandler(store control.Store) http.HandlerFunc {
+func deleteProjectReplicaHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
 		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
 			return
 		}
 		replicaID := r.PathValue("id")
+		if syncer, ok := provisioner.(control.ReplicaSyncer); ok {
+			replicas, err := store.ListProjectReplicas(r.Context(), ref)
+			if err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			found := false
+			remaining := make([]control.ProjectReplica, 0, len(replicas))
+			for _, replica := range replicas {
+				if replica.ID == replicaID {
+					found = true
+					continue
+				}
+				remaining = append(remaining, replica)
+			}
+			if !found {
+				writeStoreError(w, fmt.Errorf("%w: replica %s for project %s", control.ErrNotFound, replicaID, ref))
+				return
+			}
+			if err := syncer.SyncReplicas(r.Context(), ref, remaining); err != nil {
+				control.LogProject(r.Context(), store, ref, "error", "Read replica sync failed", map[string]string{"replica_id": replicaID, "error": err.Error()})
+				control.Audit(r.Context(), store, "project.replica_sync_failed", "project:"+ref, map[string]string{"replica_id": replicaID, "error": err.Error()})
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
+		}
 		if err := store.DeleteProjectReplica(r.Context(), ref, replicaID); err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		control.LogProject(r.Context(), store, ref, "warning", "Read replica deleted", map[string]string{"replica_id": replicaID})
-		control.Audit(r.Context(), store, "project.replica_delete", "project:"+ref, map[string]string{"replica_id": replicaID})
+		routePath, err := reconcileProjectRoutes(r, store, ref)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		control.LogProject(r.Context(), store, ref, "warning", "Read replica deleted", map[string]string{"replica_id": replicaID, "route_path": routePath})
+		control.Audit(r.Context(), store, "project.replica_delete", "project:"+ref, map[string]string{"replica_id": replicaID, "route_path": routePath})
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func failoverProjectReplicaHandler(store control.Store) http.HandlerFunc {
+func failoverProjectReplicaHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
 		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
@@ -2512,8 +3528,19 @@ func failoverProjectReplicaHandler(store control.Store) http.HandlerFunc {
 			writeStoreError(w, err)
 			return
 		}
-		control.LogProject(r.Context(), store, ref, "warning", "Read replica failover completed", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "reason": replica.Message})
-		control.Audit(r.Context(), store, "project.replica_failover", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "reason": replica.Message})
+		if err := syncProjectReplicas(r, store, provisioner, ref); err != nil {
+			control.LogProject(r.Context(), store, ref, "error", "Read replica sync failed", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "error": err.Error()})
+			control.Audit(r.Context(), store, "project.replica_sync_failed", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "error": err.Error()})
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		routePath, err := reconcileProjectRoutes(r, store, ref)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		control.LogProject(r.Context(), store, ref, "warning", "Read replica failover completed", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "reason": replica.Message, "route_path": routePath})
+		control.Audit(r.Context(), store, "project.replica_failover", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "reason": replica.Message, "route_path": routePath})
 		writeJSON(w, http.StatusOK, replica)
 	}
 }
@@ -2542,16 +3569,7 @@ func createProjectReplicaHandler(store control.Store, provisioner control.Provis
 			writeStoreError(w, err)
 			return
 		}
-		opts := control.ReplicaOpts{
-			ID:               replica.ID,
-			Name:             replica.Name,
-			HostID:           replica.HostID,
-			Region:           replica.Region,
-			Tier:             replica.Tier,
-			ReadWeight:       replica.ReadWeight,
-			FailoverPriority: replica.FailoverPriority,
-		}
-		if err := provisioner.AddReplica(r.Context(), ref, opts); err != nil {
+		if err := syncCreatedProjectReplica(r, store, provisioner, ref, replica); err != nil {
 			replica, _ = store.UpdateProjectReplicaStatus(r.Context(), ref, replica.ID, "error", err.Error())
 			control.LogProject(r.Context(), store, ref, "error", "Read replica provision failed", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "error": err.Error()})
 			control.Audit(r.Context(), store, "project.replica_failed", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "error": err.Error()})
@@ -2563,10 +3581,47 @@ func createProjectReplicaHandler(store control.Store, provisioner control.Provis
 			writeStoreError(w, err)
 			return
 		}
-		control.LogProject(r.Context(), store, ref, "info", "Read replica provisioned", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "read_uri": replica.ReadURI})
-		control.Audit(r.Context(), store, "project.replica_create", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name})
+		routePath, err := reconcileProjectRoutes(r, store, ref)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		control.LogProject(r.Context(), store, ref, "info", "Read replica provisioned", map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "read_uri": replica.ReadURI, "route_path": routePath})
+		control.Audit(r.Context(), store, "project.replica_create", "project:"+ref, map[string]string{"replica_id": replica.ID, "replica_name": replica.Name, "route_path": routePath})
 		writeJSON(w, http.StatusCreated, replica)
 	}
+}
+
+func syncCreatedProjectReplica(r *http.Request, store control.Store, provisioner control.Provisioner, ref string, replica control.ProjectReplica) error {
+	if syncer, ok := provisioner.(control.ReplicaSyncer); ok {
+		replicas, err := store.ListProjectReplicas(r.Context(), ref)
+		if err != nil {
+			return err
+		}
+		return syncer.SyncReplicas(r.Context(), ref, replicas)
+	}
+	opts := control.ReplicaOpts{
+		ID:               replica.ID,
+		Name:             replica.Name,
+		HostID:           replica.HostID,
+		Region:           replica.Region,
+		Tier:             replica.Tier,
+		ReadWeight:       replica.ReadWeight,
+		FailoverPriority: replica.FailoverPriority,
+	}
+	return provisioner.AddReplica(r.Context(), ref, opts)
+}
+
+func syncProjectReplicas(r *http.Request, store control.Store, provisioner control.Provisioner, ref string) error {
+	syncer, ok := provisioner.(control.ReplicaSyncer)
+	if !ok {
+		return nil
+	}
+	replicas, err := store.ListProjectReplicas(r.Context(), ref)
+	if err != nil {
+		return err
+	}
+	return syncer.SyncReplicas(r.Context(), ref, replicas)
 }
 
 func listProjectFunctionsHandler(store control.Store) http.HandlerFunc {
@@ -2977,7 +4032,8 @@ func listProjectDatabaseExtensionsHandler(store control.Store) http.HandlerFunc 
 func updateProjectDatabaseExtensionHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		name := r.PathValue("name")
@@ -2986,9 +4042,28 @@ func updateProjectDatabaseExtensionHandler(store control.Store) http.HandlerFunc
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		previous, previousOK, err := getCurrentProjectDatabaseExtension(r.Context(), store, ref, name)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
 		extension, err := store.UpdateProjectDatabaseExtension(r.Context(), ref, name, payload)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if err := applyProjectDatabaseExtensionUpdate(r.Context(), project, extension); err != nil {
+			if previousOK {
+				_, _ = store.UpdateProjectDatabaseExtension(r.Context(), ref, previous.Name, control.ProjectDatabaseExtensionInput{
+					Schema:  previous.Schema,
+					Version: previous.Version,
+					Enabled: &previous.Enabled,
+				})
+			}
+			metadata := map[string]string{"name": extension.Name, "schema": extension.Schema, "enabled": fmt.Sprintf("%t", extension.Enabled), "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database extension apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_extension_update_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		metadata := map[string]string{
@@ -3000,6 +4075,36 @@ func updateProjectDatabaseExtensionHandler(store control.Store) http.HandlerFunc
 		control.Audit(r.Context(), store, "project.database_extension_update", "project:"+ref, metadata)
 		writeJSON(w, http.StatusOK, extension)
 	}
+}
+
+func getCurrentProjectDatabaseExtension(ctx context.Context, store control.Store, ref string, name string) (control.ProjectDatabaseExtension, bool, error) {
+	extensions, err := store.ListProjectDatabaseExtensions(ctx, ref)
+	if err != nil {
+		return control.ProjectDatabaseExtension{}, false, err
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	for _, extension := range extensions {
+		if extension.Name == normalized {
+			return extension, true, nil
+		}
+	}
+	return control.ProjectDatabaseExtension{}, false, nil
+}
+
+func applyProjectDatabaseExtensionUpdate(ctx context.Context, project control.Project, extension control.ProjectDatabaseExtension) error {
+	if !databaseRuntimeApplyEnabled() {
+		return nil
+	}
+	if extension.Enabled {
+		sql := "CREATE SCHEMA IF NOT EXISTS " + quoteDatabaseIdentifier(extension.Schema) + ";\n" +
+			"CREATE EXTENSION IF NOT EXISTS " + quoteDatabaseIdentifier(extension.Name) + " WITH SCHEMA " + quoteDatabaseIdentifier(extension.Schema)
+		if strings.TrimSpace(extension.Version) != "" {
+			sql += " VERSION " + quoteDatabaseLiteral(extension.Version)
+		}
+		sql += ";\n"
+		return execProjectDatabaseSQL(ctx, project, sql)
+	}
+	return execProjectDatabaseSQL(ctx, project, "DROP EXTENSION IF EXISTS "+quoteDatabaseIdentifier(extension.Name)+";\n")
 }
 
 func listProjectDatabaseCronJobsHandler(store control.Store) http.HandlerFunc {
@@ -3020,7 +4125,8 @@ func listProjectDatabaseCronJobsHandler(store control.Store) http.HandlerFunc {
 func createProjectDatabaseCronJobHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		var payload control.ProjectDatabaseCronJobInput
@@ -3031,6 +4137,14 @@ func createProjectDatabaseCronJobHandler(store control.Store) http.HandlerFunc {
 		job, err := store.CreateProjectDatabaseCronJob(r.Context(), ref, payload)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if err := applyProjectDatabaseCronJobCreate(r.Context(), project, job); err != nil {
+			_ = store.DeleteProjectDatabaseCronJob(r.Context(), ref, job.Name)
+			metadata := map[string]string{"name": job.Name, "schedule": job.Schedule, "active": fmt.Sprintf("%t", job.Active), "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database cron job apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_cron_create_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		metadata := map[string]string{
@@ -3047,10 +4161,29 @@ func createProjectDatabaseCronJobHandler(store control.Store) http.HandlerFunc {
 func deleteProjectDatabaseCronJobHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		name := r.PathValue("name")
+		job, ok, err := getCurrentProjectDatabaseCronJob(r.Context(), store, ref, name)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		if !ok {
+			if err := store.DeleteProjectDatabaseCronJob(r.Context(), ref, name); err != nil {
+				writeStoreError(w, err)
+			}
+			return
+		}
+		if err := applyProjectDatabaseCronJobDelete(r.Context(), project, job); err != nil {
+			metadata := map[string]string{"name": job.Name, "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database cron job delete apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_cron_delete_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err := store.DeleteProjectDatabaseCronJob(r.Context(), ref, name); err != nil {
 			writeStoreError(w, err)
 			return
@@ -3059,6 +4192,41 @@ func deleteProjectDatabaseCronJobHandler(store control.Store) http.HandlerFunc {
 		control.Audit(r.Context(), store, "project.database_cron_delete", "project:"+ref, map[string]string{"name": strings.ToLower(strings.TrimSpace(name))})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func getCurrentProjectDatabaseCronJob(ctx context.Context, store control.Store, ref string, name string) (control.ProjectDatabaseCronJob, bool, error) {
+	jobs, err := store.ListProjectDatabaseCronJobs(ctx, ref)
+	if err != nil {
+		return control.ProjectDatabaseCronJob{}, false, err
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	for _, job := range jobs {
+		if job.Name == normalized {
+			return job, true, nil
+		}
+	}
+	return control.ProjectDatabaseCronJob{}, false, nil
+}
+
+func applyProjectDatabaseCronJobCreate(ctx context.Context, project control.Project, job control.ProjectDatabaseCronJob) error {
+	if !databaseRuntimeApplyEnabled() || !job.Active {
+		return nil
+	}
+	sql := "CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA extensions;\n" +
+		"SELECT cron.schedule_in_database(" +
+		quoteDatabaseLiteral(job.Name) + ", " +
+		quoteDatabaseLiteral(job.Schedule) + ", " +
+		quoteDatabaseLiteral(job.Command) + ", " +
+		quoteDatabaseLiteral(job.Database) + ", " +
+		quoteDatabaseLiteral(job.Username) + ", true);\n"
+	return execProjectDatabaseSQL(ctx, project, sql)
+}
+
+func applyProjectDatabaseCronJobDelete(ctx context.Context, project control.Project, job control.ProjectDatabaseCronJob) error {
+	if !databaseRuntimeApplyEnabled() || !job.Active {
+		return nil
+	}
+	return execProjectDatabaseSQL(ctx, project, "SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = "+quoteDatabaseLiteral(job.Name)+";\n")
 }
 
 func maskDatabaseCronJobs(jobs []control.ProjectDatabaseCronJob) []control.ProjectDatabaseCronJob {
@@ -3101,7 +4269,8 @@ func listProjectDatabaseQueuesHandler(store control.Store) http.HandlerFunc {
 func createProjectDatabaseQueueHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		var payload control.ProjectDatabaseQueueInput
@@ -3112,6 +4281,14 @@ func createProjectDatabaseQueueHandler(store control.Store) http.HandlerFunc {
 		queue, err := store.CreateProjectDatabaseQueue(r.Context(), ref, payload)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if err := applyProjectDatabaseQueueCreate(r.Context(), project, queue); err != nil {
+			_ = store.DeleteProjectDatabaseQueue(r.Context(), ref, queue.Name)
+			metadata := map[string]string{"name": queue.Name, "schema": queue.Schema, "active": fmt.Sprintf("%t", queue.Active), "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database queue apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_queue_create_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		metadata := map[string]string{
@@ -3128,10 +4305,29 @@ func createProjectDatabaseQueueHandler(store control.Store) http.HandlerFunc {
 func deleteProjectDatabaseQueueHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		name := r.PathValue("name")
+		queue, ok, err := getCurrentProjectDatabaseQueue(r.Context(), store, ref, name)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		if !ok {
+			if err := store.DeleteProjectDatabaseQueue(r.Context(), ref, name); err != nil {
+				writeStoreError(w, err)
+			}
+			return
+		}
+		if err := applyProjectDatabaseQueueDelete(r.Context(), project, queue); err != nil {
+			metadata := map[string]string{"name": queue.Name, "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database queue delete apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_queue_delete_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err := store.DeleteProjectDatabaseQueue(r.Context(), ref, name); err != nil {
 			writeStoreError(w, err)
 			return
@@ -3140,6 +4336,44 @@ func deleteProjectDatabaseQueueHandler(store control.Store) http.HandlerFunc {
 		control.Audit(r.Context(), store, "project.database_queue_delete", "project:"+ref, map[string]string{"name": strings.ToLower(strings.TrimSpace(name))})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func getCurrentProjectDatabaseQueue(ctx context.Context, store control.Store, ref string, name string) (control.ProjectDatabaseQueue, bool, error) {
+	queues, err := store.ListProjectDatabaseQueues(ctx, ref)
+	if err != nil {
+		return control.ProjectDatabaseQueue{}, false, err
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	for _, queue := range queues {
+		if queue.Name == normalized {
+			return queue, true, nil
+		}
+	}
+	return control.ProjectDatabaseQueue{}, false, nil
+}
+
+func applyProjectDatabaseQueueCreate(ctx context.Context, project control.Project, queue control.ProjectDatabaseQueue) error {
+	if !databaseRuntimeApplyEnabled() || !queue.Active {
+		return nil
+	}
+	sql := "CREATE SCHEMA IF NOT EXISTS " + quoteDatabaseIdentifier(queue.Schema) + ";\n" +
+		"CREATE EXTENSION IF NOT EXISTS pgmq WITH SCHEMA " + quoteDatabaseIdentifier(queue.Schema) + ";\n"
+	if strings.TrimSpace(queue.DeadLetterQueue) != "" {
+		sql += "SELECT pgmq.create(" + quoteDatabaseLiteral(queue.DeadLetterQueue) + ");\n"
+	}
+	sql += "SELECT pgmq.create(" + quoteDatabaseLiteral(queue.Name) + ");\n"
+	return execProjectDatabaseSQL(ctx, project, sql)
+}
+
+func applyProjectDatabaseQueueDelete(ctx context.Context, project control.Project, queue control.ProjectDatabaseQueue) error {
+	if !databaseRuntimeApplyEnabled() || !queue.Active {
+		return nil
+	}
+	sql := "SELECT pgmq.drop_queue(" + quoteDatabaseLiteral(queue.Name) + ");\n"
+	if strings.TrimSpace(queue.DeadLetterQueue) != "" {
+		sql += "SELECT pgmq.drop_queue(" + quoteDatabaseLiteral(queue.DeadLetterQueue) + ");\n"
+	}
+	return execProjectDatabaseSQL(ctx, project, sql)
 }
 
 func maskDatabaseQueues(queues []control.ProjectDatabaseQueue) []control.ProjectDatabaseQueue {
@@ -3182,7 +4416,8 @@ func listProjectDatabaseWebhooksHandler(store control.Store) http.HandlerFunc {
 func createProjectDatabaseWebhookHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		var payload control.ProjectDatabaseWebhookInput
@@ -3193,6 +4428,14 @@ func createProjectDatabaseWebhookHandler(store control.Store) http.HandlerFunc {
 		webhook, err := store.CreateProjectDatabaseWebhook(r.Context(), ref, payload)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if err := applyProjectDatabaseWebhookCreate(r.Context(), store, project, webhook); err != nil {
+			_ = store.DeleteProjectDatabaseWebhook(r.Context(), ref, webhook.Name)
+			metadata := map[string]string{"name": webhook.Name, "table": webhook.Schema + "." + webhook.Table, "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database webhook apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_webhook_create_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		metadata := map[string]string{
@@ -3209,10 +4452,29 @@ func createProjectDatabaseWebhookHandler(store control.Store) http.HandlerFunc {
 func deleteProjectDatabaseWebhookHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		name := r.PathValue("name")
+		webhook, ok, err := getCurrentProjectDatabaseWebhook(r.Context(), store, ref, name)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		if !ok {
+			if err := store.DeleteProjectDatabaseWebhook(r.Context(), ref, name); err != nil {
+				writeStoreError(w, err)
+			}
+			return
+		}
+		if err := applyProjectDatabaseWebhookDelete(r.Context(), project, webhook); err != nil {
+			metadata := map[string]string{"name": webhook.Name, "table": webhook.Schema + "." + webhook.Table, "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database webhook delete apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_webhook_delete_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err := store.DeleteProjectDatabaseWebhook(r.Context(), ref, name); err != nil {
 			writeStoreError(w, err)
 			return
@@ -3221,6 +4483,117 @@ func deleteProjectDatabaseWebhookHandler(store control.Store) http.HandlerFunc {
 		control.Audit(r.Context(), store, "project.database_webhook_delete", "project:"+ref, map[string]string{"name": strings.ToLower(strings.TrimSpace(name))})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func getCurrentProjectDatabaseWebhook(ctx context.Context, store control.Store, ref string, name string) (control.ProjectDatabaseWebhook, bool, error) {
+	webhooks, err := store.ListProjectDatabaseWebhooks(ctx, ref)
+	if err != nil {
+		return control.ProjectDatabaseWebhook{}, false, err
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	for _, webhook := range webhooks {
+		if webhook.Name == normalized {
+			return webhook, true, nil
+		}
+	}
+	return control.ProjectDatabaseWebhook{}, false, nil
+}
+
+func applyProjectDatabaseWebhookCreate(ctx context.Context, store control.Store, project control.Project, webhook control.ProjectDatabaseWebhook) error {
+	if !databaseRuntimeApplyEnabled() || !webhook.Active {
+		return nil
+	}
+	if webhook.HTTPMethod != "POST" {
+		return fmt.Errorf("active database webhooks currently require http_method POST for pg_net delivery")
+	}
+	headers, err := databaseWebhookRuntimeHeaders(ctx, store, project.Ref, webhook)
+	if err != nil {
+		return err
+	}
+	headersJSON, err := json.Marshal(headers)
+	if err != nil {
+		return err
+	}
+	functionName := databaseWebhookFunctionName(webhook)
+	sql := "CREATE SCHEMA IF NOT EXISTS supadupa;\n" +
+		"CREATE EXTENSION IF NOT EXISTS pg_net;\n" +
+		"CREATE OR REPLACE FUNCTION supadupa." + quoteDatabaseIdentifier(functionName) + "()\n" +
+		"RETURNS trigger\n" +
+		"LANGUAGE plpgsql\n" +
+		"SECURITY DEFINER\n" +
+		"SET search_path = public, net, pg_temp\n" +
+		"AS $function$\n" +
+		"DECLARE\n" +
+		"  request_payload jsonb;\n" +
+		"  request_headers jsonb := " + quoteDatabaseLiteral(string(headersJSON)) + "::jsonb;\n" +
+		"BEGIN\n" +
+		"  request_payload := jsonb_build_object(\n" +
+		"    'type', TG_OP,\n" +
+		"    'table', TG_TABLE_NAME,\n" +
+		"    'schema', TG_TABLE_SCHEMA,\n" +
+		"    'record', CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE to_jsonb(NEW) END,\n" +
+		"    'old_record', CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN to_jsonb(OLD) ELSE NULL END\n" +
+		"  );\n" +
+		"  PERFORM net.http_post(\n" +
+		"    url := " + quoteDatabaseLiteral(webhook.Endpoint) + ",\n" +
+		"    body := request_payload,\n" +
+		"    headers := request_headers,\n" +
+		"    timeout_milliseconds := " + strconv.Itoa(webhook.TimeoutSeconds*1000) + "\n" +
+		"  );\n" +
+		"  RETURN COALESCE(NEW, OLD);\n" +
+		"END;\n" +
+		"$function$;\n"
+	for _, event := range webhook.Events {
+		sql += "DROP TRIGGER IF EXISTS " + quoteDatabaseIdentifier(databaseWebhookTriggerName(webhook, event)) + " ON " + quoteDatabaseIdentifier(webhook.Schema) + "." + quoteDatabaseIdentifier(webhook.Table) + ";\n" +
+			"CREATE TRIGGER " + quoteDatabaseIdentifier(databaseWebhookTriggerName(webhook, event)) + "\n" +
+			"AFTER " + strings.ToUpper(event) + " ON " + quoteDatabaseIdentifier(webhook.Schema) + "." + quoteDatabaseIdentifier(webhook.Table) + "\n" +
+			"FOR EACH ROW EXECUTE FUNCTION supadupa." + quoteDatabaseIdentifier(functionName) + "();\n"
+	}
+	return execProjectDatabaseSQL(ctx, project, sql)
+}
+
+func applyProjectDatabaseWebhookDelete(ctx context.Context, project control.Project, webhook control.ProjectDatabaseWebhook) error {
+	if !databaseRuntimeApplyEnabled() || !webhook.Active {
+		return nil
+	}
+	tableName := quoteDatabaseIdentifier(webhook.Schema) + "." + quoteDatabaseIdentifier(webhook.Table)
+	sql := ""
+	for _, event := range webhook.Events {
+		sql += "DO $drop_webhook$\n" +
+			"BEGIN\n" +
+			"  IF to_regclass(" + quoteDatabaseLiteral(webhook.Schema+"."+webhook.Table) + ") IS NOT NULL THEN\n" +
+			"    EXECUTE " + quoteDatabaseLiteral("DROP TRIGGER IF EXISTS "+quoteDatabaseIdentifier(databaseWebhookTriggerName(webhook, event))+" ON "+tableName) + ";\n" +
+			"  END IF;\n" +
+			"END\n" +
+			"$drop_webhook$;\n"
+	}
+	sql += "DROP FUNCTION IF EXISTS supadupa." + quoteDatabaseIdentifier(databaseWebhookFunctionName(webhook)) + "();\n"
+	return execProjectDatabaseSQL(ctx, project, sql)
+}
+
+func databaseWebhookRuntimeHeaders(ctx context.Context, store control.Store, ref string, webhook control.ProjectDatabaseWebhook) (map[string]string, error) {
+	headers := map[string]string{"Content-Type": "application/json"}
+	for key, value := range webhook.Headers {
+		trimmed := strings.TrimSpace(value)
+		if isSensitiveLogDrainConfigKey(key) && trimmed != "" {
+			resolved, err := resolveProjectSecretHandleValue(ctx, store, ref, trimmed, "webhook header "+key)
+			if err != nil {
+				return nil, err
+			}
+			headers[key] = resolved
+			continue
+		}
+		headers[key] = trimmed
+	}
+	return headers, nil
+}
+
+func databaseWebhookFunctionName(webhook control.ProjectDatabaseWebhook) string {
+	return "webhook_" + strings.ReplaceAll(webhook.Name, "-", "_")
+}
+
+func databaseWebhookTriggerName(webhook control.ProjectDatabaseWebhook, event string) string {
+	return "supadupa_webhook_" + strings.ReplaceAll(webhook.Name, "-", "_") + "_" + strings.ToLower(event)
 }
 
 func maskDatabaseWebhooks(webhooks []control.ProjectDatabaseWebhook) []control.ProjectDatabaseWebhook {
@@ -3272,7 +4645,8 @@ func listProjectDatabaseSchemasHandler(store control.Store) http.HandlerFunc {
 func createProjectDatabaseSchemaHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		var payload control.ProjectDatabaseSchemaInput
@@ -3283,6 +4657,14 @@ func createProjectDatabaseSchemaHandler(store control.Store) http.HandlerFunc {
 		schema, err := store.CreateProjectDatabaseSchema(r.Context(), ref, payload)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if err := applyProjectDatabaseSchemaCreate(r.Context(), project, schema); err != nil {
+			_ = store.DeleteProjectDatabaseSchema(r.Context(), ref, schema.Name, schema.Version)
+			metadata := map[string]string{"name": schema.Name, "version": schema.Version, "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Declarative schema apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_schema_create_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		metadata := map[string]string{
@@ -3296,6 +4678,85 @@ func createProjectDatabaseSchemaHandler(store control.Store) http.HandlerFunc {
 		control.Audit(r.Context(), store, "project.database_schema_create", "project:"+ref, metadata)
 		writeJSON(w, http.StatusCreated, maskDatabaseSchema(schema))
 	}
+}
+
+func applyProjectDatabaseSchemaCreate(ctx context.Context, project control.Project, schema control.ProjectDatabaseSchema) error {
+	if !databaseRuntimeApplyEnabled() || !schema.Active {
+		return nil
+	}
+	return execProjectDatabaseSQL(ctx, project, schema.SQL)
+}
+
+func databaseRuntimeApplyEnabled() bool {
+	if value := strings.TrimSpace(os.Getenv("SUPADUPA_DATABASE_APPLY")); value != "" {
+		return envBoolValue(value)
+	}
+	return envBoolValue(os.Getenv("SUPADUPA_COMPOSE_APPLY"))
+}
+
+func execProjectDatabaseSQL(ctx context.Context, project control.Project, sql string) error {
+	if strings.TrimSpace(sql) == "" {
+		return fmt.Errorf("database schema sql is required")
+	}
+	timeout := databaseApplyTimeout()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	projectDir := filepath.Join(envOrDefault("SUPADUPA_PROJECT_ROOT", "./runtime/projects"), project.Ref)
+	composeFile := filepath.Join(projectDir, "compose.yaml")
+	commandParts := strings.Fields(envOrDefault("SUPADUPA_COMPOSE_COMMAND", "docker compose"))
+	if len(commandParts) == 0 {
+		return fmt.Errorf("SUPADUPA_COMPOSE_COMMAND is empty")
+	}
+	args := append(commandParts[1:], "-p", project.Ref, "-f", composeFile, "exec", "-T", "db", "sh", "-c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -v ON_ERROR_STOP=1 -U supabase_admin -d postgres`)
+	cmd := exec.CommandContext(ctx, commandParts[0], args...)
+	cmd.Dir = projectDir
+	cmd.Stdin = strings.NewReader(sql)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if len(detail) > 4096 {
+			detail = detail[:4096]
+		}
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("database SQL apply failed: %s", detail)
+	}
+	return nil
+}
+
+func quoteDatabaseIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func quoteDatabaseLiteral(value string) string {
+	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
+}
+
+func databaseApplyTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("SUPADUPA_DATABASE_APPLY_TIMEOUT"))
+	if value == "" {
+		return time.Minute
+	}
+	duration, err := time.ParseDuration(value)
+	if err == nil {
+		return duration
+	}
+	seconds, err := strconv.Atoi(value)
+	if err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	return time.Minute
+}
+
+func envOrDefault(key string, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func deleteProjectDatabaseSchemaHandler(store control.Store) http.HandlerFunc {
@@ -3357,7 +4818,8 @@ func listProjectDatabaseRolesHandler(store control.Store) http.HandlerFunc {
 func createProjectDatabaseRoleHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		var payload control.ProjectDatabaseRoleInput
@@ -3368,6 +4830,14 @@ func createProjectDatabaseRoleHandler(store control.Store) http.HandlerFunc {
 		role, err := store.CreateProjectDatabaseRole(r.Context(), ref, payload)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if err := applyProjectDatabaseRoleCreate(r.Context(), store, project, role); err != nil {
+			_ = store.DeleteProjectDatabaseRole(r.Context(), ref, role.Name)
+			metadata := map[string]string{"name": role.Name, "login": fmt.Sprintf("%t", role.Login), "bypass_rls": fmt.Sprintf("%t", role.BypassRLS), "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database role apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_role_create_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		metadata := map[string]string{
@@ -3384,10 +4854,29 @@ func createProjectDatabaseRoleHandler(store control.Store) http.HandlerFunc {
 func deleteProjectDatabaseRoleHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		name := r.PathValue("name")
+		role, ok, err := getCurrentProjectDatabaseRole(r.Context(), store, ref, name)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		if !ok {
+			if err := store.DeleteProjectDatabaseRole(r.Context(), ref, name); err != nil {
+				writeStoreError(w, err)
+			}
+			return
+		}
+		if err := applyProjectDatabaseRoleDelete(r.Context(), project, role); err != nil {
+			metadata := map[string]string{"name": role.Name, "error": err.Error()}
+			control.LogProject(r.Context(), store, ref, "error", "Database role delete apply failed", metadata)
+			control.Audit(r.Context(), store, "project.database_role_delete_failed", "project:"+ref, metadata)
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err := store.DeleteProjectDatabaseRole(r.Context(), ref, name); err != nil {
 			writeStoreError(w, err)
 			return
@@ -3396,6 +4885,141 @@ func deleteProjectDatabaseRoleHandler(store control.Store) http.HandlerFunc {
 		control.Audit(r.Context(), store, "project.database_role_delete", "project:"+ref, map[string]string{"name": strings.ToLower(strings.TrimSpace(name))})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func getCurrentProjectDatabaseRole(ctx context.Context, store control.Store, ref string, name string) (control.ProjectDatabaseRole, bool, error) {
+	roles, err := store.ListProjectDatabaseRoles(ctx, ref)
+	if err != nil {
+		return control.ProjectDatabaseRole{}, false, err
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	for _, role := range roles {
+		if role.Name == normalized {
+			return role, true, nil
+		}
+	}
+	return control.ProjectDatabaseRole{}, false, nil
+}
+
+func applyProjectDatabaseRoleCreate(ctx context.Context, store control.Store, project control.Project, role control.ProjectDatabaseRole) error {
+	if !databaseRuntimeApplyEnabled() {
+		return nil
+	}
+	password := ""
+	if role.Login {
+		resolved, err := resolveProjectSecretHandle(ctx, store, project.Ref, role.PasswordSecretHandle)
+		if err != nil {
+			return err
+		}
+		password = resolved
+	}
+	sql := "DO $$ BEGIN\n" +
+		"IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = " + quoteDatabaseLiteral(role.Name) + ") THEN\n" +
+		"CREATE ROLE " + quoteDatabaseIdentifier(role.Name) + ";\n" +
+		"END IF;\n" +
+		"END $$;\n" +
+		"ALTER ROLE " + quoteDatabaseIdentifier(role.Name)
+	if role.Login {
+		sql += " LOGIN PASSWORD " + quoteDatabaseLiteral(password)
+	} else {
+		sql += " NOLOGIN"
+	}
+	if role.Inherit {
+		sql += " INHERIT"
+	} else {
+		sql += " NOINHERIT"
+	}
+	if role.BypassRLS {
+		sql += " BYPASSRLS"
+	} else {
+		sql += " NOBYPASSRLS"
+	}
+	if role.ConnectionLimit != 0 {
+		sql += " CONNECTION LIMIT " + strconv.Itoa(role.ConnectionLimit)
+	}
+	sql += ";\n"
+	for _, member := range role.MemberOf {
+		sql += "GRANT " + quoteDatabaseIdentifier(member) + " TO " + quoteDatabaseIdentifier(role.Name) + ";\n"
+	}
+	for schema, grants := range role.SchemaGrants {
+		schemaPrivileges, tablePrivileges := databaseRoleGrantPrivileges(grants)
+		if len(schemaPrivileges) > 0 {
+			sql += "GRANT " + strings.Join(schemaPrivileges, ", ") + " ON SCHEMA " + quoteDatabaseIdentifier(schema) + " TO " + quoteDatabaseIdentifier(role.Name) + ";\n"
+		}
+		if len(tablePrivileges) > 0 {
+			sql += "GRANT " + strings.Join(tablePrivileges, ", ") + " ON ALL TABLES IN SCHEMA " + quoteDatabaseIdentifier(schema) + " TO " + quoteDatabaseIdentifier(role.Name) + ";\n"
+		}
+	}
+	return execProjectDatabaseSQL(ctx, project, sql)
+}
+
+func applyProjectDatabaseRoleDelete(ctx context.Context, project control.Project, role control.ProjectDatabaseRole) error {
+	if !databaseRuntimeApplyEnabled() {
+		return nil
+	}
+	sql := ""
+	for schema, grants := range role.SchemaGrants {
+		schemaPrivileges, tablePrivileges := databaseRoleGrantPrivileges(grants)
+		if len(tablePrivileges) > 0 {
+			sql += "REVOKE " + strings.Join(tablePrivileges, ", ") + " ON ALL TABLES IN SCHEMA " + quoteDatabaseIdentifier(schema) + " FROM " + quoteDatabaseIdentifier(role.Name) + ";\n"
+		}
+		if len(schemaPrivileges) > 0 {
+			sql += "REVOKE " + strings.Join(schemaPrivileges, ", ") + " ON SCHEMA " + quoteDatabaseIdentifier(schema) + " FROM " + quoteDatabaseIdentifier(role.Name) + ";\n"
+		}
+	}
+	for _, member := range role.MemberOf {
+		sql += "REVOKE " + quoteDatabaseIdentifier(member) + " FROM " + quoteDatabaseIdentifier(role.Name) + ";\n"
+	}
+	sql += "DROP ROLE IF EXISTS " + quoteDatabaseIdentifier(role.Name) + ";\n"
+	return execProjectDatabaseSQL(ctx, project, sql)
+}
+
+func databaseRoleGrantPrivileges(grants string) ([]string, []string) {
+	schemaPrivileges := []string{}
+	tablePrivileges := []string{}
+	for _, grant := range strings.Split(grants, ",") {
+		switch strings.ToLower(strings.TrimSpace(grant)) {
+		case "usage":
+			schemaPrivileges = append(schemaPrivileges, "USAGE")
+		case "create":
+			schemaPrivileges = append(schemaPrivileges, "CREATE")
+		case "select":
+			tablePrivileges = append(tablePrivileges, "SELECT")
+		case "insert":
+			tablePrivileges = append(tablePrivileges, "INSERT")
+		case "update":
+			tablePrivileges = append(tablePrivileges, "UPDATE")
+		case "delete":
+			tablePrivileges = append(tablePrivileges, "DELETE")
+		case "all":
+			schemaPrivileges = append(schemaPrivileges, "ALL PRIVILEGES")
+			tablePrivileges = append(tablePrivileges, "ALL PRIVILEGES")
+		}
+	}
+	return schemaPrivileges, tablePrivileges
+}
+
+func resolveProjectSecretHandle(ctx context.Context, store control.Store, ref string, handle string) (string, error) {
+	return resolveProjectSecretHandleValue(ctx, store, ref, handle, "password_secret_handle")
+}
+
+func resolveProjectSecretHandleValue(ctx context.Context, store control.Store, ref string, handle string, label string) (string, error) {
+	prefix := "secret://projects/" + ref + "/"
+	if !strings.HasPrefix(handle, prefix) {
+		return "", fmt.Errorf("%s must reference project %s", label, ref)
+	}
+	kind := strings.TrimSpace(strings.TrimPrefix(handle, prefix))
+	if strings.Contains(kind, "/") || kind == "" {
+		return "", fmt.Errorf("%s %s is not revealable by this control plane", label, handle)
+	}
+	secret, err := store.RevealProjectSecret(ctx, ref, kind)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(secret.Value) == "" {
+		return "", fmt.Errorf("%s %s has no value", label, handle)
+	}
+	return secret.Value, nil
 }
 
 func maskDatabaseRoles(roles []control.ProjectDatabaseRole) []control.ProjectDatabaseRole {
@@ -3441,7 +5065,8 @@ func listProjectStorageBucketsHandler(store control.Store) http.HandlerFunc {
 func createProjectStorageBucketHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		var payload control.ProjectStorageBucketInput
@@ -3452,6 +5077,13 @@ func createProjectStorageBucketHandler(store control.Store) http.HandlerFunc {
 		bucket, err := store.CreateProjectStorageBucket(r.Context(), ref, payload)
 		if err != nil {
 			writeStoreError(w, err)
+			return
+		}
+		if err := applyProjectStorageBucketCreate(r.Context(), store, project, bucket); err != nil {
+			_ = store.DeleteProjectStorageBucket(r.Context(), ref, bucket.Name)
+			control.LogProject(r.Context(), store, ref, "error", "Storage bucket data-plane create failed", map[string]string{"name": bucket.Name, "error": err.Error()})
+			control.Audit(r.Context(), store, "project.storage_bucket_create_failed", "project:"+ref, map[string]string{"name": bucket.Name, "error": err.Error()})
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		metadata := map[string]string{
@@ -3468,10 +5100,17 @@ func createProjectStorageBucketHandler(store control.Store) http.HandlerFunc {
 func deleteProjectStorageBucketHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		name := r.PathValue("name")
+		if err := applyProjectStorageBucketDelete(r.Context(), store, project, name); err != nil {
+			control.LogProject(r.Context(), store, ref, "error", "Storage bucket data-plane delete failed", map[string]string{"name": strings.ToLower(strings.TrimSpace(name)), "error": err.Error()})
+			control.Audit(r.Context(), store, "project.storage_bucket_delete_failed", "project:"+ref, map[string]string{"name": strings.ToLower(strings.TrimSpace(name)), "error": err.Error()})
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err := store.DeleteProjectStorageBucket(r.Context(), ref, name); err != nil {
 			writeStoreError(w, err)
 			return
@@ -3480,6 +5119,136 @@ func deleteProjectStorageBucketHandler(store control.Store) http.HandlerFunc {
 		control.Audit(r.Context(), store, "project.storage_bucket_delete", "project:"+ref, map[string]string{"name": strings.ToLower(strings.TrimSpace(name))})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func applyProjectStorageBucketCreate(ctx context.Context, store control.Store, project control.Project, bucket control.ProjectStorageBucket) error {
+	if !storageDataPlaneApplyEnabled() {
+		return nil
+	}
+	payload := map[string]any{
+		"id":                 bucket.Name,
+		"name":               bucket.Name,
+		"public":             bucket.Public,
+		"file_size_limit":    bucket.FileSizeLimit,
+		"allowed_mime_types": bucket.AllowedMimeTypes,
+		"avif_autodetection": bucket.AvifAutodetection,
+	}
+	if strings.TrimSpace(bucket.CacheControl) != "" {
+		payload["cache_control"] = bucket.CacheControl
+	}
+	return projectStorageDataPlaneRequest(ctx, store, project, http.MethodPost, "/storage/v1/bucket", payload, false)
+}
+
+func applyProjectStorageBucketDelete(ctx context.Context, store control.Store, project control.Project, name string) error {
+	if !storageDataPlaneApplyEnabled() {
+		return nil
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" {
+		return fmt.Errorf("storage bucket name is required")
+	}
+	return projectStorageDataPlaneRequest(ctx, store, project, http.MethodDelete, "/storage/v1/bucket/"+url.PathEscape(normalized), nil, true)
+}
+
+func storageDataPlaneApplyEnabled() bool {
+	if value := strings.TrimSpace(os.Getenv("SUPADUPA_STORAGE_APPLY")); value != "" {
+		return envBoolValue(value)
+	}
+	return envBoolValue(os.Getenv("SUPADUPA_COMPOSE_APPLY")) || envBoolValue(os.Getenv("SUPADUPA_K8S_APPLY"))
+}
+
+func envBoolValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func envFalseValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "0", "false", "no", "n", "off":
+		return true
+	default:
+		return false
+	}
+}
+
+func projectStorageDataPlaneRequest(ctx context.Context, store control.Store, project control.Project, method string, path string, payload any, allowNotFound bool) error {
+	serviceRole, err := projectServiceRoleKey(ctx, store, project.Ref)
+	if err != nil {
+		return err
+	}
+	var body io.Reader = http.NoBody
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, projectStorageDataPlaneBaseURL(project)+path, body)
+	if err != nil {
+		return err
+	}
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	request.Header.Set("apikey", serviceRole)
+	request.Header.Set("Authorization", "Bearer "+serviceRole)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("storage data-plane request failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		return nil
+	}
+	detail, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+	if allowNotFound && storageDataPlaneNotFound(response.StatusCode, detail) {
+		return nil
+	}
+	return fmt.Errorf("storage data-plane %s %s returned HTTP %d: %s", method, path, response.StatusCode, strings.TrimSpace(string(detail)))
+}
+
+func storageDataPlaneNotFound(status int, detail []byte) bool {
+	if status == http.StatusNotFound {
+		return true
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(detail, &payload); err != nil {
+		return false
+	}
+	statusCode := strings.TrimSpace(fmt.Sprint(payload["statusCode"]))
+	message := strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["message"])))
+	return statusCode == "404" || strings.Contains(message, "bucket not found")
+}
+
+func projectServiceRoleKey(ctx context.Context, store control.Store, ref string) (string, error) {
+	secrets, err := store.EnsureProjectSecrets(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	for _, secret := range secrets {
+		if secret.Kind == "service_role" && strings.TrimSpace(secret.Value) != "" {
+			return secret.Value, nil
+		}
+	}
+	return "", fmt.Errorf("project %s service_role key is not available", ref)
+}
+
+func projectStorageDataPlaneBaseURL(project control.Project) string {
+	if configured := strings.TrimRight(strings.TrimSpace(os.Getenv("SUPADUPA_STORAGE_APPLY_BASE_URL")), "/"); configured != "" {
+		configured = strings.ReplaceAll(configured, "{{ref}}", project.Ref)
+		configured = strings.ReplaceAll(configured, "{{project_ref}}", project.Ref)
+		configured = strings.ReplaceAll(configured, "{{domain}}", project.Spec.Domain)
+		return configured
+	}
+	return fmt.Sprintf("https://%s.%s", project.Ref, project.Spec.Domain)
 }
 
 func maskStorageBuckets(buckets []control.ProjectStorageBucket) []control.ProjectStorageBucket {
@@ -4037,6 +5806,46 @@ func revealProjectSecretHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
+func upsertProjectSecretHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ref := r.PathValue("ref")
+		kind := r.PathValue("kind")
+		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+			return
+		}
+		var payload control.ProjectSecretInput
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		secret, err := store.UpsertProjectSecret(r.Context(), ref, kind, payload)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		control.LogProject(r.Context(), store, ref, "warning", "Secret updated", map[string]string{"kind": secret.Kind})
+		control.Audit(r.Context(), store, "project.secret_upsert", "project:"+ref, map[string]string{"kind": secret.Kind})
+		writeJSON(w, http.StatusOK, secret)
+	}
+}
+
+func deleteProjectSecretHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ref := r.PathValue("ref")
+		kind := r.PathValue("kind")
+		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+			return
+		}
+		if err := store.DeleteProjectSecret(r.Context(), ref, kind); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		control.LogProject(r.Context(), store, ref, "warning", "Secret deleted", map[string]string{"kind": strings.ToLower(strings.TrimSpace(kind))})
+		control.Audit(r.Context(), store, "project.secret_delete", "project:"+ref, map[string]string{"kind": strings.ToLower(strings.TrimSpace(kind))})
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func auditProjectSecretCopyHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
@@ -4118,14 +5927,19 @@ func triggerBackupHandler(store control.Store) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		backup, err := backupService.TriggerLogicalBackup(r.Context(), store, project)
+		policy, err := store.GetBackupPolicy(r.Context(), project.Ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		backup, err := backupService.TriggerBackupForKind(r.Context(), store, project, policy.Kind)
 		if err != nil {
 			control.LogProject(r.Context(), store, project.Ref, "error", "Backup failed", map[string]string{"error": err.Error()})
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
-		control.LogProject(r.Context(), store, project.Ref, "info", "Logical backup completed", map[string]string{"backup_id": backup.ID})
-		control.Audit(r.Context(), store, "project.backup", "project:"+project.Ref, map[string]string{"backup_id": backup.ID})
+		control.LogProject(r.Context(), store, project.Ref, "info", strings.Title(backup.Kind)+" backup completed", map[string]string{"backup_id": backup.ID, "kind": backup.Kind})
+		control.Audit(r.Context(), store, "project.backup", "project:"+project.Ref, map[string]string{"backup_id": backup.ID, "kind": backup.Kind})
 		writeJSON(w, http.StatusCreated, backup)
 	}
 }
@@ -4150,6 +5964,59 @@ func restoreBackupHandler(store control.Store) http.HandlerFunc {
 		control.LogProject(r.Context(), store, ref, "warning", "Restore "+restore.State, map[string]string{"backup_id": backup.ID, "restore_path": restore.Path})
 		control.Audit(r.Context(), store, "project.restore", "project:"+ref, map[string]string{"backup_id": backup.ID, "state": restore.State})
 		writeJSON(w, http.StatusAccepted, restoreBackupResponse{Backup: backup, RestorePath: restore.Path, RestoreState: restore.State})
+	}
+}
+
+func restorePITRBackupHandler(store control.Store) http.HandlerFunc {
+	backupService := control.NewBackupService("")
+	return func(w http.ResponseWriter, r *http.Request) {
+		ref := r.PathValue("ref")
+		if _, ok := requireProjectRole(w, r, store, ref, roleDeveloper); !ok {
+			return
+		}
+		var payload restorePITRBackupRequest
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		targetUnix, err := strconv.ParseInt(strings.TrimSpace(payload.RecoveryTimeTargetUnix), 10, 64)
+		if err != nil || targetUnix <= 0 {
+			writeError(w, http.StatusBadRequest, "recovery_time_target_unix must be a Unix timestamp string")
+			return
+		}
+		result, recoverability, err := backupService.RestoreToTime(r.Context(), store, ref, time.Unix(targetUnix, 0).UTC())
+		if err != nil {
+			if recoverability.ProjectRef != "" {
+				writeJSON(w, http.StatusConflict, restorePITRBackupUnavailableResponse{Error: err.Error(), Recoverability: recoverability})
+				return
+			}
+			writeStoreError(w, err)
+			return
+		}
+		control.LogProject(r.Context(), store, ref, "warning", "PITR restore "+result.State, map[string]string{"restore_path": result.Path, "recovery_time_target_unix": fmt.Sprintf("%d", result.RecoveryTimeTargetUnix)})
+		control.Audit(r.Context(), store, "project.restore_pitr", "project:"+ref, map[string]string{"state": result.State, "recovery_time_target_unix": fmt.Sprintf("%d", result.RecoveryTimeTargetUnix)})
+		writeJSON(w, http.StatusCreated, restorePITRBackupResponse{
+			ProjectRef:             ref,
+			RecoveryTimeTargetUnix: result.RecoveryTimeTargetUnix,
+			RecoveryTimeTarget:     result.RecoveryTimeTarget,
+			RestorePath:            result.Path,
+			RestoreState:           result.State,
+		})
+	}
+}
+
+func getProjectRecoverabilityHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ref := r.PathValue("ref")
+		if _, ok := requireProjectRole(w, r, store, ref, roleViewer); !ok {
+			return
+		}
+		status, err := control.ProjectRecoverability(r.Context(), store, ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
 	}
 }
 
@@ -4184,8 +6051,8 @@ func updateBackupPolicyHandler(store control.Store) http.HandlerFunc {
 			writeStoreError(w, err)
 			return
 		}
-		control.LogProject(r.Context(), store, ref, "info", "Backup policy updated", map[string]string{"schedule": policy.Schedule})
-		control.Audit(r.Context(), store, "project.backup_policy_update", "project:"+ref, map[string]string{"enabled": fmt.Sprintf("%t", policy.Enabled), "schedule": policy.Schedule})
+		control.LogProject(r.Context(), store, ref, "info", "Backup policy updated", map[string]string{"schedule": policy.Schedule, "storage_target_id": policy.StorageTargetID})
+		control.Audit(r.Context(), store, "project.backup_policy_update", "project:"+ref, map[string]string{"enabled": fmt.Sprintf("%t", policy.Enabled), "schedule": policy.Schedule, "storage_target_id": policy.StorageTargetID})
 		writeJSON(w, http.StatusOK, policy)
 	}
 }
@@ -4444,9 +6311,11 @@ func restartHandler(store control.Store, provisioner control.Provisioner) http.H
 }
 
 func upgradeProjectHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
+	backupService := control.NewBackupService("")
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
+		project, ok := requireProjectRole(w, r, store, ref, roleAdmin)
+		if !ok {
 			return
 		}
 		if provisioner == nil {
@@ -4458,19 +6327,197 @@ func upgradeProjectHandler(store control.Store, provisioner control.Provisioner)
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := provisioner.Upgrade(r.Context(), ref, payload.Version); err != nil {
+		targetVersion := strings.TrimSpace(payload.Version)
+		if err := validateUpgradeTarget(project.Spec.StackVersion, targetVersion); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		backup, err := preUpgradeBackup(r.Context(), store, backupService, project, payload.BackupID)
+		if err != nil {
+			control.LogProject(r.Context(), store, ref, "error", "Pre-upgrade backup failed", map[string]string{"version": targetVersion, "error": err.Error()})
+			control.Audit(r.Context(), store, "project.upgrade_backup_failed", "project:"+ref, map[string]string{"version": targetVersion, "error": err.Error()})
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
-		project, err := store.UpdateProjectStackVersion(r.Context(), ref, payload.Version)
+		if requireDurableUpgradeBackup() {
+			if err := validateDurablePreUpgradeBackup(r.Context(), store, backup); err != nil {
+				control.LogProject(r.Context(), store, ref, "error", "Pre-upgrade backup durability check failed", map[string]string{"version": targetVersion, "backup_id": backup.ID, "error": err.Error()})
+				control.Audit(r.Context(), store, "project.upgrade_backup_failed", "project:"+ref, map[string]string{"version": targetVersion, "backup_id": backup.ID, "error": err.Error(), "durable_required": "true"})
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
+		}
+		metadata := map[string]string{
+			"previous_version": project.Spec.StackVersion,
+			"target_version":   targetVersion,
+			"backup_id":        backup.ID,
+		}
+		control.LogProject(r.Context(), store, ref, "info", "Pre-upgrade backup completed", metadata)
+		control.Audit(r.Context(), store, "project.upgrade_backup", "project:"+ref, metadata)
+
+		err = injectedUpgradeFailure(r, targetVersion)
+		if err == nil {
+			err = provisioner.Upgrade(r.Context(), ref, targetVersion)
+		}
+		if err != nil {
+			rollbackErr := provisioner.Upgrade(r.Context(), ref, project.Spec.StackVersion)
+			failedMetadata := make(map[string]string, len(metadata)+3)
+			for key, value := range metadata {
+				failedMetadata[key] = value
+			}
+			failedMetadata["error"] = err.Error()
+			rollbackAttempted := true
+			rollbackError := ""
+			restoreAttempted := false
+			restoreState := ""
+			restoreError := ""
+			if rollbackErr != nil {
+				rollbackError = rollbackErr.Error()
+				failedMetadata["rollback_error"] = rollbackErr.Error()
+			} else {
+				failedMetadata["rollback"] = "attempted"
+				if autoRestoreFailedUpgradeBackup() {
+					restoreAttempted = true
+					_, restore, restoreErr := backupService.RestoreBackup(r.Context(), store, ref, backup.ID)
+					if restoreErr != nil {
+						restoreError = restoreErr.Error()
+						failedMetadata["restore_error"] = restoreError
+					} else {
+						restoreState = restore.State
+						failedMetadata["restore_state"] = restore.State
+						if restore.State != "completed" {
+							restoreError = fmt.Sprintf("logical restore returned state %q; configure SUPADUPA_LOGICAL_RESTORE_COMMAND or SUPADUPA_COMPOSE_APPLY=true for real failed-upgrade auto-restore", restore.State)
+							failedMetadata["restore_error"] = restoreError
+						} else {
+							failedMetadata["restore"] = "attempted"
+						}
+					}
+				}
+			}
+			control.LogProject(r.Context(), store, ref, "error", "Stack upgrade failed", failedMetadata)
+			control.Audit(r.Context(), store, "project.upgrade_failed", "project:"+ref, failedMetadata)
+			writeJSON(w, http.StatusConflict, upgradeProjectFailureResponse{
+				Error:             err.Error(),
+				Backup:            backup,
+				PreviousVersion:   metadata["previous_version"],
+				TargetVersion:     targetVersion,
+				RollbackAvailable: true,
+				RollbackAttempted: rollbackAttempted,
+				RollbackError:     rollbackError,
+				RestoreAttempted:  restoreAttempted,
+				RestoreState:      restoreState,
+				RestoreError:      restoreError,
+			})
+			return
+		}
+		project, err = store.UpdateProjectStackVersion(r.Context(), ref, targetVersion)
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		control.LogProject(r.Context(), store, ref, "info", "Stack upgraded", map[string]string{"version": payload.Version})
-		control.Audit(r.Context(), store, "project.upgrade", "project:"+ref, map[string]string{"version": payload.Version})
-		writeJSON(w, http.StatusOK, sanitizeProjectForResponse(project))
+		control.LogProject(r.Context(), store, ref, "info", "Stack upgraded", metadata)
+		control.Audit(r.Context(), store, "project.upgrade", "project:"+ref, metadata)
+		writeJSON(w, http.StatusOK, upgradeProjectResponse{
+			Project:           sanitizeProjectForResponse(project),
+			Backup:            backup,
+			PreviousVersion:   metadata["previous_version"],
+			TargetVersion:     targetVersion,
+			RollbackAvailable: true,
+		})
 	}
+}
+
+func injectedUpgradeFailure(r *http.Request, targetVersion string) error {
+	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Supadupa-Compat-Inject-Upgrade-Failure")), "true") {
+		return nil
+	}
+	for _, target := range strings.FieldsFunc(os.Getenv("SUPADUPA_COMPAT_UPGRADE_FAILURE_TARGETS"), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t'
+	}) {
+		if strings.TrimSpace(target) == targetVersion {
+			return fmt.Errorf("compat upgrade failure injection for %s", targetVersion)
+		}
+	}
+	return nil
+}
+
+func preUpgradeBackup(ctx context.Context, store control.Store, backupService *control.BackupService, project control.Project, backupID string) (control.Backup, error) {
+	backupID = strings.TrimSpace(backupID)
+	if backupID != "" {
+		backup, err := store.GetBackup(ctx, project.Ref, backupID)
+		if err != nil {
+			return control.Backup{}, err
+		}
+		if backup.Status != "completed" {
+			return control.Backup{}, fmt.Errorf("backup %s is not completed", backup.ID)
+		}
+		if err := validatePreUpgradeBackupArtifact(ctx, store, backupService, project.Ref, &backup); err != nil {
+			return control.Backup{}, err
+		}
+		return backup, nil
+	}
+	return backupService.TriggerLogicalBackup(ctx, store, project)
+}
+
+func validatePreUpgradeBackupArtifact(ctx context.Context, store control.Store, backupService *control.BackupService, ref string, backup *control.Backup) error {
+	if backup.Kind != "logical" {
+		return fmt.Errorf("backup %s kind %q cannot be used for stack upgrade", backup.ID, backup.Kind)
+	}
+	if backup.VerifiedAt == nil {
+		return fmt.Errorf("backup %s has not been verified", backup.ID)
+	}
+	return backupService.EnsureLogicalBackupArtifact(ctx, store, ref, backup)
+}
+
+func requireDurableUpgradeBackup() bool {
+	return envBoolValue(os.Getenv("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP"))
+}
+
+func autoRestoreFailedUpgradeBackup() bool {
+	return envBoolValue(os.Getenv("SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE"))
+}
+
+func validateDurablePreUpgradeBackup(ctx context.Context, store control.Store, backup control.Backup) error {
+	if strings.TrimSpace(backup.RemoteLocation) == "" || strings.TrimSpace(backup.StorageTargetID) == "" {
+		return fmt.Errorf("pre-upgrade backup %s is local-only; configure a tested durable off-host backup target or disable SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP for local development", backup.ID)
+	}
+	targets, err := store.ListBackupStorageTargets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if target.ID != backup.StorageTargetID {
+			continue
+		}
+		if !target.RecoveryReady || !target.DurableOffHost {
+			status := strings.TrimSpace(target.ReadinessStatus)
+			if status == "" {
+				status = "not-ready"
+			}
+			return fmt.Errorf("pre-upgrade backup %s target %s is not durable off-host ready: %s", backup.ID, backup.StorageTargetID, status)
+		}
+		return nil
+	}
+	return fmt.Errorf("pre-upgrade backup %s target %s is unavailable", backup.ID, backup.StorageTargetID)
+}
+
+func validateUpgradeTarget(currentVersion string, targetVersion string) error {
+	if targetVersion == "" {
+		return fmt.Errorf("version is required")
+	}
+	if strings.TrimSpace(currentVersion) == targetVersion {
+		return fmt.Errorf("target version %s is already installed", targetVersion)
+	}
+	for _, version := range supportedUpgradeVersions() {
+		if targetVersion == version {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported stack version %q; supported stable versions: %s", targetVersion, strings.Join(supportedUpgradeVersions(), ", "))
+}
+
+func supportedUpgradeVersions() []string {
+	return control.SupportedStackReleaseVersionsFromEnv(os.Getenv)
 }
 
 func scaleProjectHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
@@ -4567,7 +6614,8 @@ func withCORS(next http.Handler, configuredOrigins []string) http.Handler {
 		if allowedOrigins[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Vary", "Origin")
 		}
 		if r.Method == http.MethodOptions {
@@ -4591,20 +6639,36 @@ func allowedCORSOrigins(configured []string) map[string]bool {
 		}
 	}
 	if len(out) == 0 {
-		for _, origin := range []string{
-			"http://localhost:3000",
-			"http://127.0.0.1:3000",
-			"http://localhost:3001",
-			"http://127.0.0.1:3001",
-			"http://localhost:5173",
-			"http://127.0.0.1:5173",
-			"http://localhost:5174",
-			"http://127.0.0.1:5174",
-		} {
-			out[origin] = true
+		addDerivedCORSOrigin(out, os.Getenv("SUPADUPA_ADMIN_URL"))
+		addDerivedCORSOrigin(out, os.Getenv("SUPADUPA_ADMIN_HOST"))
+		if len(out) == 0 {
+			for _, origin := range []string{
+				"http://localhost:3000",
+				"http://127.0.0.1:3000",
+				"http://localhost:3001",
+				"http://127.0.0.1:3001",
+				"http://localhost:5173",
+				"http://127.0.0.1:5173",
+				"http://localhost:5174",
+				"http://127.0.0.1:5174",
+			} {
+				out[origin] = true
+			}
 		}
 	}
 	return out
+}
+
+func addDerivedCORSOrigin(out map[string]bool, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
+		out[strings.TrimRight(value, "/")] = true
+		return
+	}
+	out["https://"+strings.Trim(value, "/")] = true
 }
 
 func withAuth(required bool, auth *control.AuthService, next http.Handler) http.Handler {
@@ -4616,9 +6680,8 @@ func withAuth(required bool, auth *control.AuthService, next http.Handler) http.
 			next.ServeHTTP(w, r)
 			return
 		}
-		header := r.Header.Get("Authorization")
-		scheme, token, ok := strings.Cut(header, " ")
-		if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
+		token := tokenFromRequest(r)
+		if token == "" {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
@@ -4637,8 +6700,74 @@ func isPublicPath(path string) bool {
 		path == "/v1/auth/state" ||
 		path == "/v1/auth/bootstrap" ||
 		path == "/v1/auth/login" ||
+		path == "/v1/auth/logout" ||
+		path == "/v1/auth/studio/verify" ||
 		path == "/v1/auth/sso/saml/start" ||
-		path == "/v1/auth/sso/saml/callback"
+		path == "/v1/auth/sso/saml/callback" ||
+		strings.HasPrefix(path, "/v1/scim/v2/")
+}
+
+func tokenFromRequest(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	scheme, token, ok := strings.Cut(header, " ")
+	if ok && strings.EqualFold(scheme, "Bearer") && token != "" {
+		return token
+	}
+	cookie, err := r.Cookie(authCookieName)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(cookie.Value)
+}
+
+func bearerTokenFromRequest(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	scheme, token, ok := strings.Cut(header, " ")
+	if ok && strings.EqualFold(scheme, "Bearer") {
+		return strings.TrimSpace(token)
+	}
+	return ""
+}
+
+func setAuthCookie(w http.ResponseWriter, r *http.Request, token string, ttl time.Duration) {
+	cookie := authCookie(r, token, int(ttl.Seconds()))
+	http.SetCookie(w, &cookie)
+}
+
+func clearAuthCookie(w http.ResponseWriter, r *http.Request) {
+	cookie := authCookie(r, "", -1)
+	cookie.Expires = time.Unix(0, 0)
+	http.SetCookie(w, &cookie)
+}
+
+func authCookie(r *http.Request, value string, maxAge int) http.Cookie {
+	cookie := http.Cookie{
+		Name:     authCookieName,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsHTTPS(r),
+		MaxAge:   maxAge,
+	}
+	if domain := authCookieDomain(r); domain != "" {
+		cookie.Domain = domain
+	}
+	return cookie
+}
+
+func requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func authCookieDomain(r *http.Request) string {
+	if configured := strings.TrimSpace(os.Getenv("SUPADUPA_COOKIE_DOMAIN")); configured != "" {
+		if strings.EqualFold(configured, "host-only") || strings.EqualFold(configured, "none") {
+			return ""
+		}
+		return strings.TrimPrefix(configured, ".")
+	}
+	return ""
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -4756,6 +6885,41 @@ func requirePlatformAdmin(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	writeError(w, http.StatusForbidden, "forbidden: platform admin role required")
+	return false
+}
+
+func requireSCIMOrPlatformAdmin(w http.ResponseWriter, r *http.Request, store control.Store, auth *control.AuthService) bool {
+	if claims, ok := claimsFromRequest(r); ok && strings.EqualFold(claims.Role, "admin") {
+		return true
+	}
+	token := tokenFromRequest(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing bearer token")
+		return false
+	}
+	if token != "" && auth != nil {
+		if claims, err := auth.Verify(token); err == nil && strings.EqualFold(claims.Role, "admin") {
+			return true
+		}
+	}
+	bearer := bearerTokenFromRequest(r)
+	if bearer == "" {
+		writeError(w, http.StatusUnauthorized, "missing bearer token")
+		return false
+	}
+	config, err := store.GetPlatformSSOConfig(r.Context())
+	if err != nil {
+		writeStoreError(w, err)
+		return false
+	}
+	if control.VerifyPlatformSCIMToken(config, bearer) {
+		return true
+	}
+	if config.SCIMEnabled && config.SCIMTokenConfigured {
+		writeError(w, http.StatusUnauthorized, "invalid SCIM bearer token")
+		return false
+	}
+	writeError(w, http.StatusForbidden, "SCIM provisioning token is not configured")
 	return false
 }
 
@@ -4929,12 +7093,32 @@ func randomSSOPassword() (string, error) {
 	return "sso-" + base64.RawURLEncoding.EncodeToString(bytes[:]), nil
 }
 
-func renderPrometheusMetrics(metrics control.FleetMetrics) string {
+func renderPrometheusMetrics(metrics control.FleetMetrics, projects []control.ProjectMetrics) string {
 	var builder strings.Builder
+	projectMetricFamilies := map[string]bool{}
 	writeMetric := func(name string, help string, value any) {
 		builder.WriteString(fmt.Sprintf("# HELP %s %s\n", name, help))
 		builder.WriteString(fmt.Sprintf("# TYPE %s gauge\n", name))
 		builder.WriteString(fmt.Sprintf("%s %v\n", name, value))
+	}
+	writeProjectMetric := func(name string, help string, project control.ProjectMetrics, extraLabels map[string]string, value any) {
+		if !projectMetricFamilies[name] {
+			builder.WriteString(fmt.Sprintf("# HELP %s %s\n", name, help))
+			builder.WriteString(fmt.Sprintf("# TYPE %s gauge\n", name))
+			projectMetricFamilies[name] = true
+		}
+		labels := map[string]string{
+			"project_ref":   project.ProjectRef,
+			"org_id":        project.OrgID,
+			"resource_tier": string(project.ResourceTier),
+			"status":        string(project.Status),
+		}
+		for key, labelValue := range extraLabels {
+			labels[key] = labelValue
+		}
+		builder.WriteString(name)
+		builder.WriteString(prometheusLabels(labels))
+		builder.WriteString(fmt.Sprintf(" %v\n", value))
 	}
 	writeMetric("supadupa_orgs_total", "Total organizations known to the control plane.", metrics.Orgs)
 	writeMetric("supadupa_users_total", "Total platform users known to the control plane.", metrics.Users)
@@ -4991,7 +7175,52 @@ func renderPrometheusMetrics(metrics control.FleetMetrics) string {
 	writeMetric("supadupa_audit_events_total", "Total audit events recorded.", metrics.AuditEvents)
 	writeMetric("supadupa_audit_verified", "Whether the audit hash chain verifies, 1 for true and 0 for false.", boolMetric(metrics.AuditVerified))
 	writeMetric("supadupa_metrics_sampled_at_unix", "Unix timestamp when fleet metrics were sampled.", metrics.SampledAt.Unix())
+	for _, project := range projects {
+		writeProjectMetric("supadupa_project_resource_cpu", "Reserved CPU for a project.", project, nil, project.Resources.CPU)
+		writeProjectMetric("supadupa_project_resource_ram_mb", "Reserved RAM for a project in MB.", project, nil, project.Resources.RAMMB)
+		writeProjectMetric("supadupa_project_resource_disk_gb", "Reserved disk for a project in GB.", project, nil, project.Resources.DiskGB)
+		writeProjectMetric("supadupa_project_resource_disk_iops", "Reserved disk IOPS for a project.", project, nil, project.Resources.DiskIOPS)
+		writeProjectMetric("supadupa_project_routes_total", "Ingress routes registered for a project.", project, nil, project.Routes)
+		writeProjectMetric("supadupa_project_logs_total", "Project log events recorded for a project.", project, nil, project.ProjectLogEvents)
+		writeProjectMetric("supadupa_project_activity_events_total", "Audit activity events associated with a project.", project, nil, project.ActivityEvents)
+		writeProjectMetric("supadupa_project_backups_total", "Backups recorded for a project.", project, nil, project.Backups)
+		writeProjectMetric("supadupa_project_backup_storage_bytes", "Backup storage bytes recorded for a project.", project, nil, project.BackupStorageBytes)
+		writeProjectMetric("supadupa_project_wal_archives_total", "WAL archives recorded for a project.", project, nil, project.WALArchives)
+		writeProjectMetric("supadupa_project_wal_archive_bytes", "WAL archive bytes recorded for a project.", project, nil, project.WALArchiveBytes)
+		if project.Observed == nil {
+			continue
+		}
+		observedLabels := map[string]string{"source": project.Observed.Source}
+		writeProjectMetric("supadupa_project_observed_cpu_percent", "Observed project CPU percent from the latest telemetry sample.", project, observedLabels, project.Observed.CPUPercent)
+		writeProjectMetric("supadupa_project_observed_memory_bytes", "Observed project memory bytes from the latest telemetry sample.", project, observedLabels, project.Observed.MemoryBytes)
+		writeProjectMetric("supadupa_project_observed_memory_limit_bytes", "Observed project memory limit bytes from the latest telemetry sample.", project, observedLabels, project.Observed.MemoryLimitBytes)
+		writeProjectMetric("supadupa_project_observed_disk_used_bytes", "Observed project disk usage bytes from the latest telemetry sample.", project, observedLabels, project.Observed.DiskUsedBytes)
+		writeProjectMetric("supadupa_project_observed_disk_limit_bytes", "Observed project disk limit bytes from the latest telemetry sample.", project, observedLabels, project.Observed.DiskLimitBytes)
+		writeProjectMetric("supadupa_project_observed_network_rx_bytes", "Observed project network receive bytes from the latest telemetry sample.", project, observedLabels, project.Observed.NetworkRxBytes)
+		writeProjectMetric("supadupa_project_observed_network_tx_bytes", "Observed project network transmit bytes from the latest telemetry sample.", project, observedLabels, project.Observed.NetworkTxBytes)
+		writeProjectMetric("supadupa_project_telemetry_sampled_at_unix", "Unix timestamp of the latest project telemetry sample.", project, observedLabels, project.Observed.SampledAt.Unix())
+	}
 	return builder.String()
+}
+
+func prometheusLabels(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%q", key, prometheusLabelValue(labels[key])))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+func prometheusLabelValue(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	value = strings.ReplaceAll(value, "\"", "\\\"")
+	return value
 }
 
 func boolMetric(value bool) int {
@@ -5137,6 +7366,42 @@ func scimBoolValue(value any, fallback bool) bool {
 	}
 }
 
+func scimStringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func scimPatchObjectValues(value any) (string, string, bool) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return "", "", false
+	}
+	var email string
+	var role string
+	changed := false
+	for key, raw := range object {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "username":
+			email = strings.ToLower(strings.TrimSpace(scimStringValue(raw)))
+			changed = true
+		case strings.ToLower(scimUserExtension):
+			extension, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if rawRole, ok := extension["role"]; ok {
+				role = strings.TrimSpace(scimStringValue(rawRole))
+				changed = true
+			}
+		}
+	}
+	return email, role, changed
+}
+
 func absoluteResourceLocation(r *http.Request, path string) string {
 	scheme := "http"
 	if r.TLS != nil {
@@ -5165,9 +7430,14 @@ func reconcileProjectRoutes(r *http.Request, store control.Store, ref string) (s
 	if err != nil {
 		return "", err
 	}
+	replicas, err := store.ListProjectReplicas(r.Context(), ref)
+	if err != nil {
+		return "", err
+	}
 	routes, err := store.UpsertProjectRoutes(r.Context(), ref, control.RoutesForProjectDomainsWithNetworkAndCDN(project, domains, networkConfig, cdnPolicy))
 	if err != nil {
 		return "", err
 	}
-	return control.NewRoutingService("").RenderProject(project, routes)
+	tcpRoutes := control.TCPRoutesForProjectWithNetworkAndReplicas(project, networkConfig, replicas)
+	return control.NewRoutingService("").RenderProjectWithTCPRoutes(project, routes, tcpRoutes)
 }

@@ -19,14 +19,15 @@ type projectBackupPolicyResource struct {
 }
 
 type projectBackupPolicyResourceModel struct {
-	ID        types.String `tfsdk:"id"`
-	Ref       types.String `tfsdk:"ref"`
-	Enabled   types.Bool   `tfsdk:"enabled"`
-	Schedule  types.String `tfsdk:"schedule"`
-	Kind      types.String `tfsdk:"kind"`
-	LastRunAt types.String `tfsdk:"last_run_at"`
-	NextRunAt types.String `tfsdk:"next_run_at"`
-	UpdatedAt types.String `tfsdk:"updated_at"`
+	ID              types.String `tfsdk:"id"`
+	Ref             types.String `tfsdk:"ref"`
+	Enabled         types.Bool   `tfsdk:"enabled"`
+	Schedule        types.String `tfsdk:"schedule"`
+	Kind            types.String `tfsdk:"kind"`
+	StorageTargetID types.String `tfsdk:"storage_target_id"`
+	LastRunAt       types.String `tfsdk:"last_run_at"`
+	NextRunAt       types.String `tfsdk:"next_run_at"`
+	UpdatedAt       types.String `tfsdk:"updated_at"`
 }
 
 func NewProjectBackupPolicyResource() resource.Resource {
@@ -70,7 +71,15 @@ func (r *projectBackupPolicyResource) Schema(ctx context.Context, req resource.S
 				Optional:    true,
 				Computed:    true,
 				Default:     stringdefault.StaticString("logical"),
-				Description: "Backup kind. The MVP supports logical backups.",
+				Description: "Backup kind: logical or physical.",
+			},
+			"storage_target_id": resourceschema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Description: "Backup storage target ID for off-host backup artifacts. Empty uses the platform default target.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"last_run_at": resourceschema.StringAttribute{
 				Computed:    true,
@@ -176,9 +185,10 @@ func (r *projectBackupPolicyResource) ImportState(ctx context.Context, req resou
 
 func projectBackupPolicyInputFromModel(model projectBackupPolicyResourceModel) ProjectBackupPolicyInput {
 	return ProjectBackupPolicyInput{
-		Enabled:  model.Enabled.ValueBool(),
-		Schedule: model.Schedule.ValueString(),
-		Kind:     model.Kind.ValueString(),
+		Enabled:         model.Enabled.ValueBool(),
+		Schedule:        model.Schedule.ValueString(),
+		Kind:            model.Kind.ValueString(),
+		StorageTargetID: stringValue(model.StorageTargetID),
 	}
 }
 
@@ -192,6 +202,7 @@ func setProjectBackupPolicyState(model *projectBackupPolicyResourceModel, policy
 	model.Enabled = types.BoolValue(policy.Enabled)
 	model.Schedule = types.StringValue(policy.Schedule)
 	model.Kind = types.StringValue(policy.Kind)
+	model.StorageTargetID = optionalStringValue(policy.StorageTargetID)
 	model.LastRunAt = optionalTimePointerString(policy.LastRunAt)
 	model.NextRunAt = optionalTimePointerString(policy.NextRunAt)
 	model.UpdatedAt = optionalTimeString(policy.UpdatedAt)

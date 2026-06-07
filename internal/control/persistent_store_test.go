@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestPersistentStoreRestoresCheckpoint(t *testing.T) {
@@ -39,7 +40,7 @@ func TestPersistentStoreRestoresCheckpoint(t *testing.T) {
 	}
 	updatedDefaults, err := store.UpdatePlatformDefaults(ctx, PlatformDefaultsInput{
 		Domain:         "apps.example.com",
-		StackVersion:   "2026.06.05",
+		StackVersion:   "15.8.1.060",
 		Profile:        StackProfileEssential,
 		ResourceTier:   ResourceTierMedium,
 		BackupSchedule: "hourly",
@@ -291,6 +292,65 @@ fi
 	}
 }
 
+func TestPersistentStoreConcurrentAuditEventsSerializeCheckpoints(t *testing.T) {
+	db := openCheckpointDB(t)
+	ctx := context.Background()
+	store, err := NewPersistentStore(ctx, db)
+	if err != nil {
+		t.Fatalf("new persistent store: %v", err)
+	}
+
+	const events = 64
+	var wg sync.WaitGroup
+	errs := make(chan error, events)
+	for i := 0; i < events; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.RecordAuditEvent(ctx, AuditEventInput{
+				Action: "project.inspect",
+				Target: "project:smoke",
+			})
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("record concurrent audit event: %v", err)
+	}
+
+	auditEvents, err := store.ListAuditEvents(ctx, events)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(auditEvents) != events {
+		t.Fatalf("expected %d audit events, got %d", events, len(auditEvents))
+	}
+	ids := map[string]struct{}{}
+	for _, event := range auditEvents {
+		if event.ID == "" {
+			t.Fatalf("expected audit event ID: %#v", event)
+		}
+		if _, exists := ids[event.ID]; exists {
+			t.Fatalf("duplicate audit event ID %q", event.ID)
+		}
+		ids[event.ID] = struct{}{}
+	}
+	integrity, err := store.VerifyAuditLog(ctx)
+	if err != nil {
+		t.Fatalf("verify audit log: %v", err)
+	}
+	if !integrity.Verified || integrity.Events != events {
+		t.Fatalf("expected verified audit chain with %d events, got %+v", events, integrity)
+	}
+	if max := checkpointMaxActive(t); max > 1 {
+		t.Fatalf("expected serialized checkpoint writes, saw %d active writes", max)
+	}
+}
+
 var (
 	checkpointDriverOnce sync.Once
 	checkpointDriversMu  sync.Mutex
@@ -298,8 +358,10 @@ var (
 )
 
 type checkpointState struct {
-	mu    sync.Mutex
-	state []byte
+	mu        sync.Mutex
+	state     []byte
+	active    int
+	maxActive int
 }
 
 func openCheckpointDB(t *testing.T) *sql.DB {
@@ -338,6 +400,19 @@ func checkpointPayload(t *testing.T) []byte {
 	return append([]byte(nil), state.state...)
 }
 
+func checkpointMaxActive(t *testing.T) int {
+	t.Helper()
+	checkpointDriversMu.Lock()
+	state := checkpointDrivers[t.Name()]
+	checkpointDriversMu.Unlock()
+	if state == nil {
+		t.Fatalf("missing checkpoint state for %s", t.Name())
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.maxActive
+}
+
 type checkpointDriver struct{}
 
 func (checkpointDriver) Open(name string) (driver.Conn, error) {
@@ -367,6 +442,19 @@ func (conn checkpointConn) ExecContext(_ context.Context, query string, args []d
 	if !strings.Contains(query, "control_state_checkpoints") {
 		return driver.RowsAffected(1), nil
 	}
+	conn.state.mu.Lock()
+	conn.state.active++
+	if conn.state.active > conn.state.maxActive {
+		conn.state.maxActive = conn.state.active
+	}
+	conn.state.mu.Unlock()
+	defer func() {
+		conn.state.mu.Lock()
+		conn.state.active--
+		conn.state.mu.Unlock()
+	}()
+	time.Sleep(2 * time.Millisecond)
+
 	conn.state.mu.Lock()
 	defer conn.state.mu.Unlock()
 	if len(args) >= 2 {

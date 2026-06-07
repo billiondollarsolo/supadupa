@@ -1,0 +1,4 @@
+ALTER TABLE domains
+    ADD COLUMN IF NOT EXISTS cert_mode TEXT NOT NULL DEFAULT 'acme',
+    ADD COLUMN IF NOT EXISTS cert_fingerprint TEXT,
+    ADD COLUMN IF NOT EXISTS cert_not_after TIMESTAMPTZ;

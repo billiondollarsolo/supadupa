@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, Eye, Pause, Play, RotateCcw, Server, SlidersHorizontal } from "lucide-react";
 import {
   auditProjectSecretCopy,
+  listStackReleases,
   pauseProject,
   restartProject,
   resumeProject,
@@ -13,23 +14,37 @@ import {
 } from "../../api";
 import { Modal } from "../../components/modal";
 import { useUIStore } from "../../lib/ui-store";
-import { formatTime } from "../../lib/format";
+import { formatDateTime, formatTime } from "../../lib/format";
 import type { Project, ProjectSecret } from "../../types";
 
 type LifecycleConfirm = "pause" | "resume" | "restart" | "upgrade" | "scale";
 
 export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Project }) {
   const queryClient = useQueryClient();
+  const addToast = useUIStore((state) => state.addToast);
   const [confirmAction, setConfirmAction] = useState<LifecycleConfirm | null>(null);
-  const [version, setVersion] = useState("15.8.1.060");
+  const [version, setVersion] = useState("");
   const [tier, setTier] = useState("small");
   const projectRef = project?.ref ?? "";
+  const stackReleasesQuery = useQuery({ queryKey: ["stack-releases"], queryFn: listStackReleases });
+  const releaseVersions = stackReleasesQuery.data?.map((release) => release.version).filter(Boolean) ?? [];
+  const selectedRelease = stackReleasesQuery.data?.find((release) => release.version === version);
   const tierKey = `${project?.ref ?? ""}:${project?.spec.resource_tier ?? ""}`;
   useEffect(() => {
     if (project) {
       setTier(project.spec.resource_tier || "small");
     }
   }, [tierKey]);
+  useEffect(() => {
+    if (!project) return;
+    const nextVersion = releaseVersions.find((candidate) => candidate !== project.spec.stack_version) ?? project.spec.stack_version;
+    setVersion((current) => {
+      if (current && current !== project.spec.stack_version && (releaseVersions.length === 0 || releaseVersions.includes(current))) {
+        return current;
+      }
+      return nextVersion;
+    });
+  }, [project?.ref, project?.spec.stack_version, releaseVersions.join("|")]);
   useEffect(() => setConfirmAction(null), [projectRef]);
   const invalidateProject = (ref: string) => {
     void queryClient.invalidateQueries({ queryKey: ["projects"] });
@@ -64,9 +79,15 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
   });
   const upgradeMutation = useMutation({
     mutationFn: ({ ref, nextVersion }: { ref: string; nextVersion: string }) => upgradeProject(ref, nextVersion),
-    onSuccess: (updated) => {
+    onSuccess: (result) => {
       setConfirmAction(null);
-      invalidateProject(updated.ref);
+      invalidateProject(result.project.ref);
+      void queryClient.invalidateQueries({ queryKey: ["backups", result.project.ref] });
+      void queryClient.invalidateQueries({ queryKey: ["recoverability", result.project.ref] });
+      addToast({
+        title: "Stack upgraded",
+        detail: `${result.previous_version} -> ${result.target_version} with backup ${result.backup.id.slice(0, 12)}`,
+      });
     },
   });
   const scaleMutation = useMutation({
@@ -77,6 +98,7 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
     },
   });
   const busy = pauseMutation.isPending || resumeMutation.isPending || restartMutation.isPending || upgradeMutation.isPending || scaleMutation.isPending;
+  const lastUpgrade = upgradeMutation.data?.project.ref === project?.ref ? upgradeMutation.data : undefined;
   const activeConfirm = confirmAction ? lifecycleConfirmCopy(confirmAction, project, version, tier) : null;
   const confirmPending =
     confirmAction === "pause" ? pauseMutation.isPending :
@@ -137,12 +159,44 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
             <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
               <p className="text-sm text-muted">Upgrade stack version from <span className="font-mono text-text">{project.spec.stack_version}</span>.</p>
               <div className="flex gap-2 max-sm:flex-col">
-                <input className="input font-mono" value={version} onChange={(event) => setVersion(event.target.value)} />
+                {releaseVersions.length > 0 ? (
+                  <select className="input font-mono" disabled={stackReleasesQuery.isPending} value={version} onChange={(event) => setVersion(event.target.value)}>
+                    {releaseVersions.map((releaseVersion) => (
+                      <option key={releaseVersion} value={releaseVersion}>
+                        {releaseVersion}{releaseVersion === project.spec.stack_version ? " (current)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className="input font-mono" value={version} onChange={(event) => setVersion(event.target.value)} />
+                )}
                 <button className="button secondary justify-center" disabled={busy || version.trim().length === 0 || version === project.spec.stack_version} onClick={() => setConfirmAction("upgrade")} type="button">
                   <RotateCcw size={14} />
                   Upgrade
                 </button>
               </div>
+              {selectedRelease ? (
+                <p className="text-xs text-muted">Postgres {selectedRelease.postgres} · API {selectedRelease.rest} · Auth {selectedRelease.auth}</p>
+              ) : null}
+              {lastUpgrade ? (
+                <div className="grid gap-2 rounded-md border border-border bg-panel p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="label">Last upgrade</p>
+                      <p className="truncate text-sm text-muted">
+                        {lastUpgrade.previous_version} to {lastUpgrade.target_version}
+                      </p>
+                    </div>
+                    <span className={`pill ${lastUpgrade.rollback_available ? "healthy" : "warning"}`}>
+                      {lastUpgrade.rollback_available ? "rollback ready" : "rollback unavailable"}
+                    </span>
+                  </div>
+                  <div className="grid gap-1 text-xs text-muted">
+                    <p className="truncate">Pre-upgrade backup <span className="font-mono text-text">{lastUpgrade.backup.id}</span></p>
+                    <p>{lastUpgrade.backup.finished_at ? `Finished ${formatDateTime(lastUpgrade.backup.finished_at)}` : "Backup completion time pending"} · {lastUpgrade.backup.remote_location ? "remote artifact" : "local artifact"}</p>
+                  </div>
+                </div>
+              ) : null}
             </div>
             <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
               <p className="text-sm text-muted">Resize resource tier from <span className="font-mono text-text">{project.spec.resource_tier}</span>.</p>
@@ -158,6 +212,7 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
                 </button>
               </div>
             </div>
+            {stackReleasesQuery.error ? <p className="text-sm text-danger">{stackReleasesQuery.error.message}</p> : null}
             {[pauseMutation, resumeMutation, restartMutation, upgradeMutation, scaleMutation].map((mutation, index) =>
               mutation.error ? (
                 <p className="text-sm text-danger" key={index}>
@@ -219,7 +274,7 @@ function lifecycleConfirmCopy(action: LifecycleConfirm, project: Project | undef
       return {
         title: `Upgrade ${name}?`,
         description: `This changes the stack version to ${version}.`,
-        body: "Upgrades can restart services and may require a maintenance window depending on the running stack.",
+        body: "Supadupa creates a pre-upgrade backup, applies the target stable stack, and records rollback metadata before marking the upgrade complete. Production deployments can require that backup to be verified on a durable off-host target before the stack changes.",
         confirmLabel: "Upgrade stack",
         tone: "danger" as const,
       };

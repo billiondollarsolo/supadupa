@@ -25,11 +25,15 @@ import {
   getProjectCDNPolicy,
   getProjectMetrics,
   getProjectNetwork,
+  getProjectRecoverability,
   getProjectReplicaRouting,
   getProjectServices,
   getProvisionerStatus,
+  getRuntimeConfig,
   getSCIMServiceProviderConfig,
   listAuditEvents,
+  listBackupStorageTargets,
+  listPlatformBackups,
   listBillingInvoices,
   listBackups,
   listHosts,
@@ -59,12 +63,12 @@ import {
   listProjectNetworkConnections,
   listProjectReplicas,
   listProjectReplicationPipelines,
+  getProjectRouteManifest,
   listProjectStorageBuckets,
   listProjectVectorBuckets,
   listProjectActivity,
   listProjectLogs,
   listProjects,
-  listProjectRoutes,
   listProjectSecrets,
   listSCIMGroups,
   listSCIMUsers,
@@ -82,7 +86,7 @@ import { useAuthSession } from "./lib/auth-session";
 import { DashboardContext, useDashboardContext, type DashboardContextValue } from "./lib/dashboard-context";
 import { organizationSections, platformSettingsSections, projectSubnav, projectTabs, securitySections, type ConfigArea, type ProjectTab } from "./lib/project-config";
 import { useUIStore } from "./lib/ui-store";
-import type { AdvisorFinding, AuditEvent, AuditIntegrity, Backup, BackupPolicy, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, FleetMetrics, Host, LogDrain, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformDefaults, PlatformSSOConfig, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectSecret, ProjectServices, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "./types";
+import type { AdvisorFinding, AuditEvent, AuditIntegrity, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, FleetMetrics, Host, LogDrain, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformDefaults, PlatformSSOConfig, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectSecret, ProjectServices, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "./types";
 import { Modal } from "./components/modal";
 
 type PaletteAction = {
@@ -142,7 +146,7 @@ function pageTitleForPathname(pathname: string, activeProject: Project | undefin
   if (pathname === "/hosts") return "Hosts";
   if (pathname === "/settings" || pathname.startsWith("/settings/")) return "Settings";
   if (pathname === "/audit") return "Audit log";
-  return "Fleet dashboard";
+  return "Dashboard";
 }
 
 export function App() {
@@ -204,8 +208,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const advisorFindings = useQuery({ queryKey: ["advisor-findings"], queryFn: getAdvisorFindings, refetchInterval: 30_000 });
   const complianceReport = useQuery({ queryKey: ["compliance-report"], queryFn: getComplianceReport, refetchInterval: 30_000 });
   const provisionerStatus = useQuery({ queryKey: ["provisioner-status"], queryFn: getProvisionerStatus });
+  const runtimeConfig = useQuery({ queryKey: ["runtime-config"], queryFn: getRuntimeConfig, refetchInterval: 30_000 });
   const platformDefaults = useQuery({ queryKey: ["platform-defaults"], queryFn: getPlatformDefaults });
   const platformSSO = useQuery({ queryKey: ["platform-sso"], queryFn: getPlatformSSOConfig });
+  const backupStorageTargets = useQuery({ queryKey: ["backup-storage-targets"], queryFn: listBackupStorageTargets });
+  const platformBackups = useQuery({ queryKey: ["platform-backups"], queryFn: listPlatformBackups });
   const scimServiceProviderConfig = useQuery({ queryKey: ["scim-service-provider-config"], queryFn: getSCIMServiceProviderConfig });
   const scimUsers = useQuery({ queryKey: ["scim-users"], queryFn: listSCIMUsers });
   const scimGroups = useQuery({ queryKey: ["scim-groups"], queryFn: () => listSCIMGroups() });
@@ -317,9 +324,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     queryFn: () => listProjectAccess(activeRef),
     enabled: activeRef.length > 0,
   });
-  const routes = useQuery({
-    queryKey: ["project-routes", activeRef],
-    queryFn: () => listProjectRoutes(activeRef),
+  const routeManifest = useQuery({
+    queryKey: ["project-route-manifest", activeRef],
+    queryFn: () => getProjectRouteManifest(activeRef),
     enabled: activeRef.length > 0,
   });
   const domains = useQuery({
@@ -487,6 +494,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     queryFn: () => getBackupPolicy(activeRef),
     enabled: activeRef.length > 0,
   });
+  const recoverability = useQuery({
+    queryKey: ["recoverability", activeRef],
+    queryFn: () => getProjectRecoverability(activeRef),
+    enabled: activeRef.length > 0,
+  });
   const pitrPolicy = useQuery({
     queryKey: ["pitr-policy", activeRef],
     queryFn: () => getPITRPolicy(activeRef),
@@ -573,6 +585,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     onSuccess: (_backup, ref) => {
       void queryClient.invalidateQueries({ queryKey: ["backups", ref] });
       void queryClient.invalidateQueries({ queryKey: ["backup-policy", ref] });
+      void queryClient.invalidateQueries({ queryKey: ["recoverability", ref] });
       void queryClient.invalidateQueries({ queryKey: ["project-logs", ref] });
       void queryClient.invalidateQueries({ queryKey: ["project-metrics", ref] });
       void queryClient.invalidateQueries({ queryKey: ["org-usage", activeOrgId] });
@@ -622,7 +635,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   };
   const paletteActions = useMemo<PaletteAction[]>(() => {
     const actions: PaletteAction[] = [
-      { id: "nav-fleet", title: "Fleet dashboard", subtitle: "Health, capacity, and reports", group: "Navigation", icon: Activity, run: () => routeTo("/", "fleet-dashboard") },
+      { id: "nav-fleet", title: "Dashboard", subtitle: "At-a-glance health, server usage, and projects", group: "Navigation", icon: Activity, run: () => routeTo("/", "fleet-dashboard") },
       { id: "nav-orgs", title: "Organizations", subtitle: "Orgs, members, quotas, and usage", group: "Navigation", icon: UserPlus, run: () => routeTo("/organizations", "organizations") },
       { id: "nav-projects", title: "Projects list", subtitle: "Browse isolated stacks", group: "Navigation", icon: Database, run: () => routeTo("/projects", "projects-list") },
       { id: "nav-create-project", title: "Create project", subtitle: "Provision a new Supabase stack", group: "Navigation", icon: Plus, run: () => routeTo("/projects/new", "create-project") },
@@ -750,8 +763,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     advisorFindings,
     complianceReport,
     provisionerStatus,
+    runtimeConfig,
     platformDefaults,
     platformSSO,
+    backupStorageTargets,
+    platformBackups,
     scimServiceProviderConfig,
     scimUsers,
     scimGroups,
@@ -774,7 +790,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     cliProfile,
     projectMetrics,
     projectAccess,
-    routes,
+    routeManifest,
     domains,
     projectServices,
     projectConfig,
@@ -808,6 +824,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     logDrains,
     backups,
     backupPolicy,
+    recoverability,
     pitrPolicy,
     walArchives,
     projectLogs,
@@ -1270,7 +1287,7 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
   }
 
   const navItems: Array<{ label: string; icon: LucideIcon; to: string }> = [
-    { label: "Fleet", icon: Activity, to: "/" },
+    { label: "Dashboard", icon: Activity, to: "/" },
     { label: "Organizations", icon: UserPlus, to: "/organizations" },
     { label: "Projects", icon: Database, to: "/projects" },
     { label: "Security", icon: Shield, to: "/security" },

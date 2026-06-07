@@ -1,6 +1,8 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Boxes, Globe2, Plus, RotateCcw, Save, SlidersHorizontal, X } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import type { ColumnDef } from "@tanstack/react-table";
+import { ArrowLeft, Boxes, Globe2, Plus, RotateCcw, Save, SlidersHorizontal, X } from "lucide-react";
 import {
   createProjectCDNInvalidation,
   createProjectCDNObjectEvent,
@@ -9,6 +11,7 @@ import {
   updateProjectConfig,
   updateProjectCDNPolicy,
 } from "../../api";
+import { DataTable } from "../../components/data-table";
 import { formatBytes, formatDateTime, formatTime } from "../../lib/format";
 import { parseKeyValueLines, parseLines } from "../../lib/parse";
 import type { CDNInvalidation, Project, ProjectCDNPolicy, ProjectConfig, ProjectStorageBucket } from "../../types";
@@ -107,8 +110,9 @@ export function StorageConfigPanel({ project, config, loading }: { project?: Pro
   );
 }
 
-export function StorageBucketsPanel({ project, buckets, loading }: { project?: Project; buckets: ProjectStorageBucket[]; loading: boolean }) {
+export function StorageBucketsPanel({ project, buckets, item, loading }: { project?: Project; buckets: ProjectStorageBucket[]; item?: string; loading: boolean }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [form, setForm] = useState({
     name: "assets",
     public: true,
@@ -136,12 +140,76 @@ export function StorageBucketsPanel({ project, buckets, loading }: { project?: P
       avif_autodetection: form.avif_autodetection,
       metadata: parseKeyValueLines(form.metadata),
     }),
-    onSuccess: (_, variables) => invalidate(variables.ref),
+    onSuccess: (_, variables) => {
+      invalidate(variables.ref);
+      void navigate({ to: "/projects/$ref/storage", params: { ref: variables.ref } });
+    },
   });
   const deleteMutation = useMutation({
     mutationFn: ({ ref, name }: { ref: string; name: string }) => deleteProjectStorageBucket(ref, name),
     onSuccess: (_, variables) => invalidate(variables.ref),
   });
+  const bucketColumns = useMemo<ColumnDef<ProjectStorageBucket>[]>(
+    () => [
+      {
+        header: "Bucket",
+        accessorKey: "name",
+        size: 190,
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main font-mono">{row.original.name}</p>
+            <p className="cell-sub">{row.original.public ? "public" : "private"}</p>
+          </>
+        ),
+      },
+      {
+        header: "Limits",
+        accessorKey: "file_size_limit",
+        size: 210,
+        cell: ({ row }) => (
+          <>
+            <p className="text-sm">{formatBytes(row.original.file_size_limit)}</p>
+            <p className="cell-sub">cache {row.original.cache_control}</p>
+          </>
+        ),
+      },
+      {
+        header: "MIME policy",
+        accessorKey: "allowed_mime_types",
+        size: 300,
+        cell: ({ row }) => (
+          <>
+            <p className="truncate text-sm">{row.original.allowed_mime_types.join(", ") || "any type"}</p>
+            <p className="cell-sub truncate">{row.original.metadata.purpose || "no metadata purpose"}</p>
+          </>
+        ),
+      },
+      {
+        header: "Status",
+        accessorKey: "status",
+        size: 130,
+        cell: ({ row }) => <span className={`pill ${row.original.status === "configured" ? "healthy" : "provisioning"}`}>{row.original.status}</span>,
+      },
+      {
+        header: "Created",
+        accessorKey: "created_at",
+        size: 160,
+        cell: ({ row }) => formatDateTime(row.original.created_at),
+      },
+      {
+        header: "",
+        id: "actions",
+        size: 56,
+        cell: ({ row }) => (
+          <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, name: row.original.name })} title="Delete bucket" type="button">
+            <X size={14} />
+          </button>
+        ),
+      },
+    ],
+    [deleteMutation.isPending, project],
+  );
+  const showingCreate = item === "new";
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -151,17 +219,43 @@ export function StorageBucketsPanel({ project, buckets, loading }: { project?: P
     createMutation.mutate({ ref: project.ref });
   }
 
+  function openCreate() {
+    if (!project) return;
+    void navigate({ to: "/projects/$ref/storage/$section/$item", params: { ref: project.ref, section: "buckets", item: "new" } });
+  }
+
+  function closeCreate() {
+    if (!project) return;
+    void navigate({ to: "/projects/$ref/storage", params: { ref: project.ref } });
+  }
+
   return (
     <section className="panel">
       <div className="section-head">
         <div>
           <p className="label">Storage</p>
-          <h2>Buckets</h2>
+          <h2>{showingCreate ? "New bucket" : "Buckets"}</h2>
+          <p className="mt-1 text-sm text-muted">{showingCreate ? "Create one storage bucket for this project." : "Project object buckets exposed through Supabase Storage."}</p>
         </div>
-        <Boxes size={15} className="text-faint" />
+        {showingCreate ? (
+          <button className="icon-button" onClick={closeCreate} title="Back to buckets" type="button">
+            <ArrowLeft size={14} />
+          </button>
+        ) : (
+          <button className="icon-button" disabled={!project} onClick={openCreate} title="Add storage bucket" type="button">
+            <Plus size={14} />
+          </button>
+        )}
       </div>
-      <div className="mt-4 grid gap-4">
+      {showingCreate ? (
         <form className="grid gap-2" onSubmit={submit}>
+          <div className="usage-row">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{form.name || "Bucket name pending"}</p>
+              <p className="truncate text-xs text-muted">{form.public ? "Public objects can be served through the project API." : "Private bucket access requires authenticated storage requests."}</p>
+            </div>
+            <span className="pill">{buckets.length} existing</span>
+          </div>
           <div className="grid grid-cols-[minmax(0,1fr)_130px_130px] gap-2 max-sm:grid-cols-1">
             <input className="input font-mono" placeholder="assets" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
             <input className="input font-mono" inputMode="numeric" value={form.file_size_limit} onChange={(event) => setForm({ ...form, file_size_limit: event.target.value })} />
@@ -186,25 +280,13 @@ export function StorageBucketsPanel({ project, buckets, loading }: { project?: P
             Add storage bucket
           </button>
         </form>
-      </div>
-      <div className="mt-4 grid gap-2">
+      ) : (
+        <div className="mt-4 grid gap-2">
+          <DataTable columns={bucketColumns} data={buckets} emptyText={loading ? "Loading storage buckets..." : "No storage buckets configured."} minWidth={880} />
+        </div>
+      )}
+      <div className="mt-3 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading storage buckets...</p> : null}
-        {!loading && buckets.length === 0 ? <p className="text-sm text-muted">No storage buckets configured.</p> : null}
-        {buckets.map((bucket) => (
-          <div className="vector-row" key={bucket.id}>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{bucket.name}</p>
-              <p className="truncate font-mono text-xs text-muted">{bucket.public ? "public" : "private"} - {formatBytes(bucket.file_size_limit)} - cache {bucket.cache_control}</p>
-              <p className="truncate text-xs text-faint">{bucket.allowed_mime_types.join(", ") || bucket.metadata.purpose || bucket.status}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className={`pill ${bucket.status === "configured" ? "healthy" : "provisioning"}`}>{bucket.status}</span>
-              <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, name: bucket.name })} type="button">
-                <X size={14} />
-              </button>
-            </div>
-          </div>
-        ))}
         {createMutation.error ? <p className="text-sm text-danger">{createMutation.error.message}</p> : null}
         {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
       </div>
@@ -250,7 +332,7 @@ export function CDNPanel({ project, policy, invalidations, loading }: { project?
   const invalidate = (ref: string) => {
     void queryClient.invalidateQueries({ queryKey: ["cdn-policy", ref] });
     void queryClient.invalidateQueries({ queryKey: ["cdn-invalidations", ref] });
-    void queryClient.invalidateQueries({ queryKey: ["project-routes", ref] });
+    void queryClient.invalidateQueries({ queryKey: ["project-route-manifest", ref] });
     void queryClient.invalidateQueries({ queryKey: ["project-metrics", ref] });
     void queryClient.invalidateQueries({ queryKey: ["fleet-metrics"] });
     void queryClient.invalidateQueries({ queryKey: ["org-usage", project?.org_id ?? ""] });

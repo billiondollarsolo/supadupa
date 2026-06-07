@@ -32,6 +32,9 @@ func TestFunctionDeploymentServiceWritesRuntimeArtifact(t *testing.T) {
 	if !strings.HasSuffix(artifact.SourcePath, filepath.Join("alpha", "functions", "hello-api", "handlers", "index.ts")) {
 		t.Fatalf("unexpected source path: %#v", artifact)
 	}
+	if !strings.HasSuffix(artifact.RuntimeDirectory, filepath.Join("alpha", "functions", ".supadupa-runtime", "hello-api-v3")) {
+		t.Fatalf("unexpected runtime directory: %#v", artifact)
+	}
 	source, err := os.ReadFile(artifact.SourcePath)
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +46,7 @@ func TestFunctionDeploymentServiceWritesRuntimeArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"SUPABASE_FUNCTION_NAME=hello-api", "SUPABASE_FUNCTION_VERSION=3", "VERIFY_JWT=true", "api_key=super-secret"} {
+	for _, expected := range []string{"SUPABASE_FUNCTION_NAME=hello-api", "SUPABASE_FUNCTION_VERSION=3", "VERIFY_JWT=true", "API_KEY=super-secret"} {
 		if !strings.Contains(string(secrets), expected) {
 			t.Fatalf("expected secret env %q, got:\n%s", expected, secrets)
 		}
@@ -56,6 +59,13 @@ func TestFunctionDeploymentServiceWritesRuntimeArtifact(t *testing.T) {
 		if !strings.Contains(string(metadata), expected) {
 			t.Fatalf("expected metadata %q, got:\n%s", expected, metadata)
 		}
+	}
+	runtimeSource, err := os.ReadFile(filepath.Join(artifact.RuntimeDirectory, "handlers", "index.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(runtimeSource) != input.Source {
+		t.Fatalf("expected versioned runtime source artifact, got:\n%s", runtimeSource)
 	}
 }
 
@@ -89,5 +99,8 @@ func TestFunctionDeploymentServiceDeletesRuntimeArtifact(t *testing.T) {
 	}
 	if _, err := os.Stat(artifact.Directory); !os.IsNotExist(err) {
 		t.Fatalf("expected artifact directory removed, got %v", err)
+	}
+	if _, err := os.Stat(artifact.RuntimeDirectory); !os.IsNotExist(err) {
+		t.Fatalf("expected versioned runtime directory removed, got %v", err)
 	}
 }

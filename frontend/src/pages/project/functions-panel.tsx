@@ -1,5 +1,6 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { ColumnDef } from "@tanstack/react-table";
 import { Boxes, Globe2, RadioTower, Save, SlidersHorizontal, X } from "lucide-react";
 import {
   createProjectFunctionRegion,
@@ -10,7 +11,8 @@ import {
   deployProjectFunction,
   updateProjectConfig,
 } from "../../api";
-import { formatDateTime } from "../../lib/format";
+import { DataTable } from "../../components/data-table";
+import { formatBytes, formatDateTime } from "../../lib/format";
 import { parseKeyValueLines } from "../../lib/parse";
 import type { Project, ProjectConfig, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount } from "../../types";
 
@@ -49,6 +51,7 @@ export function FunctionsConfigPanel({ project, config, loading, enabled }: { pr
       values: {
         runtime_enabled: draft.runtime_enabled || "true",
         verify_jwt_by_default: draft.verify_jwt_by_default || "true",
+        worker_timeout_ms: draft.worker_timeout_ms || "60000",
         import_map: draft.import_map || "",
         deployment_policy: draft.deployment_policy || "manual",
         secret_sync_enabled: draft.secret_sync_enabled || "true",
@@ -89,12 +92,22 @@ export function FunctionsConfigPanel({ project, config, loading, enabled }: { pr
             );
           })}
         </div>
-        <div className="grid grid-cols-[180px_minmax(0,1fr)] gap-2 max-sm:grid-cols-1">
+        <div className="grid grid-cols-[180px_180px_minmax(0,1fr)] gap-2 max-md:grid-cols-1">
           <select className="input" disabled={!enabled} value={draft.deployment_policy ?? "manual"} onChange={(event) => setValue("deployment_policy", event.target.value)}>
             <option value="manual">Manual</option>
             <option value="ci">CI managed</option>
             <option value="locked">Locked</option>
           </select>
+          <input
+            className="input"
+            disabled={!enabled}
+            min={100}
+            max={300000}
+            step={100}
+            type="number"
+            value={draft.worker_timeout_ms ?? "60000"}
+            onChange={(event) => setValue("worker_timeout_ms", event.target.value)}
+          />
           <input className="input font-mono" disabled={!enabled} placeholder="import_map.json" value={draft.import_map ?? ""} onChange={(event) => setValue("import_map", event.target.value)} />
         </div>
         <div className="usage-row">
@@ -110,7 +123,7 @@ export function FunctionsConfigPanel({ project, config, loading, enabled }: { pr
   );
 }
 
-export function FunctionsPanel({ project, functions, regions, mounts, loading, enabled }: { project?: Project; functions: ProjectFunction[]; regions: ProjectFunctionRegion[]; mounts: ProjectFunctionStorageMount[]; loading: boolean; enabled: boolean }) {
+export function FunctionsPanel({ project, functions, regions, mounts, loading, enabled }: { project?: Project; functions: ProjectFunction[]; regions: ProjectFunctionRegion[]; mounts: ProjectFunctionStorageMount[]; loading: boolean; enabled: boolean; item?: string }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState("hello-api");
   const [entrypoint, setEntrypoint] = useState("index.ts");
@@ -154,6 +167,186 @@ export function FunctionsPanel({ project, functions, regions, mounts, loading, e
     mutationFn: ({ ref, id }: { ref: string; id: string }) => deleteProjectFunctionStorageMount(ref, id),
     onSuccess: (_, variables) => invalidate(variables.ref),
   });
+  const functionColumns = useMemo<ColumnDef<ProjectFunction>[]>(
+    () => [
+      {
+        header: "Function",
+        accessorKey: "name",
+        size: 230,
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main truncate font-mono">{row.original.name}</p>
+            <p className="cell-sub truncate">v{row.original.version} · {row.original.entrypoint}</p>
+          </>
+        ),
+      },
+      {
+        header: "Auth",
+        accessorKey: "verify_jwt",
+        size: 110,
+        cell: ({ row }) => <span className={`pill ${row.original.verify_jwt ? "healthy" : "provisioning"}`}>{row.original.verify_jwt ? "jwt" : "public"}</span>,
+      },
+      {
+        header: "Status",
+        accessorKey: "status",
+        size: 130,
+        cell: ({ row }) => <span className={`pill ${row.original.status === "deployed" ? "healthy" : "provisioning"}`}>{row.original.status}</span>,
+      },
+      {
+        header: "Source",
+        accessorKey: "source_hash",
+        size: 210,
+        cell: ({ row }) => (
+          <>
+            <p className="truncate font-mono text-xs text-muted">{row.original.source_hash.slice(0, 12)}</p>
+            <p className="cell-sub">{formatBytes(row.original.source_bytes)}</p>
+          </>
+        ),
+      },
+      {
+        header: "Secrets",
+        id: "secrets",
+        size: 160,
+        cell: ({ row }) => {
+          const secrets = Object.keys(row.original.secrets);
+          return secrets.length > 0 ? <p className="truncate font-mono text-xs text-muted">{secrets.join(", ")}</p> : "none";
+        },
+      },
+      {
+        header: "Updated",
+        accessorKey: "updated_at",
+        size: 160,
+        cell: ({ row }) => formatDateTime(row.original.updated_at),
+      },
+      {
+        header: "",
+        id: "actions",
+        size: 56,
+        cell: ({ row }) => (
+          <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, nextName: row.original.name })} title="Delete function" type="button">
+            <X size={14} />
+          </button>
+        ),
+      },
+    ],
+    [deleteMutation, project],
+  );
+  const regionColumns = useMemo<ColumnDef<ProjectFunctionRegion>[]>(
+    () => [
+      {
+        header: "Function",
+        accessorKey: "function_name",
+        size: 210,
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main truncate font-mono">{row.original.function_name}</p>
+            <p className="cell-sub truncate">{row.original.region}</p>
+          </>
+        ),
+      },
+      {
+        header: "Routing",
+        accessorKey: "routing_policy",
+        size: 150,
+        cell: ({ row }) => (
+          <>
+            <p className="text-sm capitalize">{row.original.routing_policy}</p>
+            <p className="cell-sub truncate font-mono">{row.original.host_id || "any host"}</p>
+          </>
+        ),
+      },
+      {
+        header: "Invoke URL",
+        accessorKey: "invocation_url",
+        size: 360,
+        cell: ({ row }) => <p className="truncate font-mono text-xs text-muted">{row.original.invocation_url}</p>,
+      },
+      {
+        header: "Status",
+        accessorKey: "status",
+        size: 130,
+        cell: ({ row }) => <span className={`pill ${row.original.status === "configured" ? "healthy" : "provisioning"}`}>{row.original.status}</span>,
+      },
+      {
+        header: "Updated",
+        accessorKey: "updated_at",
+        size: 160,
+        cell: ({ row }) => formatDateTime(row.original.updated_at),
+      },
+      {
+        header: "",
+        id: "actions",
+        size: 56,
+        cell: ({ row }) => (
+          <button className="icon-button" disabled={!project || deleteRegionMutation.isPending} onClick={() => project && deleteRegionMutation.mutate({ ref: project.ref, id: row.original.id })} title="Delete region" type="button">
+            <X size={14} />
+          </button>
+        ),
+      },
+    ],
+    [deleteRegionMutation, project],
+  );
+  const mountColumns = useMemo<ColumnDef<ProjectFunctionStorageMount>[]>(
+    () => [
+      {
+        header: "Mount",
+        accessorKey: "function_name",
+        size: 230,
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main truncate font-mono">{row.original.function_name}</p>
+            <p className="cell-sub truncate font-mono">{row.original.mount_path}</p>
+          </>
+        ),
+      },
+      {
+        header: "Bucket",
+        accessorKey: "bucket_name",
+        size: 220,
+        cell: ({ row }) => (
+          <>
+            <p className="text-sm font-mono">{row.original.bucket_name}</p>
+            <p className="cell-sub truncate font-mono">{row.original.prefix || "whole bucket"}</p>
+          </>
+        ),
+      },
+      {
+        header: "Env",
+        accessorKey: "env_alias",
+        size: 150,
+        cell: ({ row }) => <p className="truncate font-mono text-xs text-muted">{row.original.env_alias || "none"}</p>,
+      },
+      {
+        header: "Mode",
+        accessorKey: "read_only",
+        size: 110,
+        cell: ({ row }) => <span className={`pill ${row.original.read_only ? "provisioning" : "healthy"}`}>{row.original.read_only ? "ro" : "rw"}</span>,
+      },
+      {
+        header: "Status",
+        accessorKey: "status",
+        size: 130,
+        cell: ({ row }) => <span className={`pill ${row.original.status === "configured" ? "healthy" : "provisioning"}`}>{row.original.status}</span>,
+      },
+      {
+        header: "Updated",
+        accessorKey: "updated_at",
+        size: 160,
+        cell: ({ row }) => formatDateTime(row.original.updated_at),
+      },
+      {
+        header: "",
+        id: "actions",
+        size: 56,
+        cell: ({ row }) => (
+          <button className="icon-button" disabled={!project || unmountMutation.isPending} onClick={() => project && unmountMutation.mutate({ ref: project.ref, id: row.original.id })} title="Remove mount" type="button">
+            <X size={14} />
+          </button>
+        ),
+      },
+    ],
+    [project, unmountMutation],
+  );
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -240,53 +433,36 @@ export function FunctionsPanel({ project, functions, regions, mounts, loading, e
       </div>
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading functions...</p> : null}
-        {!loading && functions.length === 0 ? <p className="text-sm text-muted">No functions deployed.</p> : null}
-        {functions.map((fn) => (
-          <div className="function-row" key={fn.id}>
+        <div className="grid gap-2">
+          <div className="usage-row">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{fn.name}</p>
-              <p className="truncate font-mono text-xs text-muted">v{fn.version} - {fn.entrypoint} - {fn.source_hash.slice(0, 12)}</p>
-              {Object.keys(fn.secrets).length > 0 ? <p className="truncate font-mono text-xs text-faint">{Object.keys(fn.secrets).join(", ")}</p> : null}
+              <p className="truncate text-sm font-medium">Function deployments</p>
+              <p className="truncate text-xs text-muted">Versioned Edge Function bundles and JWT policy.</p>
             </div>
-            <div className="flex items-center gap-2">
-              <span className={`pill ${fn.status === "deployed" ? "healthy" : "provisioning"}`}>{fn.status}</span>
-              <span className={`pill ${fn.verify_jwt ? "healthy" : "provisioning"}`}>{fn.verify_jwt ? "jwt" : "public"}</span>
-              <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, nextName: fn.name })} type="button">
-                <X size={14} />
-              </button>
-            </div>
+            <span className="pill">{functions.length} deployed</span>
           </div>
-        ))}
-        {regions.map((region) => (
-          <div className="function-row" key={region.id}>
+          <DataTable columns={functionColumns} data={functions} emptyText={loading ? "Loading function deployments..." : "No functions deployed."} minWidth={1080} />
+        </div>
+        <div className="grid gap-2">
+          <div className="usage-row">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{region.function_name} / {region.region}</p>
-              <p className="truncate font-mono text-xs text-muted">{region.invocation_url}</p>
-              <p className="truncate font-mono text-xs text-faint">{region.routing_policy}{region.host_id ? ` - ${region.host_id}` : ""}</p>
+              <p className="truncate text-sm font-medium">Regions</p>
+              <p className="truncate text-xs text-muted">Host placement and invocation routing for deployed functions.</p>
             </div>
-            <div className="flex items-center gap-2">
-              <span className={`pill ${region.status === "configured" ? "healthy" : "provisioning"}`}>{region.status}</span>
-              <button className="icon-button" disabled={!project || deleteRegionMutation.isPending} onClick={() => project && deleteRegionMutation.mutate({ ref: project.ref, id: region.id })} type="button">
-                <X size={14} />
-              </button>
-            </div>
+            <span className="pill">{regions.length} regions</span>
           </div>
-        ))}
-        {mounts.map((mount) => (
-          <div className="function-row" key={mount.id}>
+          <DataTable columns={regionColumns} data={regions} emptyText={loading ? "Loading function regions..." : "No function regions configured."} minWidth={1080} />
+        </div>
+        <div className="grid gap-2">
+          <div className="usage-row">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{mount.function_name} / {mount.bucket_name}</p>
-              <p className="truncate font-mono text-xs text-muted">{mount.mount_path}{mount.prefix ? ` - ${mount.prefix}` : ""}{mount.env_alias ? ` - ${mount.env_alias}` : ""}</p>
+              <p className="truncate text-sm font-medium">Storage mounts</p>
+              <p className="truncate text-xs text-muted">Bucket mounts available to function runtimes.</p>
             </div>
-            <div className="flex items-center gap-2">
-              <span className={`pill ${mount.status === "configured" ? "healthy" : "provisioning"}`}>{mount.status}</span>
-              <span className={`pill ${mount.read_only ? "provisioning" : "healthy"}`}>{mount.read_only ? "ro" : "rw"}</span>
-              <button className="icon-button" disabled={!project || unmountMutation.isPending} onClick={() => project && unmountMutation.mutate({ ref: project.ref, id: mount.id })} type="button">
-                <X size={14} />
-              </button>
-            </div>
+            <span className="pill">{mounts.length} mounts</span>
           </div>
-        ))}
+          <DataTable columns={mountColumns} data={mounts} emptyText={loading ? "Loading storage mounts..." : "No storage mounts configured."} minWidth={1080} />
+        </div>
         {deployMutation.error ? <p className="text-sm text-danger">{deployMutation.error.message}</p> : null}
         {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
         {regionMutation.error ? <p className="text-sm text-danger">{regionMutation.error.message}</p> : null}

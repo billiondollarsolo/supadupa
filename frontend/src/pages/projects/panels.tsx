@@ -5,13 +5,14 @@ import { flexRender, getCoreRowModel, getFilteredRowModel, getSortedRowModel, us
 import { Boxes, BrainCircuit, Database, Gauge, Network, Plus, Search, Server, Shield, Sparkles, type LucideIcon } from "lucide-react";
 import { createProject } from "../../api";
 import { formatBytes, formatDateTime } from "../../lib/format";
-import type { Host, HostCapacity, Org, PlatformDefaults, Project } from "../../types";
+import type { Host, HostCapacity, Org, PlatformDefaults, Project, StackReleaseManifest } from "../../types";
 
 type CreateProjectForm = {
   ref: string;
   name: string;
   host_id: string;
   domain: string;
+  stack_version: string;
   profile: "essential" | "full" | "orioledb";
   resource_tier: "small" | "medium" | "large";
 };
@@ -276,7 +277,7 @@ export function ProjectCards({
           </button>
         </div>
       </div>
-      <div className="mt-4 grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-lg:grid-cols-1">
+      <div className="project-card-grid mt-4">
         {loading ? <p className="text-sm text-muted">Loading projects...</p> : null}
         {!loading && visibleProjects.length === 0 ? <p className="text-sm text-muted">No projects available.</p> : null}
         {visibleProjects.map((project) => {
@@ -284,37 +285,37 @@ export function ProjectCards({
           const reservation = reservationForTier(project.spec.resource_tier);
           return (
             <article className={project.ref === selectedRef ? "project-card active" : "project-card"} key={project.ref}>
-              <button className="grid min-h-[360px] w-full min-w-0 content-start gap-3 text-left" onClick={() => onSelect(project.ref)} type="button">
-                <div className="flex items-start justify-between gap-3">
+              <button className="project-card-button" onClick={() => onSelect(project.ref)} type="button">
+                <div className="project-card-header">
                   <div className="min-w-0">
                     <p className="truncate text-base font-medium">{project.name}</p>
                     <p className="truncate font-mono text-xs text-muted">{project.ref}</p>
                   </div>
                   <span className={`pill ${project.status}`}>{project.status}</span>
                 </div>
-                <div className="rounded-md border border-border bg-surface p-2">
+                <div className="project-card-panel">
                   <p className="label">API URL</p>
                   <p className="mt-1 truncate font-mono text-xs text-muted">https://{project.ref}.{project.spec.domain}</p>
                 </div>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="project-card-detail-grid">
                   <CardMetric icon={Database} label="Org" value={orgNamesById.get(project.org_id) ?? project.org_id} />
                   <CardMetric icon={Boxes} label="Tier" value={project.spec.resource_tier} />
                   <CardMetric icon={Database} label="Profile" value={project.spec.profile} />
                   <CardMetric icon={Shield} label="Access" value="org/team + project grants" />
                 </div>
                 <ResourceSummary host={host} reservation={reservation} />
-                <div className="grid grid-cols-2 gap-2">
+                <div className="project-card-detail-grid">
                   <CardMetric icon={Boxes} label="Host" value={host?.name ?? "Default local runtime"} />
                   <CardMetric icon={Database} label="Version" value={project.spec.stack_version} />
                   <CardMetric icon={Boxes} label="Created" value={formatDateTime(project.created_at)} />
                   <CardMetric icon={Shield} label="Runtime" value={project.runtime_status?.phase ?? project.status} />
                 </div>
-                <div className="rounded-md border border-border bg-surface p-2">
+                <div className="project-card-panel">
                   <p className="truncate text-xs text-muted">{project.message ?? "Dedicated isolated stack"}</p>
                   <p className="truncate font-mono text-xs text-faint">{host?.address ?? "local"} · {project.spec.domain}</p>
                 </div>
               </button>
-              <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="project-card-actions">
                 <button className="button secondary h-8 min-h-8 justify-center" onClick={() => onSelect(project.ref)} type="button">
                   Open
                 </button>
@@ -333,7 +334,7 @@ export function ProjectCards({
 
 function ResourceSummary({ host, reservation }: { host?: Host; reservation: HostCapacity }) {
   return (
-    <div className="rounded-md border border-border bg-surface p-3">
+    <div className="resource-summary">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="label">Reserved resources</p>
@@ -408,6 +409,7 @@ export function CreateProjectPanel({
   orgs,
   hosts,
   defaults,
+  stackReleases,
   onSelectOrg,
   onCreated,
 }: {
@@ -415,6 +417,7 @@ export function CreateProjectPanel({
   orgs: Org[];
   hosts: Host[];
   defaults?: PlatformDefaults;
+  stackReleases: StackReleaseManifest[];
   onSelectOrg: (orgId: string) => void;
   onCreated: (project: Project) => void;
 }) {
@@ -426,6 +429,7 @@ export function CreateProjectPanel({
     name: "Alpha",
     host_id: "",
     domain: "supadupa.test",
+    stack_version: "latest",
     profile: "full",
     resource_tier: "small",
   });
@@ -434,6 +438,7 @@ export function CreateProjectPanel({
     setForm((current) => ({
       ...current,
       domain: defaults.domain || current.domain,
+      stack_version: defaults.stack_version || current.stack_version,
       profile: defaults.profile === "essential" || defaults.profile === "orioledb" ? defaults.profile : "full",
       resource_tier: defaults.resource_tier === "medium" || defaults.resource_tier === "large" ? defaults.resource_tier : "small",
     }));
@@ -459,6 +464,8 @@ export function CreateProjectPanel({
   const selectedHost = hosts.find((host) => host.id === form.host_id);
   const selectedOrg = orgs.find((org) => org.id === orgId);
   const selectedIntent = intentOptions.find((option) => option.id === intent) ?? intentOptions[1];
+  const latestRelease = stackReleases[0];
+  const selectedRelease = stackReleases.find((release) => release.version === form.stack_version);
   const reservation = reservationForTier(form.resource_tier);
   const hostCapacityProblem = Boolean(selectedHost && !hostCanFit(selectedHost, reservation));
   const currentValid =
@@ -566,6 +573,21 @@ export function CreateProjectPanel({
           {step === 4 ? (
             <div className="grid gap-4">
               <div>
+                <label className="grid gap-1">
+                  <span className="label">Stack version</span>
+                  <select className="input font-mono" value={form.stack_version} onChange={(event) => setForm({ ...form, stack_version: event.target.value })}>
+                    <option value="latest">latest{latestRelease ? ` (${latestRelease.version})` : ""}</option>
+                    {stackReleases.map((release) => (
+                      <option key={release.version} value={release.version}>{release.version}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="mt-2 wizard-review">
+                  <ReviewRow label="Release catalog" value={stackReleases.length ? `${stackReleases.length} supported stable releases` : "Loading supported releases"} />
+                  <ReviewRow label="Resolved release" value={form.stack_version === "latest" ? latestRelease?.version ?? "latest" : selectedRelease?.version ?? form.stack_version} />
+                </div>
+              </div>
+              <div>
                 <p className="label">Stack profile</p>
                 <div className="mt-2 grid grid-cols-3 gap-2 max-lg:grid-cols-1">
                   {(["full", "essential", "orioledb"] as const).map((profile) => (
@@ -600,6 +622,7 @@ export function CreateProjectPanel({
               <ReviewRow label="Ref" value={form.ref} />
               <ReviewRow label="Org" value={selectedOrg ? selectedOrg.name : orgId || "Missing"} />
               <ReviewRow label="Host" value={selectedHost ? `${selectedHost.name} · ${selectedHost.address}` : "Default local runtime"} />
+              <ReviewRow label="Stack" value={form.stack_version === "latest" ? `latest (${latestRelease?.version ?? "default"})` : form.stack_version} />
               <ReviewRow label="Profile" value={form.profile} />
               <ReviewRow label="Tier" value={`${form.resource_tier} · ${reservation.cpu} vCPU · ${formatBytes(reservation.ram_mb * 1024 * 1024)} RAM · ${reservation.disk_gb} GB disk`} />
               <ReviewRow label="API domain" value={`${form.ref}.${form.domain}`} />
@@ -624,7 +647,7 @@ export function CreateProjectPanel({
           {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
         </form>
       </section>
-      <CreatePlanPanel form={form} host={selectedHost} intent={selectedIntent} org={selectedOrg} reservation={reservation} />
+      <CreatePlanPanel form={form} host={selectedHost} intent={selectedIntent} org={selectedOrg} reservation={reservation} stackReleases={stackReleases} />
     </div>
   );
 }
@@ -664,13 +687,16 @@ function CreatePlanPanel({
   intent,
   org,
   reservation,
+  stackReleases,
 }: {
   form: CreateProjectForm;
   host?: Host;
   intent: (typeof intentOptions)[number];
   org?: Org;
   reservation: HostCapacity;
+  stackReleases: StackReleaseManifest[];
 }) {
+  const latestRelease = stackReleases[0];
   return (
     <aside className="grid content-start gap-3">
       <section className="panel">
@@ -691,6 +717,7 @@ function CreatePlanPanel({
           <div className="wizard-review">
             <ReviewRow label="Org" value={org?.name ?? "Select organization"} />
             <ReviewRow label="Host" value={host ? host.name : "Default local runtime"} />
+            <ReviewRow label="Stack" value={form.stack_version === "latest" ? `latest (${latestRelease?.version ?? "default"})` : form.stack_version} />
             <ReviewRow label="API URL" value={`https://${form.ref || "<ref>"}.${form.domain || "<domain>"}`} />
             <ReviewRow label="Profile" value={form.profile} />
           </div>

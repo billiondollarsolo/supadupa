@@ -458,11 +458,19 @@ export function AuthProvidersPanel({ project, config, loading }: { project?: Pro
         oauth_oidc_scopes: draft.oauth_oidc_scopes || "openid email profile",
         phone_enabled: draft.phone_enabled || "false",
         sms_provider: draft.sms_provider || "",
+        sms_otp_exp: draft.sms_otp_exp || "60",
+        sms_otp_length: draft.sms_otp_length || "6",
+        sms_max_frequency: draft.sms_max_frequency || "60s",
+        sms_template: draft.sms_template || "",
+        sms_test_otp_handle: draft.sms_test_otp_handle || "",
+        sms_test_otp_valid_until: draft.sms_test_otp_valid_until || "",
         sms_twilio_account_sid: draft.sms_twilio_account_sid || "",
         sms_twilio_auth_token_handle: draft.sms_twilio_auth_token_handle || "",
         sms_twilio_message_service_sid: draft.sms_twilio_message_service_sid || "",
         sms_messagebird_originator: draft.sms_messagebird_originator || "",
         sms_messagebird_access_key_handle: draft.sms_messagebird_access_key_handle || "",
+        sms_textlocal_sender: draft.sms_textlocal_sender || "",
+        sms_textlocal_api_key_handle: draft.sms_textlocal_api_key_handle || "",
         sms_vonage_from: draft.sms_vonage_from || "",
         sms_vonage_api_key: draft.sms_vonage_api_key || "",
         sms_vonage_api_secret_handle: draft.sms_vonage_api_secret_handle || "",
@@ -622,7 +630,7 @@ function ProviderDetailFields({
   }
 
   if (activeProvider === "phone") {
-    const sharedSecret = draft.sms_twilio_auth_token_handle || draft.sms_messagebird_access_key_handle || draft.sms_vonage_api_secret_handle || "";
+    const sharedSecret = draft.sms_twilio_auth_token_handle || draft.sms_messagebird_access_key_handle || draft.sms_textlocal_api_key_handle || draft.sms_vonage_api_secret_handle || "";
     return (
       <>
         <DetailHeader detail="Phone login and phone MFA use this project-specific SMS provider." title="Phone login" onBack={onBack} />
@@ -637,24 +645,34 @@ function ProviderDetailFields({
           <select className="input" value={draft.sms_provider ?? ""} onChange={(event) => setValue("sms_provider", event.target.value)}>
             <option value="">SMS off</option>
             <option value="twilio">Twilio</option>
+            <option value="twilio_verify">Twilio Verify</option>
             <option value="messagebird">MessageBird</option>
+            <option value="textlocal">TextLocal</option>
             <option value="vonage">Vonage</option>
           </select>
           <input className="input font-mono" placeholder="secret://projects/ref/sms" value={sharedSecret} onChange={(event) => {
             setValue("sms_twilio_auth_token_handle", event.target.value);
             setValue("sms_messagebird_access_key_handle", event.target.value);
+            setValue("sms_textlocal_api_key_handle", event.target.value);
             setValue("sms_vonage_api_secret_handle", event.target.value);
           }} />
           <input className="input font-mono" placeholder="twilio account sid / messagebird originator" value={draft.sms_twilio_account_sid || draft.sms_messagebird_originator || ""} onChange={(event) => {
             setValue("sms_twilio_account_sid", event.target.value);
             setValue("sms_messagebird_originator", event.target.value);
+            setValue("sms_textlocal_sender", event.target.value);
           }} />
           <input className="input font-mono" placeholder="message service / vonage from" value={draft.sms_twilio_message_service_sid || draft.sms_vonage_from || ""} onChange={(event) => {
             setValue("sms_twilio_message_service_sid", event.target.value);
             setValue("sms_vonage_from", event.target.value);
           }} />
           <input className="input font-mono" placeholder="vonage api key" value={draft.sms_vonage_api_key ?? ""} onChange={(event) => setValue("sms_vonage_api_key", event.target.value)} />
+          <input className="input font-mono" inputMode="numeric" min="1" value={draft.sms_otp_exp ?? "60"} onChange={(event) => setValue("sms_otp_exp", event.target.value)} type="number" />
+          <input className="input font-mono" inputMode="numeric" min="4" max="10" value={draft.sms_otp_length ?? "6"} onChange={(event) => setValue("sms_otp_length", event.target.value)} type="number" />
+          <input className="input font-mono" placeholder="60s" value={draft.sms_max_frequency ?? "60s"} onChange={(event) => setValue("sms_max_frequency", event.target.value)} />
+          <input className="input font-mono" placeholder="secret://projects/ref/sms-test-otp" value={draft.sms_test_otp_handle ?? ""} onChange={(event) => setValue("sms_test_otp_handle", event.target.value)} />
+          <input className="input font-mono" placeholder="2026-12-31T23:59:59Z" value={draft.sms_test_otp_valid_until ?? ""} onChange={(event) => setValue("sms_test_otp_valid_until", event.target.value)} />
         </div>
+        <textarea className="input mt-2 min-h-[96px] font-mono" placeholder="Your code is {{ .Code }}" value={draft.sms_template ?? ""} onChange={(event) => setValue("sms_template", event.target.value)} />
       </>
     );
   }

@@ -237,6 +237,7 @@ type projectBranchArgs struct {
 	BranchRef string `json:"branch_ref"`
 	Name      string `json:"name"`
 	TTLHours  int    `json:"ttl_hours"`
+	WithData  bool   `json:"with_data"`
 }
 
 type projectReplicaArgs struct {
@@ -1373,7 +1374,7 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 			return nil, err
 		}
 		method, path = http.MethodPost, "/v1/projects/"+url.PathEscape(args.Ref)+"/branches"
-		body = map[string]any{"ref": args.BranchRef, "name": args.Name, "ttl_hours": args.TTLHours}
+		body = map[string]any{"ref": args.BranchRef, "name": args.Name, "ttl_hours": args.TTLHours, "with_data": args.WithData}
 	case "supadupa_delete_project_branch":
 		args, err := decodeProjectBranchArgs(params.Arguments)
 		if err != nil {
@@ -1875,6 +1876,7 @@ func tools() []map[string]any {
 			"branch_ref": map[string]string{"type": "string", "description": "New branch project ref"},
 			"name":       map[string]string{"type": "string", "description": "Branch project display name"},
 			"ttl_hours":  map[string]string{"type": "integer", "description": "Optional branch TTL in hours"},
+			"with_data":  map[string]string{"type": "boolean", "description": "Clone source project data into the branch"},
 		},
 		"required": []string{"ref", "branch_ref"},
 	}

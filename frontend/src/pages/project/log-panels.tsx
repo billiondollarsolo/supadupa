@@ -1,13 +1,17 @@
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, RadioTower, X } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import type { ColumnDef } from "@tanstack/react-table";
+import { ArrowLeft, Plus, X } from "lucide-react";
 import { createProjectLogDrain, deleteProjectLogDrain, streamProjectLogs } from "../../api";
-import { formatTime } from "../../lib/format";
+import { DataTable } from "../../components/data-table";
+import { formatDateTime, formatTime } from "../../lib/format";
 import type { LogDrain, Project, ProjectLog } from "../../types";
 
-export function LogDrainsPanel({ project, drains, loading, enabled }: { project?: Project; drains: LogDrain[]; loading: boolean; enabled: boolean }) {
+export function LogDrainsPanel({ project, drains, item, loading, enabled }: { project?: Project; drains: LogDrain[]; loading: boolean; enabled: boolean; item?: string }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [target, setTarget] = useState("https");
   const [destination, setDestination] = useState("");
   const [credential, setCredential] = useState("");
@@ -23,14 +27,59 @@ export function LogDrainsPanel({ project, drains, loading, enabled }: { project?
       setDestination("");
       setCredential("");
       invalidate(variables.ref);
+      void navigate({ to: "/projects/$ref/logs", params: { ref: variables.ref } });
     },
   });
   const deleteMutation = useMutation({
     mutationFn: ({ ref, id }: { ref: string; id: string }) => deleteProjectLogDrain(ref, id),
     onSuccess: (_, variables) => invalidate(variables.ref),
   });
+  const drainColumns = useMemo<ColumnDef<LogDrain>[]>(
+    () => [
+      {
+        header: "Target",
+        accessorKey: "target",
+        size: 150,
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main uppercase">{row.original.target}</p>
+            <p className="cell-sub font-mono">{row.original.id.slice(0, 12)}</p>
+          </>
+        ),
+      },
+      {
+        header: "Destination",
+        accessorKey: "config",
+        size: 360,
+        cell: ({ row }) => (
+          <>
+            <p className="truncate font-mono text-xs text-muted">{row.original.config.url ?? row.original.config.bucket ?? row.original.config.site ?? "configured"}</p>
+            {row.original.config.prefix ? <p className="cell-sub font-mono">{row.original.config.prefix}</p> : null}
+          </>
+        ),
+      },
+      {
+        header: "Created",
+        accessorKey: "created_at",
+        size: 160,
+        cell: ({ row }) => formatDateTime(row.original.created_at),
+      },
+      {
+        header: "",
+        id: "actions",
+        size: 56,
+        cell: ({ row }) => (
+          <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, id: row.original.id })} title="Delete drain" type="button">
+            <X size={14} />
+          </button>
+        ),
+      },
+    ],
+    [deleteMutation.isPending, project],
+  );
   const destinationLabel = target === "s3" ? "Bucket" : target === "datadog" ? "Site" : "URL";
   const credentialLabel = target === "datadog" ? "API key" : target === "s3" ? "Prefix" : "Token";
+  const showingCreate = item === "new";
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -47,15 +96,35 @@ export function LogDrainsPanel({ project, drains, loading, enabled }: { project?
     createMutation.mutate({ ref: project.ref, nextTarget: target, config });
   }
 
+  function openCreate() {
+    if (!project) return;
+    void navigate({ to: "/projects/$ref/logs/$section/$item", params: { ref: project.ref, section: "drains", item: "new" } });
+  }
+
+  function closeCreate() {
+    if (!project) return;
+    void navigate({ to: "/projects/$ref/logs", params: { ref: project.ref } });
+  }
+
   return (
     <section className="panel">
       <div className="section-head">
         <div>
           <p className="label">Log drains</p>
-          <h2>External exports</h2>
+          <h2>{showingCreate ? "New drain" : "External exports"}</h2>
+          <p className="mt-1 text-sm text-muted">{showingCreate ? "Create one external log export." : "Project log exports to external destinations."}</p>
         </div>
-        <RadioTower size={15} className="text-faint" />
+        {showingCreate ? (
+          <button className="icon-button" onClick={closeCreate} title="Back to drains" type="button">
+            <ArrowLeft size={14} />
+          </button>
+        ) : (
+          <button className="icon-button" disabled={!enabled || !project} onClick={openCreate} title="Add log drain" type="button">
+            <Plus size={14} />
+          </button>
+        )}
       </div>
+      {showingCreate ? (
       <form className="mt-4 grid gap-2" onSubmit={submit}>
         {!enabled ? (
           <div className="rounded-md border border-border bg-bg p-3">
@@ -82,20 +151,13 @@ export function LogDrainsPanel({ project, drains, loading, enabled }: { project?
           </button>
         </div>
       </form>
+      ) : (
+        <div className="mt-4">
+          <DataTable columns={drainColumns} data={drains} emptyText={loading ? "Loading log drains..." : "No log drains configured."} minWidth={760} />
+        </div>
+      )}
       <div className="mt-3 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading log drains...</p> : null}
-        {!loading && drains.length === 0 ? <p className="text-sm text-muted">No log drains configured.</p> : null}
-        {drains.map((drain) => (
-          <div className="log-drain-row" key={drain.id}>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{drain.target}</p>
-              <p className="truncate font-mono text-xs text-muted">{drain.config.url ?? drain.config.bucket ?? drain.config.site ?? "configured"}</p>
-            </div>
-            <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, id: drain.id })} type="button">
-              <X size={14} />
-            </button>
-          </div>
-        ))}
         {createMutation.error ? <p className="text-sm text-danger">{createMutation.error.message}</p> : null}
         {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
       </div>
@@ -147,6 +209,47 @@ export function ProjectLogsPanel({ project, logs, loading }: { project?: Project
     return next.slice(0, 20);
   }, [liveLogs, logs]);
   const streamLabel = streamState === "live" ? "live" : streamState === "connecting" ? "connecting" : streamState === "error" ? "stream offline" : "idle";
+  const logColumns = useMemo<ColumnDef<ProjectLog>[]>(
+    () => [
+      {
+        header: "Level",
+        accessorKey: "level",
+        size: 110,
+        cell: ({ row }) => (
+          <span className="inline-flex items-center gap-2">
+            <span className={`level-dot ${row.original.level}`} />
+            <span className={`pill ${row.original.level === "error" ? "error" : row.original.level === "warning" ? "warning" : "healthy"}`}>{row.original.level}</span>
+          </span>
+        ),
+      },
+      {
+        header: "Event",
+        accessorKey: "message",
+        size: 420,
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main truncate">{row.original.message}</p>
+            {Object.keys(row.original.metadata ?? {}).length > 0 ? (
+              <p className="cell-sub truncate font-mono">{formatMetadata(row.original.metadata)}</p>
+            ) : null}
+          </>
+        ),
+      },
+      {
+        header: "Project",
+        accessorKey: "project_ref",
+        size: 130,
+        cell: ({ row }) => <p className="font-mono text-xs text-muted">{row.original.project_ref}</p>,
+      },
+      {
+        header: "Time",
+        accessorKey: "created_at",
+        size: 120,
+        cell: ({ row }) => <time className="text-xs text-faint">{formatTime(row.original.created_at)}</time>,
+      },
+    ],
+    [],
+  );
 
   return (
     <section className="panel">
@@ -160,17 +263,12 @@ export function ProjectLogsPanel({ project, logs, loading }: { project?: Project
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading project logs...</p> : null}
         {streamError ? <p className="text-sm text-danger">{streamError}</p> : null}
-        {!loading && mergedLogs.length === 0 ? <p className="text-sm text-muted">No project logs yet.</p> : null}
-        {mergedLogs.map((entry) => (
-          <div className="log-row" key={entry.id}>
-            <span className={`level-dot ${entry.level}`} />
-            <div className="min-w-0">
-              <p className="truncate text-sm">{entry.message}</p>
-              <p className="text-xs text-faint">{formatTime(entry.created_at)}</p>
-            </div>
-          </div>
-        ))}
+        <DataTable columns={logColumns} data={mergedLogs} emptyText={loading ? "Loading project logs..." : "No project logs yet."} minWidth={780} rowClassName={(entry) => entry.level === "error" ? "table-row-error" : entry.level === "warning" ? "table-row-warning" : ""} />
       </div>
     </section>
   );
+}
+
+function formatMetadata(metadata: Record<string, string>) {
+  return Object.entries(metadata).map(([key, value]) => `${key}=${value}`).join(" · ");
 }

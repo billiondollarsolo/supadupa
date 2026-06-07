@@ -138,9 +138,33 @@ const projectStorageRoute = createRoute({
   component: ProjectStoragePage,
 });
 
+const projectStorageSectionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "projects/$ref/storage/$section",
+  component: ProjectStoragePage,
+});
+
+const projectStorageSectionItemRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "projects/$ref/storage/$section/$item",
+  component: ProjectStoragePage,
+});
+
 const projectFunctionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "projects/$ref/functions",
+  component: ProjectFunctionsPage,
+});
+
+const projectFunctionsSectionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "projects/$ref/functions/$section",
+  component: ProjectFunctionsPage,
+});
+
+const projectFunctionsSectionItemRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "projects/$ref/functions/$section/$item",
   component: ProjectFunctionsPage,
 });
 
@@ -153,6 +177,18 @@ const projectRealtimeRoute = createRoute({
 const projectLogsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "projects/$ref/logs",
+  component: ProjectLogsPage,
+});
+
+const projectLogsSectionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "projects/$ref/logs/$section",
+  component: ProjectLogsPage,
+});
+
+const projectLogsSectionItemRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "projects/$ref/logs/$section/$item",
   component: ProjectLogsPage,
 });
 
@@ -204,6 +240,12 @@ const hostsRoute = createRoute({
   component: HostsPage,
 });
 
+const hostsItemRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "hosts/$item",
+  component: HostsPage,
+});
+
 const auditRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "audit",
@@ -219,6 +261,12 @@ const settingsRoute = createRoute({
 const settingsSectionRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "settings/$section",
+  component: SettingsRoutePage,
+});
+
+const settingsSectionItemRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "settings/$section/$item",
   component: SettingsRoutePage,
 });
 
@@ -239,9 +287,15 @@ const routeTree = rootRoute.addChildren([
   projectDatabaseSectionRoute,
   projectDatabaseSectionItemRoute,
   projectStorageRoute,
+  projectStorageSectionRoute,
+  projectStorageSectionItemRoute,
   projectFunctionsRoute,
+  projectFunctionsSectionRoute,
+  projectFunctionsSectionItemRoute,
   projectRealtimeRoute,
   projectLogsRoute,
+  projectLogsSectionRoute,
+  projectLogsSectionItemRoute,
   projectConfigRoute,
   projectConfigSectionRoute,
   projectConfigSectionItemRoute,
@@ -250,9 +304,11 @@ const routeTree = rootRoute.addChildren([
   securityRoute,
   securitySectionRoute,
   hostsRoute,
+  hostsItemRoute,
   auditRoute,
   settingsRoute,
   settingsSectionRoute,
+  settingsSectionItemRoute,
 ]);
 
 const router = createRouter({ routeTree });

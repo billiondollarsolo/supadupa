@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 import type { ConfigArea, ProjectTab } from "./project-config";
-import type { AdvisorFinding, AuditEvent, AuditIntegrity, Backup, BackupPolicy, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, FleetMetrics, Host, LogDrain, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformDefaults, PlatformSSOConfig, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectSecret, ProjectServices, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "../types";
+import type { AdvisorFinding, AuditEvent, AuditIntegrity, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, FleetMetrics, Host, LogDrain, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRouteManifest, ProjectSecret, ProjectServices, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "../types";
 
 export type QueryState<T> = {
   data: T | undefined;
@@ -28,8 +28,11 @@ export type DashboardContextValue = {
   advisorFindings: QueryState<AdvisorFinding[]>;
   complianceReport: QueryState<ComplianceReport>;
   provisionerStatus: QueryState<ProvisionerStatus>;
+  runtimeConfig: QueryState<RuntimeConfig>;
   platformDefaults: QueryState<PlatformDefaults>;
   platformSSO: QueryState<PlatformSSOConfig>;
+  backupStorageTargets: QueryState<BackupStorageTarget[]>;
+  platformBackups: QueryState<PlatformBackup[]>;
   scimServiceProviderConfig: QueryState<SCIMServiceProviderConfig>;
   scimUsers: QueryState<SCIMListResponse<SCIMUser>>;
   scimGroups: QueryState<SCIMListResponse<SCIMGroup>>;
@@ -52,7 +55,7 @@ export type DashboardContextValue = {
   cliProfile: QueryState<ProjectCLIProfile>;
   projectMetrics: QueryState<ProjectMetrics>;
   projectAccess: QueryState<ProjectAccessGrant[]>;
-  routes: QueryState<ProjectRoute[]>;
+  routeManifest: QueryState<ProjectRouteManifest>;
   domains: QueryState<ProjectDomain[]>;
   projectServices: QueryState<ProjectServices>;
   projectConfig: QueryState<ProjectConfig>;
@@ -86,6 +89,7 @@ export type DashboardContextValue = {
   logDrains: QueryState<LogDrain[]>;
   backups: QueryState<Backup[]>;
   backupPolicy: QueryState<BackupPolicy>;
+  recoverability: QueryState<ProjectRecoverabilityStatus>;
   pitrPolicy: QueryState<PITRPolicy>;
   walArchives: QueryState<WALArchive[]>;
   projectLogs: QueryState<ProjectLog[]>;

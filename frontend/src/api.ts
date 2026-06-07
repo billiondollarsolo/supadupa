@@ -1,4 +1,4 @@
-import type { AdvisorFinding, AuditEvent, AuditIntegrity, AuthResponse, AuthState, Backup, BackupPolicy, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, CreateBranchResponse, FleetMetrics, Host, HostCapacity, LogDrain, MFAEnrollment, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformDefaults, PlatformSSOConfig, PlatformSSOInitiation, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectSecret, ProjectSecretReveal, ProjectServices, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "./types";
+import type { AdvisorFinding, AuditEvent, AuditIntegrity, AuthResponse, AuthState, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, CreateBranchResponse, FleetMetrics, Host, HostCapacity, LogDrain, MFAEnrollment, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, PlatformSSOInitiation, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectRouteManifest, ProjectSecret, ProjectSecretReveal, ProjectServices, ProjectStudioSession, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RestoreToTimeResponse, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest, Team, TeamMember, UpgradeProjectResponse, UsageSnapshot, User, WALArchive } from "./types";
 
 const apiBase = resolveApiBase();
 const tokenStorageKey = "supadupa_token";
@@ -15,6 +15,12 @@ function resolveApiBase() {
   const fallbackProtocol = runtimeURL?.protocol || "http:";
 
   if (!configured) {
+    if (runtimeURL && !isLoopbackHost(runtimeURL.hostname)) {
+      if (runtimeURL.hostname.startsWith("admin.")) {
+        return `${fallbackProtocol}//api.${runtimeURL.hostname.slice("admin.".length)}`;
+      }
+      return runtimeOrigin;
+    }
     return `${fallbackProtocol}//${fallbackHost}:8080`;
   }
 
@@ -60,16 +66,47 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
+    credentials: "include",
     headers,
   });
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(detail || response.statusText);
+    throw new Error(formatErrorDetail(detail) || response.statusText);
   }
   if (response.status === 204) {
     return undefined as T;
   }
   return response.json() as Promise<T>;
+}
+
+function formatErrorDetail(detail: string) {
+  if (!detail) return "";
+  try {
+    const payload = JSON.parse(detail) as {
+      error?: string;
+      backup?: { id?: string };
+      previous_version?: string;
+      target_version?: string;
+      rollback_attempted?: boolean;
+      rollback_error?: string;
+    };
+    if (!payload.error) return detail;
+    const parts = [payload.error];
+    if (payload.backup?.id) {
+      parts.push(`backup ${payload.backup.id}`);
+    }
+    if (payload.previous_version && payload.target_version) {
+      parts.push(`${payload.previous_version} -> ${payload.target_version}`);
+    }
+    if (payload.rollback_error) {
+      parts.push(`rollback failed: ${payload.rollback_error}`);
+    } else if (payload.rollback_attempted) {
+      parts.push("rollback attempted");
+    }
+    return parts.join(" · ");
+  } catch {
+    return detail;
+  }
 }
 
 export function getApiHealth() {
@@ -82,6 +119,14 @@ export function getAuthState() {
 
 export function getProvisionerStatus() {
   return request<ProvisionerStatus>("/v1/provisioner");
+}
+
+export function getRuntimeConfig() {
+  return request<RuntimeConfig>("/v1/runtime-config");
+}
+
+export function listStackReleases() {
+  return request<StackReleaseManifest[]>("/v1/stack-releases");
 }
 
 export function listOrgs() {
@@ -232,10 +277,74 @@ export function getPlatformSSOConfig() {
   return request<PlatformSSOConfig>("/v1/settings/sso");
 }
 
-export function updatePlatformSSOConfig(input: Omit<PlatformSSOConfig, "provider" | "updated_at">) {
+export type PlatformSSOConfigInput = Omit<PlatformSSOConfig, "provider" | "updated_at" | "scim_token_configured"> & {
+  scim_token?: string;
+};
+
+export function updatePlatformSSOConfig(input: PlatformSSOConfigInput) {
   return request<PlatformSSOConfig>("/v1/settings/sso", {
     method: "PUT",
     body: JSON.stringify(input),
+  });
+}
+
+export type BackupStorageTargetInput = {
+  name: string;
+  type?: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  access_key_id: string;
+  secret_access_key?: string;
+  force_path_style: boolean;
+  default: boolean;
+};
+
+export function listBackupStorageTargets() {
+  return request<BackupStorageTarget[]>("/v1/backup-storage-targets");
+}
+
+export function createBackupStorageTarget(input: BackupStorageTargetInput) {
+  return request<BackupStorageTarget>("/v1/backup-storage-targets", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateBackupStorageTarget(id: string, input: BackupStorageTargetInput) {
+  return request<BackupStorageTarget>(`/v1/backup-storage-targets/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function testBackupStorageTarget(id: string) {
+  return request<BackupStorageTarget>(`/v1/backup-storage-targets/${encodeURIComponent(id)}/test`, {
+    method: "POST",
+  });
+}
+
+export function deleteBackupStorageTarget(id: string) {
+  return request<void>(`/v1/backup-storage-targets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export function listPlatformBackups() {
+  return request<PlatformBackup[]>("/v1/platform/backups");
+}
+
+export function triggerPlatformBackup() {
+  return request<PlatformBackup>("/v1/platform/backups", {
+    method: "POST",
+  });
+}
+
+export function restorePlatformBackup(id: string) {
+  return request<{ backup: PlatformBackup; restore_path: string; restore_state: string; runtime_reconciled: number; runtime_destroyed: number; runtime_errors?: string[] }>(`/v1/platform/backups/${encodeURIComponent(id)}/restore`, {
+    method: "POST",
+    body: JSON.stringify({ confirm: "restore-control-plane" }),
   });
 }
 
@@ -263,6 +372,12 @@ export function login(input: { email: string; password: string; totp_code?: stri
   return request<AuthResponse>("/v1/auth/login", {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+export function logoutSession() {
+  return request<void>("/v1/auth/logout", {
+    method: "POST",
   });
 }
 
@@ -340,6 +455,7 @@ export type CreateProjectInput = {
   name: string;
   host_id: string;
   domain: string;
+  stack_version: string;
   profile: "essential" | "full" | "orioledb";
   resource_tier: "small" | "medium" | "large";
 };
@@ -358,6 +474,10 @@ export function getConnect(ref: string) {
 
 export function getProjectCLIProfile(ref: string) {
   return request<ProjectCLIProfile>(`/v1/projects/${ref}/connect/cli`);
+}
+
+export function createProjectStudioSession(ref: string) {
+  return request<ProjectStudioSession>(`/v1/projects/${ref}/studio-session`);
 }
 
 export function listProjectAccess(ref: string) {
@@ -379,6 +499,10 @@ export function deleteProjectAccess(ref: string, subjectType: string, subjectId:
 
 export function listProjectRoutes(ref: string) {
   return request<ProjectRoute[]>(`/v1/projects/${ref}/routes`);
+}
+
+export function getProjectRouteManifest(ref: string) {
+  return request<ProjectRouteManifest>(`/v1/projects/${ref}/route-manifest`);
 }
 
 export function listProjectDomains(ref: string) {
@@ -409,6 +533,19 @@ export function deleteProjectDomain(ref: string, fqdn: string) {
   });
 }
 
+export function uploadProjectDomainCertificate(ref: string, fqdn: string, certificatePEM: string, privateKeyPEM: string) {
+  return request<ProjectDomain>(`/v1/projects/${ref}/domains/${encodeURIComponent(fqdn)}/certificate`, {
+    method: "PUT",
+    body: JSON.stringify({ certificate_pem: certificatePEM, private_key_pem: privateKeyPEM }),
+  });
+}
+
+export function resetProjectDomainCertificate(ref: string, fqdn: string) {
+  return request<ProjectDomain>(`/v1/projects/${ref}/domains/${encodeURIComponent(fqdn)}/certificate`, {
+    method: "DELETE",
+  });
+}
+
 export function getProjectConfig(ref: string, area: string) {
   return request<ProjectConfig>(`/v1/projects/${ref}/config/${area}`);
 }
@@ -424,7 +561,7 @@ export function listProjectBranches(ref: string) {
   return request<ProjectBranch[]>(`/v1/projects/${ref}/branches`);
 }
 
-export function createProjectBranch(ref: string, input: { ref: string; name: string; ttl_hours: number }) {
+export function createProjectBranch(ref: string, input: { ref: string; name: string; ttl_hours: number; with_data: boolean }) {
   return request<CreateBranchResponse>(`/v1/projects/${ref}/branches`, {
     method: "POST",
     body: JSON.stringify(input),
@@ -978,11 +1115,22 @@ export function restoreBackup(ref: string, backupId: string) {
   });
 }
 
+export function restoreToTime(ref: string, recoveryTimeTargetUnix: number) {
+  return request<RestoreToTimeResponse>(`/v1/projects/${ref}/database/backups/restore-pitr`, {
+    method: "POST",
+    body: JSON.stringify({ recovery_time_target_unix: String(recoveryTimeTargetUnix) }),
+  });
+}
+
 export function getBackupPolicy(ref: string) {
   return request<BackupPolicy>(`/v1/projects/${ref}/backups/policy`);
 }
 
-export function updateBackupPolicy(ref: string, input: { enabled: boolean; schedule: string; kind: string }) {
+export function getProjectRecoverability(ref: string) {
+  return request<ProjectRecoverabilityStatus>(`/v1/projects/${ref}/recoverability`);
+}
+
+export function updateBackupPolicy(ref: string, input: { enabled: boolean; schedule: string; kind: string; storage_target_id?: string }) {
   return request<BackupPolicy>(`/v1/projects/${ref}/backups/policy`, {
     method: "PUT",
     body: JSON.stringify(input),
@@ -1110,7 +1258,7 @@ export function restartProject(ref: string) {
 }
 
 export function upgradeProject(ref: string, version: string) {
-  return request<Project>(`/v1/projects/${ref}/upgrade`, {
+  return request<UpgradeProjectResponse>(`/v1/projects/${ref}/upgrade`, {
     method: "POST",
     body: JSON.stringify({ version }),
   });

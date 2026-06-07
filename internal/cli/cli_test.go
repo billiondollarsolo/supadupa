@@ -3,14 +3,35 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestParseKeyValuesPreservesInlineJSONAndEmptyValues(t *testing.T) {
+	values := parseKeyValues([]string{
+		`import_map={"imports":{"compat:message":"data:application/typescript,export%20const%20message%3D%22ok%22%3B"}}`,
+		"runtime_enabled=true,secret_sync_enabled=false",
+		"empty=",
+	})
+	if values["import_map"] != `{"imports":{"compat:message":"data:application/typescript,export%20const%20message%3D%22ok%22%3B"}}` {
+		t.Fatalf("unexpected import_map: %q", values["import_map"])
+	}
+	if values["runtime_enabled"] != "true" || values["secret_sync_enabled"] != "false" {
+		t.Fatalf("comma-separated values were not parsed: %#v", values)
+	}
+	if value, ok := values["empty"]; !ok || value != "" {
+		t.Fatalf("expected explicit empty value, got ok=%t value=%q", ok, value)
+	}
+}
 
 func TestLoginPostsCredentialsAndPrintsJSON(t *testing.T) {
 	var got map[string]string
@@ -279,6 +300,80 @@ func TestProjectsListUsesOrgEndpointWhenOrgIDProvided(t *testing.T) {
 	}
 }
 
+func TestProjectsCreatePostsVersionAndPlacementPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/orgs/org_1/projects" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var got map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got["ref"] != "alpha" || got["name"] != "Alpha" || got["domain"] != "apps.example.test" || got["stack_version"] != "15.8.1.060" || got["host_id"] != "host_1" || got["profile"] != "full" || got["resource_tier"] != "small" {
+			t.Fatalf("unexpected project create payload %#v", got)
+		}
+		_, _ = w.Write([]byte(`{"ref":"alpha","name":"Alpha","spec":{"stack_version":"15.8.1.060"}}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"projects", "create", "--org-id", "org_1", "--ref", "alpha", "--name", "Alpha", "--domain", "apps.example.test", "--stack-version", "15.8.1.060", "--host-id", "host_1", "--profile", "full", "--tier", "small"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"ref": "alpha"`) {
+		t.Fatalf("unexpected stdout %q", stdout.String())
+	}
+}
+
+func TestRunnerHTTPTimeoutDefaultsToLongLifecycleWindow(t *testing.T) {
+	if got := (Runner{}).httpTimeout(); got != 10*time.Minute {
+		t.Fatalf("default timeout=%s, want 10m", got)
+	}
+	if got := (Runner{Env: map[string]string{"SUPADUPA_CLI_HTTP_TIMEOUT": "2m"}}).httpTimeout(); got != 2*time.Minute {
+		t.Fatalf("configured timeout=%s, want 2m", got)
+	}
+	if got := (Runner{Env: map[string]string{"SUPADUPA_CLI_HTTP_TIMEOUT": "bad"}}).httpTimeout(); got != 10*time.Minute {
+		t.Fatalf("invalid timeout fallback=%s, want 10m", got)
+	}
+}
+
+func TestProjectsUpgradePostsBackupID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/projects/alpha/upgrade" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var got map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got["version"] != "15.8.1.085" || got["backup_id"] != "backup_1" {
+			t.Fatalf("unexpected upgrade payload %#v", got)
+		}
+		_, _ = w.Write([]byte(`{"target_version":"15.8.1.085","backup":{"id":"backup_1"}}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"projects", "upgrade", "--ref", "alpha", "--version", "15.8.1.085", "--backup-id", "backup_1"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"target_version": "15.8.1.085"`) {
+		t.Fatalf("unexpected stdout %q", stdout.String())
+	}
+}
+
 func TestProjectsCLIProfileSupportsEnvAndTOMLOutput(t *testing.T) {
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -290,10 +385,12 @@ func TestProjectsCLIProfileSupportsEnvAndTOMLOutput(t *testing.T) {
 		_, _ = w.Write([]byte(`{
 			"env": {
 				"SUPABASE_URL": "https://alpha.supadupa.test",
+				"SUPADUPA_CUSTOM_API_URL": "https://api.example.com",
+				"SUPADUPA_CUSTOM_API_URLS": "https://api.example.com,https://alt.example.com",
 				"SUPABASE_SERVICE_ROLE_KEY": "secret://projects/alpha/service_role",
 				"SUPABASE_DB_URL": "postgres://postgres:${DB_PASSWORD}@db.alpha.internal:5432/postgres?sslmode=require"
 			},
-			"supabase_config_toml": "project_id = \"alpha\"\n\n[supadupa]\napi_url = \"https://alpha.supadupa.test\"\n"
+			"supabase_config_toml": "project_id = \"alpha\"\n[supadupa]\ncustom_api_urls = [\"https://api.example.com\", \"https://alt.example.com\"]\n"
 		}`))
 	}))
 	defer server.Close()
@@ -304,11 +401,11 @@ func TestProjectsCLIProfileSupportsEnvAndTOMLOutput(t *testing.T) {
 	}{
 		{
 			format: "env",
-			want:   "SUPABASE_DB_URL='postgres://postgres:${DB_PASSWORD}@db.alpha.internal:5432/postgres?sslmode=require'\nSUPABASE_SERVICE_ROLE_KEY='secret://projects/alpha/service_role'\nSUPABASE_URL='https://alpha.supadupa.test'\n",
+			want:   "SUPABASE_DB_URL='postgres://postgres:${DB_PASSWORD}@db.alpha.internal:5432/postgres?sslmode=require'\nSUPABASE_SERVICE_ROLE_KEY='secret://projects/alpha/service_role'\nSUPABASE_URL='https://alpha.supadupa.test'\nSUPADUPA_CUSTOM_API_URL='https://api.example.com'\nSUPADUPA_CUSTOM_API_URLS='https://api.example.com,https://alt.example.com'\n",
 		},
 		{
 			format: "toml",
-			want:   "project_id = \"alpha\"\n\n[supadupa]\napi_url = \"https://alpha.supadupa.test\"\n",
+			want:   "project_id = \"alpha\"\n[supadupa]\ncustom_api_urls = [\"https://api.example.com\", \"https://alt.example.com\"]\n",
 		},
 	} {
 		var stdout, stderr strings.Builder
@@ -327,6 +424,473 @@ func TestProjectsCLIProfileSupportsEnvAndTOMLOutput(t *testing.T) {
 	if strings.Join(requests, "\n") != "GET /v1/projects/alpha/connect/cli\nGET /v1/projects/alpha/connect/cli" {
 		t.Fatalf("unexpected requests:\n%s", strings.Join(requests, "\n"))
 	}
+}
+
+func TestProjectsCLIProfileEnvCanSelectCustomAPIURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/alpha/connect/cli" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"api_url": "https://alpha.apps.test",
+			"custom_api_urls": ["https://api.example.com", "https://alt.example.com"],
+			"env": {
+				"SUPABASE_URL": "https://alpha.apps.test",
+				"SUPABASE_ANON_KEY": "secret://projects/alpha/anon_key"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"projects", "cli-profile", "--ref", "alpha", "--format", "env", "--api-domain", "api.example.com"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "SUPABASE_URL='https://api.example.com'") || !strings.Contains(stdout.String(), "SUPADUPA_SELECTED_API_URL='https://api.example.com'") {
+		t.Fatalf("expected selected custom API URL env, got:\n%s", stdout.String())
+	}
+}
+
+func TestProjectsLinkWritesWorkspaceBinding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/alpha/connect/cli" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"project_ref": "alpha",
+			"project_name": "Alpha",
+			"api_url": "https://alpha.apps.test",
+			"custom_api_urls": ["https://api.example.com"],
+			"studio_url": "https://studio-alpha.apps.test",
+			"env": {
+				"SUPABASE_URL": "https://alpha.apps.test",
+				"SUPADUPA_CUSTOM_API_URL": "https://api.example.com",
+				"SUPABASE_ANON_KEY": "secret://projects/alpha/anon_key"
+			},
+			"supabase_config_toml": "project_id = \"alpha\"\n[supadupa]\ncustom_api_urls = [\"https://api.example.com\"]\n"
+		}`))
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"projects", "link", "--ref", "alpha", "--dir", workspace, "--api-domain", "api.example.com"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	binding, err := os.ReadFile(filepath.Join(workspace, ".supadupa", "project.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"project_ref": "alpha"`, `"api_url": "https://alpha.apps.test"`, `"custom_api_urls": [`, `"https://api.example.com"`, `"selected_api_url": "https://api.example.com"`, `"secrets_revealed": false`} {
+		if !strings.Contains(string(binding), expected) {
+			t.Fatalf("expected binding to contain %q, got:\n%s", expected, string(binding))
+		}
+	}
+	envPayload, err := os.ReadFile(filepath.Join(workspace, ".supadupa", "supabase.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(envPayload), "SUPABASE_ANON_KEY='secret://projects/alpha/anon_key'") {
+		t.Fatalf("expected handle-only env, got:\n%s", string(envPayload))
+	}
+	if !strings.Contains(string(envPayload), "SUPABASE_URL='https://api.example.com'") {
+		t.Fatalf("expected selected custom SUPABASE_URL, got:\n%s", string(envPayload))
+	}
+	if !strings.Contains(string(envPayload), "SUPADUPA_CUSTOM_API_URL='https://api.example.com'") {
+		t.Fatalf("expected custom API URL env, got:\n%s", string(envPayload))
+	}
+	configPayload, err := os.ReadFile(filepath.Join(workspace, ".supadupa", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configPayload), "custom_api_urls = [\"https://api.example.com\"]") {
+		t.Fatalf("unexpected config.toml: %q", string(configPayload))
+	}
+	supabaseConfigPayload, err := os.ReadFile(filepath.Join(workspace, "supabase", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(supabaseConfigPayload), "project_id = \"alpha\"") {
+		t.Fatalf("unexpected supabase/config.toml: %q", string(supabaseConfigPayload))
+	}
+	if !strings.Contains(string(binding), `"supabase_config_written": true`) {
+		t.Fatalf("expected project binding to record generated supabase/config.toml, got:\n%s", string(binding))
+	}
+}
+
+func TestProjectsLinkDoesNotOverwriteExistingSupabaseConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/alpha/connect/cli" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"project_ref": "alpha",
+			"project_name": "Alpha",
+			"api_url": "https://alpha.apps.test",
+			"studio_url": "https://studio-alpha.apps.test",
+			"env": {
+				"SUPABASE_URL": "https://alpha.apps.test"
+			},
+			"supabase_config_toml": "project_id = \"alpha\"\n"
+		}`))
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	configPath := filepath.Join(workspace, "supabase", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("project_id = \"existing\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"projects", "link", "--ref", "alpha", "--dir", workspace})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "project_id = \"existing\"\n" {
+		t.Fatalf("existing supabase/config.toml was overwritten:\n%s", string(payload))
+	}
+	binding, err := os.ReadFile(filepath.Join(workspace, ".supadupa", "project.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(binding), `"supabase_config_written": true`) {
+		t.Fatalf("binding should not claim it wrote an existing supabase/config.toml:\n%s", string(binding))
+	}
+}
+
+func TestProjectsEnvRevealSecretsMaterializesKnownHandles(t *testing.T) {
+	const dbPassword = "db secret/:"
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/connect/cli":
+			_, _ = w.Write([]byte(`{
+				"env": {
+					"SUPABASE_URL": "https://alpha.apps.test",
+					"SUPABASE_ANON_KEY": "secret://projects/alpha/anon_key",
+					"SUPABASE_SERVICE_ROLE_KEY": "secret://projects/alpha/service_role",
+					"SUPABASE_DB_PASSWORD": "secret://projects/alpha/db_password",
+					"SUPABASE_DB_URL": "postgres://postgres:${DB_PASSWORD}@db-alpha.apps.test:5432/postgres?sslmode=require",
+					"DATABASE_URL": "postgres://postgres:${DB_PASSWORD}@db-alpha.apps.test:5432/postgres?sslmode=require"
+				}
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/secrets/anon_key/reveal":
+			_, _ = w.Write([]byte(`{"value":"anon.jwt"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/secrets/service_role/reveal":
+			_, _ = w.Write([]byte(`{"value":"service.jwt"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/secrets/db_password/reveal":
+			_, _ = w.Write([]byte(`{"value":"` + dbPassword + `"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"projects", "env", "--ref", "alpha", "--reveal-secrets"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	body := stdout.String()
+	for _, expected := range []string{
+		"SUPABASE_ANON_KEY='anon.jwt'",
+		"SUPABASE_SERVICE_ROLE_KEY='service.jwt'",
+		"SUPABASE_DB_PASSWORD='db secret/:'",
+		"DATABASE_URL='postgres://postgres:db%20secret%2F%3A@db-alpha.apps.test:5432/postgres?sslmode=require'",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected env output to contain %q, got:\n%s", expected, body)
+		}
+	}
+	expectedRequests := []string{
+		"GET /v1/projects/alpha/connect/cli",
+		"GET /v1/projects/alpha/secrets/anon_key/reveal",
+		"GET /v1/projects/alpha/secrets/service_role/reveal",
+		"GET /v1/projects/alpha/secrets/db_password/reveal",
+	}
+	if strings.Join(requests, "\n") != strings.Join(expectedRequests, "\n") {
+		t.Fatalf("unexpected requests:\n%s", strings.Join(requests, "\n"))
+	}
+}
+
+func TestProjectsEnvCanPreferCustomDomain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/alpha/connect/cli" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"api_url": "https://alpha.apps.test",
+			"custom_api_urls": ["https://api.example.com"],
+			"env": {
+				"SUPABASE_URL": "https://alpha.apps.test",
+				"SUPADUPA_CUSTOM_API_URL": "https://api.example.com",
+				"SUPABASE_ANON_KEY": "secret://projects/alpha/anon_key"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"projects", "env", "--ref", "alpha", "--prefer-custom-domain"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	for _, expected := range []string{
+		"SUPABASE_URL='https://api.example.com'",
+		"SUPADUPA_CUSTOM_API_URL='https://api.example.com'",
+		"SUPADUPA_SELECTED_API_URL='https://api.example.com'",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("expected %q in env output:\n%s", expected, stdout.String())
+		}
+	}
+}
+
+func TestProjectsEnvWritesHandleOnlyOutputFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/alpha/connect/cli" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"env":{"SUPABASE_URL":"https://alpha.apps.test","SUPABASE_ANON_KEY":"secret://projects/alpha/anon_key"}}`))
+	}))
+	defer server.Close()
+
+	outFile := filepath.Join(t.TempDir(), "nested", ".supadupa", "supabase.env")
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"projects", "env", "--ref", "alpha", "--out", outFile})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("expected no stdout when --out is used, got %q", stdout.String())
+	}
+	payload, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "SUPABASE_ANON_KEY='secret://projects/alpha/anon_key'") {
+		t.Fatalf("unexpected env file:\n%s", string(payload))
+	}
+}
+
+func TestProjectsGenTypesRunsPostgresMetaWithResolvedDBURL(t *testing.T) {
+	const dbPassword = "pa$$ word/:"
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("missing bearer auth: %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/connect/cli":
+			_, _ = w.Write([]byte(`{
+				"public_database_url": "postgres://postgres:${DB_PASSWORD}@db-alpha.apps.test:5432/postgres?sslmode=require",
+				"database_url": "postgres://postgres:${DB_PASSWORD}@db.alpha.internal:5432/postgres?sslmode=require"
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/secrets/db_password/reveal":
+			_, _ = w.Write([]byte(`{"kind":"db_password","value":"` + dbPassword + `"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var gotName string
+	var gotArgs []string
+	var gotEnv []string
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env: map[string]string{
+			"SUPADUPA_API_URL": server.URL,
+			"SUPADUPA_TOKEN":   "test-token",
+		},
+		CommandRunner: func(ctx context.Context, name string, args []string, env []string, stdout, stderr io.Writer) error {
+			gotName = name
+			gotArgs = append([]string(nil), args...)
+			gotEnv = append([]string(nil), env...)
+			_, _ = stdout.Write([]byte("export type Database = {}\n"))
+			return nil
+		},
+	}.Run(context.Background(), []string{"projects", "gen-types", "--ref", "alpha"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if gotName != "docker" {
+		t.Fatalf("expected docker runner, got %q", gotName)
+	}
+	joinedArgs := strings.Join(gotArgs, " ")
+	if strings.Contains(joinedArgs, dbPassword) || strings.Contains(joinedArgs, "postgres://") || strings.Contains(joinedArgs, "PG_META_DB_URL=") {
+		t.Fatalf("docker args should not contain secret-bearing db url: %q", joinedArgs)
+	}
+	for _, want := range []string{"run", "--rm", "--network", "host", "-e", "PG_META_GENERATE_TYPES", "-e", "PG_META_DB_URL", "public.ecr.aws/supabase/postgres-meta:v0.96.6", "node", "dist/server/server.js"} {
+		if !slices.Contains(gotArgs, want) {
+			t.Fatalf("expected docker arg %q in %v", want, gotArgs)
+		}
+	}
+	if envValue(gotEnv, "PG_META_GENERATE_TYPES") != "typescript" {
+		t.Fatalf("unexpected typegen env %v", gotEnv)
+	}
+	dbURL := envValue(gotEnv, "PG_META_DB_URL")
+	parsed, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Host != "db-alpha.apps.test:5432" || parsed.Query().Get("sslmode") != "require" {
+		t.Fatalf("unexpected db url %q", dbURL)
+	}
+	if gotPassword, ok := parsed.User.Password(); !ok || gotPassword != dbPassword {
+		t.Fatalf("unexpected db password in %q", dbURL)
+	}
+	if stdout.String() != "export type Database = {}\n" {
+		t.Fatalf("unexpected stdout %q", stdout.String())
+	}
+	expectedRequests := []string{
+		"GET /v1/projects/alpha/connect/cli",
+		"GET /v1/projects/alpha/secrets/db_password/reveal",
+	}
+	if strings.Join(requests, "\n") != strings.Join(expectedRequests, "\n") {
+		t.Fatalf("unexpected requests:\n%s", strings.Join(requests, "\n"))
+	}
+}
+
+func TestTunnelDatabaseURLPreservesPasswordPlaceholder(t *testing.T) {
+	remote, err := url.Parse("postgres://postgres.smoke:placeholder@db-smoke.apps.test:5432/postgres?sslmode=require")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := tunnelDatabaseURL(remote, mustTCPAddr(t, "0.0.0.0:15432"), "")
+	if got != "postgres://postgres.smoke:${DB_PASSWORD}@127.0.0.1:15432/postgres?sslmode=disable" {
+		t.Fatalf("unexpected local tunnel url %q", got)
+	}
+	docker := tunnelDatabaseURL(remote, mustTCPAddr(t, "0.0.0.0:15432"), "172.17.0.1")
+	if docker != "postgres://postgres.smoke:${DB_PASSWORD}@172.17.0.1:15432/postgres?sslmode=disable" {
+		t.Fatalf("unexpected docker tunnel url %q", docker)
+	}
+}
+
+func mustTCPAddr(t *testing.T, value string) net.Addr {
+	t.Helper()
+	addr, err := net.ResolveTCPAddr("tcp", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+func TestProjectsGenTypesWritesOutputFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/connect/cli":
+			_, _ = w.Write([]byte(`{"public_database_url":"postgres://postgres:${DB_PASSWORD}@db-alpha.apps.test:5432/postgres?sslmode=require"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/secrets/db_password/reveal":
+			_, _ = w.Write([]byte(`{"value":"secret"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	outFile := filepath.Join(t.TempDir(), "database.types.ts")
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+		CommandRunner: func(ctx context.Context, name string, args []string, env []string, stdout, stderr io.Writer) error {
+			_, _ = stdout.Write([]byte("export type Database = { public: unknown }\n"))
+			return nil
+		},
+	}.Run(context.Background(), []string{"projects", "gen-types", "--ref", "alpha", "--out", outFile})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("expected stdout to be empty when --out is used, got %q", stdout.String())
+	}
+	payload, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "export type Database = { public: unknown }\n" {
+		t.Fatalf("unexpected output file %q", string(payload))
+	}
+}
+
+func TestProjectsGenTypesRejectsUnsupportedLanguage(t *testing.T) {
+	var stderr strings.Builder
+	exitCode := Runner{
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": "http://example.test"},
+	}.Run(context.Background(), []string{"projects", "gen-types", "--ref", "alpha", "--lang", "go"})
+
+	if exitCode != 1 {
+		t.Fatalf("exit=%d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "unsupported gen-types language") {
+		t.Fatalf("unexpected stderr %q", stderr.String())
+	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix)
+		}
+	}
+	return ""
 }
 
 func TestSettingsDefaultsSetPostsPayload(t *testing.T) {
@@ -441,6 +1005,165 @@ func TestSettingsSSOGetUsesEndpoint(t *testing.T) {
 		Stderr: &stderr,
 		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
 	}.Run(context.Background(), []string{"settings", "sso", "get"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+}
+
+func TestBackupTargetsCreatePostsRedactedTargetPayload(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/backup-storage-targets" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got["name"] != "R2" || got["endpoint"] != "https://account.r2.cloudflarestorage.com" || got["region"] != "auto" || got["bucket"] != "supadupa-backups" || got["prefix"] != "prod" || got["access_key_id"] != "access-key" || got["secret_access_key"] != "secret-key" || got["default"] != true {
+			t.Fatalf("unexpected backup target payload %#v", got)
+		}
+		_, _ = w.Write([]byte(`{"id":"target_1","name":"R2","bucket":"supadupa-backups","secret_configured":true}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"backup-targets", "create", "--name", "R2", "--endpoint", "https://account.r2.cloudflarestorage.com", "--region", "auto", "--bucket", "supadupa-backups", "--prefix", "prod", "--access-key-id", "access-key", "--secret-access-key", "secret-key", "--default"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "secret-key") || !strings.Contains(stdout.String(), `"secret_configured": true`) {
+		t.Fatalf("expected redacted output, got %q", stdout.String())
+	}
+}
+
+func TestBackupTargetsUpdateMergesExistingTargetAndPreservesSecret(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backup-storage-targets":
+			_, _ = w.Write([]byte(`[{"id":"target_1","name":"R2","type":"s3","endpoint":"https://old.example.test","region":"auto","bucket":"old-bucket","prefix":"old","access_key_id":"access-key","force_path_style":true,"default":true,"secret_configured":true}]`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/backup-storage-targets/target_1":
+			var got map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got["name"] != "R2" || got["endpoint"] != "https://old.example.test" || got["bucket"] != "new-bucket" || got["prefix"] != "old" || got["access_key_id"] != "access-key" || got["secret_access_key"] != "" || got["force_path_style"] != true || got["default"] != true {
+				t.Fatalf("unexpected merged update payload %#v", got)
+			}
+			_, _ = w.Write([]byte(`{"id":"target_1","name":"R2","bucket":"new-bucket","secret_configured":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"backup-targets", "update", "--id", "target_1", "--bucket", "new-bucket"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	expected := []string{"GET /v1/backup-storage-targets", "PUT /v1/backup-storage-targets/target_1"}
+	if strings.Join(seen, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected requests:\n%s", strings.Join(seen, "\n"))
+	}
+	if strings.Contains(stdout.String(), "access-key") {
+		t.Fatalf("expected output to stay redacted, got %q", stdout.String())
+	}
+}
+
+func TestBackupTargetsListTestAndDeleteUseEndpoints(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backup-storage-targets":
+			_, _ = w.Write([]byte(`[{"id":"target_1","name":"R2"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/backup-storage-targets/target_1/test":
+			_, _ = w.Write([]byte(`{"id":"target_1","last_test_status":"passed"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/backup-storage-targets/target_1":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	for _, args := range [][]string{
+		{"backup-targets", "list"},
+		{"backup-targets", "test", "--id", "target_1"},
+		{"backup-targets", "delete", "--id", "target_1", "--yes"},
+	} {
+		var stdout, stderr strings.Builder
+		exitCode := Runner{
+			Stdout: &stdout,
+			Stderr: &stderr,
+			Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+		}.Run(context.Background(), args)
+		if exitCode != 0 {
+			t.Fatalf("exit=%d stderr=%s for %v", exitCode, stderr.String(), args)
+		}
+	}
+	expected := []string{
+		"GET /v1/backup-storage-targets",
+		"POST /v1/backup-storage-targets/target_1/test",
+		"DELETE /v1/backup-storage-targets/target_1",
+	}
+	if strings.Join(seen, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected requests:\n%s", strings.Join(seen, "\n"))
+	}
+}
+
+func TestBackupTargetsDeleteRequiresConfirmation(t *testing.T) {
+	var stderr strings.Builder
+	exitCode := Runner{
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": "http://example.test"},
+	}.Run(context.Background(), []string{"backup-targets", "delete", "--id", "target_1"})
+
+	if exitCode != 1 {
+		t.Fatalf("exit=%d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "requires --yes") {
+		t.Fatalf("expected confirmation error, got %q", stderr.String())
+	}
+}
+
+func TestBackupsSetPolicyCanSelectStorageTarget(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/projects/smoke/backups/policy" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var got map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got["enabled"] != true || got["schedule"] != "hourly" || got["kind"] != "physical" || got["storage_target_id"] != "target_1" {
+			t.Fatalf("unexpected backup policy payload %#v", got)
+		}
+		_, _ = w.Write([]byte(`{"project_ref":"smoke","enabled":true,"schedule":"hourly","kind":"physical","storage_target_id":"target_1"}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"backups", "set-policy", "--ref", "smoke", "--enabled", "--schedule", "hourly", "--kind", "physical", "--storage-target-id", "target_1"})
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
@@ -1204,6 +1927,15 @@ func TestConfigSetPostsConfigPayload(t *testing.T) {
 
 func TestDomainsLogDrainsAndSecretsUseProjectEndpoints(t *testing.T) {
 	seen := map[string]bool{}
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "domain.crt")
+	keyPath := filepath.Join(dir, "domain.key")
+	if err := os.WriteFile(certPath, []byte("CERTIFICATE PEM"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("PRIVATE KEY PEM"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.Path
 		seen[key] = true
@@ -1217,6 +1949,17 @@ func TestDomainsLogDrainsAndSecretsUseProjectEndpoints(t *testing.T) {
 				t.Fatalf("unexpected domain payload %#v", got)
 			}
 			_, _ = w.Write([]byte(`{"fqdn":"api.example.com"}`))
+		case "PUT /v1/projects/alpha/domains/api.example.com/certificate":
+			var got map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got["certificate_pem"] != "CERTIFICATE PEM" || got["private_key_pem"] != "PRIVATE KEY PEM" {
+				t.Fatalf("unexpected certificate payload %#v", got)
+			}
+			_, _ = w.Write([]byte(`{"fqdn":"api.example.com","cert_status":"uploaded","cert_mode":"byo"}`))
+		case "DELETE /v1/projects/alpha/domains/api.example.com/certificate":
+			_, _ = w.Write([]byte(`{"fqdn":"api.example.com","cert_status":"pending","cert_mode":"manual"}`))
 		case "POST /v1/projects/alpha/log-drains":
 			var got struct {
 				Target string            `json:"target"`
@@ -1250,6 +1993,8 @@ func TestDomainsLogDrainsAndSecretsUseProjectEndpoints(t *testing.T) {
 
 	for _, args := range [][]string{
 		{"domains", "add", "--ref", "alpha", "--fqdn", "api.example.com"},
+		{"domains", "upload-certificate", "--ref", "alpha", "--fqdn", "api.example.com", "--cert-file", certPath, "--key-file", keyPath},
+		{"domains", "reset-certificate", "--ref", "alpha", "--fqdn", "api.example.com"},
 		{"log-drains", "create", "--ref", "alpha", "--target", "https", "--config", "url=https://logs.example.com/ingest", "--config", "token=secret"},
 		{"secrets", "reveal", "--ref", "alpha", "--kind", "service_role"},
 		{"secrets", "copy", "--ref", "alpha", "--kind", "service_role"},
@@ -1267,6 +2012,8 @@ func TestDomainsLogDrainsAndSecretsUseProjectEndpoints(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"POST /v1/projects/alpha/domains",
+		"PUT /v1/projects/alpha/domains/api.example.com/certificate",
+		"DELETE /v1/projects/alpha/domains/api.example.com/certificate",
 		"POST /v1/projects/alpha/log-drains",
 		"GET /v1/projects/alpha/secrets/service_role/reveal",
 		"POST /v1/projects/alpha/secrets/service_role/copy",
@@ -1321,7 +2068,7 @@ func TestBranchesCreatePostsBranchPayload(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got["ref"] != "source-preview" || got["name"] != "Preview" || got["ttl_hours"].(float64) != 12 {
+		if got["ref"] != "source-preview" || got["name"] != "Preview" || got["ttl_hours"].(float64) != 12 || got["with_data"] != true {
 			t.Fatalf("unexpected branch payload %#v", got)
 		}
 		_, _ = w.Write([]byte(`{"branch":{"project_ref":"source-preview"},"project":{"ref":"source-preview"}}`))
@@ -1333,7 +2080,7 @@ func TestBranchesCreatePostsBranchPayload(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
-	}.Run(context.Background(), []string{"branches", "create", "--ref", "source", "--branch-ref", "source-preview", "--name", "Preview", "--ttl-hours", "12"})
+	}.Run(context.Background(), []string{"branches", "create", "--ref", "source", "--branch-ref", "source-preview", "--name", "Preview", "--ttl-hours", "12", "--with-data"})
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
@@ -1619,6 +2366,54 @@ func TestMetricsRefUsesProjectEndpoint(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"project_ref": "alpha"`) {
+		t.Fatalf("unexpected stdout %q", stdout.String())
+	}
+}
+
+func TestMetricsProjectSubcommandUsesProjectEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/alpha/metrics" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"project_ref":"alpha","routes":2}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"metrics", "project", "--ref", "alpha"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"project_ref": "alpha"`) {
+		t.Fatalf("unexpected stdout %q", stdout.String())
+	}
+}
+
+func TestMetricsFleetSubcommandUsesFleetEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/metrics" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"projects":2}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"metrics", "fleet"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"projects": 2`) {
 		t.Fatalf("unexpected stdout %q", stdout.String())
 	}
 }

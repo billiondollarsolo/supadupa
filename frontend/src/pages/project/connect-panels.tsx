@@ -4,7 +4,7 @@ import { RuntimeLink } from "../../components/runtime-link";
 import { useUIStore } from "../../lib/ui-store";
 import { formatBytes, formatTime } from "../../lib/format";
 import { connectSections, type ConfigArea, type ConnectSection as ProjectConnectSection, type ProjectTab } from "../../lib/project-config";
-import type { ConnectPayload, Project, ProjectCLIProfile, ProjectMetrics, ProjectRoute } from "../../types";
+import type { ConnectPayload, Project, ProjectCLIProfile, ProjectMetrics, ProjectRoute, ProjectRouteManifest, ProjectTCPRoute } from "../../types";
 
 export function ConnectPanel({
   cliProfile,
@@ -42,7 +42,7 @@ export function ConnectPanel({
           <p className="label">Connect</p>
           <h2>{project.ref}</h2>
         </div>
-        {payload?.studio_url ? <RuntimeLink className="button secondary h-8 min-h-8 justify-center" label={payload.local_studio_url ? "Studio local" : "Studio"} url={payload.local_studio_url || payload.studio_url} /> : null}
+        {payload?.studio_url ? <RuntimeLink className="button secondary h-8 min-h-8 justify-center" label="Studio" projectRef={project.ref} url={payload.studio_url} /> : null}
       </div>
       {loading || !payload ? (
         <p className="mt-4 text-sm text-muted">Loading connection payload...</p>
@@ -81,8 +81,10 @@ function ConnectSectionBody({
   onSelect: (section: ProjectConnectSection) => void;
 }) {
   if (activeSection === "overview") {
+    const endpointCount = Object.keys(endpointEntries(payload)).length;
+    const customCount = payload.custom_api_urls?.length ?? 0;
     const cards: Array<{ section: ProjectConnectSection; label: string; value: string; detail: string }> = [
-      { section: "endpoints", label: "Endpoints", value: "8 URLs", detail: "API, REST, Auth, GraphQL, Realtime, Functions, Storage" },
+      { section: "endpoints", label: "Endpoints", value: `${endpointCount} URLs`, detail: customCount ? `${customCount} custom API URLs ready` : "API, REST, Auth, GraphQL, Realtime, Functions, Storage" },
       { section: "keys", label: "API keys", value: `${Object.keys(payload.api_keys).length} handles`, detail: "Publishable, secret, anon, service role" },
       { section: "jwt", label: "JWT", value: `${Object.keys(payload.jwt).length} items`, detail: `${payload.jwt_signing_keys?.length ?? 0} signing keys` },
       { section: "database", label: "Database", value: "Postgres", detail: "Direct URI, pooler, psql, parts" },
@@ -154,7 +156,7 @@ function ConnectSectionBody({
 }
 
 function endpointEntries(payload: ConnectPayload) {
-  const entries: Record<string, string> = {
+  const entries = filterEntries({
     api: payload.api_url,
     rest: payload.rest_url,
     auth: payload.auth_url,
@@ -163,17 +165,24 @@ function endpointEntries(payload: ConnectPayload) {
     functions: payload.functions_url,
     storage: payload.storage_url,
     storage_s3: payload.storage_s3_url,
-  };
+  });
+  (payload.custom_api_urls ?? []).forEach((url, index) => {
+    entries[`custom_api_${index + 1}`] = url;
+  });
   if (payload.local_api_url) {
     entries.api_local = payload.local_api_url;
-    entries.rest_local = `${payload.local_api_url}/rest/v1`;
-    entries.auth_local = `${payload.local_api_url}/auth/v1`;
-    entries.graphql_local = `${payload.local_api_url}/graphql/v1`;
-    entries.realtime_local = `${payload.local_api_url}/realtime/v1`;
-    entries.functions_local = `${payload.local_api_url}/functions/v1`;
-    entries.storage_local = `${payload.local_api_url}/storage/v1`;
+    if (payload.services.rest) entries.rest_local = `${payload.local_api_url}/rest/v1`;
+    if (payload.services.auth) entries.auth_local = `${payload.local_api_url}/auth/v1`;
+    if (payload.services.graphql) entries.graphql_local = `${payload.local_api_url}/graphql/v1`;
+    if (payload.services.realtime) entries.realtime_local = `${payload.local_api_url}/realtime/v1`;
+    if (payload.services.functions) entries.functions_local = `${payload.local_api_url}/functions/v1`;
+    if (payload.services.storage) entries.storage_local = `${payload.local_api_url}/storage/v1`;
   }
   return entries;
+}
+
+function filterEntries(entries: Record<string, string | undefined>) {
+  return Object.fromEntries(Object.entries(entries).filter(([, value]) => Boolean(value))) as Record<string, string>;
 }
 
 function ConnectActions({
@@ -286,6 +295,7 @@ function CLIProfileSection({ defaultOpen = false, profile, loading }: { profile?
 
   const json = JSON.stringify(profile, null, 2);
   const env = envExport(profile.env);
+  const customAPIURLs = profile.custom_api_urls ?? [];
 
   return (
     <details className="rounded-md border border-border bg-bg p-3" open={defaultOpen}>
@@ -299,9 +309,16 @@ function CLIProfileSection({ defaultOpen = false, profile, loading }: { profile?
       <div className="mt-3 grid gap-2">
         <CopyRow compact label="supadupa-cli env export" value={`supadupa-cli projects cli-profile --ref ${profile.project_ref} --format env`} />
         <CopyRow compact label="supadupa-cli toml export" value={`supadupa-cli projects cli-profile --ref ${profile.project_ref} --format toml`} />
+        {profile.commands.supadupa_env_reveal ? <CopyRow compact label="materialized env" value={profile.commands.supadupa_env_reveal} /> : null}
+        {profile.commands.supadupa_link_reveal ? <CopyRow compact label="link with secrets" value={profile.commands.supadupa_link_reveal} /> : null}
         <CopyRow compact label="supabase db push" value={profile.commands.supabase_db_push ?? ""} />
+        {profile.commands.supabase_db_push_env ? <CopyRow compact label="supabase db push with env" value={profile.commands.supabase_db_push_env} /> : null}
         <CopyRow compact label="supabase db pull" value={profile.commands.supabase_db_pull ?? ""} />
+        {profile.commands.supabase_db_pull_env ? <CopyRow compact label="supabase db pull with env" value={profile.commands.supabase_db_pull_env} /> : null}
+        <CopyRow compact label="supadupa gen types" value={profile.commands.supadupa_gen_types ?? ""} />
+        {profile.commands.supadupa_db_tunnel ? <CopyRow compact label="db tunnel" value={profile.commands.supadupa_db_tunnel} /> : null}
         {profile.commands.supabase_local_env ? <CopyRow compact label="local Supabase env" value={profile.commands.supabase_local_env} /> : null}
+        {customAPIURLs.map((url, index) => <CopyRow compact key={url} label={`custom API ${index + 1}`} value={url} />)}
         <CopyRow compact label="env" value={env} />
         <CopyRow compact label="supabase/config.toml" value={profile.supabase_config_toml} />
         <CopyRow compact label="json" value={json} />
@@ -389,24 +406,30 @@ export function ProjectMetricsPanel({ metrics, loading }: { metrics?: ProjectMet
   );
 }
 
-export function RoutesPanel({ routes, loading }: { routes: ProjectRoute[]; loading: boolean }) {
+export function RoutesPanel({ manifest, loading }: { manifest?: ProjectRouteManifest; loading: boolean }) {
   const addToast = useUIStore((state) => state.addToast);
+  const httpRoutes = manifest?.http_routes ?? [];
+  const tcpRoutes = manifest?.tcp_routes ?? [];
   async function copyRouteURL(route: ProjectRoute) {
     await navigator.clipboard?.writeText(routeURL(route));
     addToast({ title: "Copied route URL", detail: route.name });
+  }
+  async function copyTCPRoute(route: ProjectTCPRoute) {
+    await navigator.clipboard?.writeText(tcpRouteAddress(route));
+    addToast({ title: "Copied TCP route", detail: route.name });
   }
   return (
     <section className="panel">
       <div className="section-head">
         <div>
           <p className="label">Routing</p>
-          <h2>Ingress routes</h2>
+          <h2>Route manifest</h2>
         </div>
       </div>
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading routes...</p> : null}
-        {!loading && routes.length === 0 ? <p className="text-sm text-muted">No routes registered yet.</p> : null}
-        {routes.map((route) => (
+        {!loading && httpRoutes.length === 0 && tcpRoutes.length === 0 ? <p className="text-sm text-muted">No routes registered yet.</p> : null}
+        {httpRoutes.map((route) => (
           <div className="route-row" key={route.id}>
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">{route.name}</p>
@@ -436,6 +459,28 @@ export function RoutesPanel({ routes, loading }: { routes: ProjectRoute[]; loadi
             </div>
           </div>
         ))}
+        {tcpRoutes.map((route) => (
+          <div className="route-row" key={`tcp-${route.name}`}>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{route.name}</p>
+              <p className="truncate font-mono text-xs text-muted">{tcpRouteAddress(route)}</p>
+              <p className="truncate font-mono text-xs text-faint">HostSNI {route.fqdn}</p>
+            </div>
+            <div className="min-w-0 text-right">
+              <div className="flex justify-end gap-1">
+                <span className="pill healthy">{route.protocol}</span>
+                <span className={`pill ${route.tls ? "healthy" : "provisioning"}`}>{route.tls ? "tls" : "plain"}</span>
+                <span className="pill">{route.entrypoint}</span>
+              </div>
+              <p className="mt-1 truncate font-mono text-xs text-faint">{route.upstream_address}</p>
+              <div className="mt-2 flex justify-end gap-1">
+                <button className="icon-button h-8 min-h-8 min-w-8" onClick={() => void copyTCPRoute(route)} title={`Copy ${route.name}`} type="button">
+                  <Copy size={14} />
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );
@@ -444,6 +489,10 @@ export function RoutesPanel({ routes, loading }: { routes: ProjectRoute[]; loadi
 function routeURL(route: ProjectRoute) {
   const scheme = route.tls ? "https" : "http";
   return `${scheme}://${route.fqdn}${route.path_prefix ?? ""}`;
+}
+
+function tcpRouteAddress(route: ProjectTCPRoute) {
+  return `${route.fqdn}:${route.public_port}`;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

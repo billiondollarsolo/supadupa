@@ -223,8 +223,6 @@ export function DatabasePoolerPanel({ project, config, loading }: { project?: Pr
         pool_mode: draft.pool_mode || "transaction",
         default_pool_size: draft.default_pool_size || "20",
         max_client_connections: draft.max_client_connections || "200",
-        transaction_port: draft.transaction_port || "6543",
-        session_port: draft.session_port || "5432",
       },
     });
   }
@@ -264,8 +262,14 @@ export function DatabasePoolerPanel({ project, config, loading }: { project?: Pr
         <div className="grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
           <input className="input font-mono" inputMode="numeric" min="1" placeholder="pool size" value={draft.default_pool_size ?? "20"} onChange={(event) => setValue("default_pool_size", event.target.value)} type="number" />
           <input className="input font-mono" inputMode="numeric" min="1" placeholder="max clients" value={draft.max_client_connections ?? "200"} onChange={(event) => setValue("max_client_connections", event.target.value)} type="number" />
-          <input className="input font-mono" inputMode="numeric" min="1" max="65535" placeholder="transaction port" value={draft.transaction_port ?? "6543"} onChange={(event) => setValue("transaction_port", event.target.value)} type="number" />
-          <input className="input font-mono" inputMode="numeric" min="1" max="65535" placeholder="session port" value={draft.session_port ?? "5432"} onChange={(event) => setValue("session_port", event.target.value)} type="number" />
+          <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
+            <p className="label">Transaction port</p>
+            <p className="mt-1 font-mono text-sm">6543</p>
+          </div>
+          <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
+            <p className="label">Session port</p>
+            <p className="mt-1 font-mono text-sm">5432</p>
+          </div>
         </div>
         <div className="usage-row">
           <p className="text-xs text-muted">{loading ? "Loading pooler settings..." : config?.updated_at ? `Updated ${formatDateTime(config.updated_at)}` : "Pooler settings not saved yet."}</p>
@@ -282,7 +286,7 @@ export function DatabasePoolerPanel({ project, config, loading }: { project?: Pr
 
 export function BranchesPanel({ project, branches, loading, onSelect, enabled }: { project?: Project; branches: ProjectBranch[]; loading: boolean; onSelect: (ref: string) => void; enabled: boolean }) {
   const queryClient = useQueryClient();
-  const [form, setForm] = useState({ ref: "", name: "", ttl_hours: 24 });
+  const [form, setForm] = useState({ ref: "", name: "", ttl_hours: 24, with_data: false });
   const [deleteTarget, setDeleteTarget] = useState("");
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const projectRef = project?.ref ?? "";
@@ -292,18 +296,19 @@ export function BranchesPanel({ project, branches, loading, onSelect, enabled }:
         ref: `${project.ref}-preview`,
         name: `${project.name} Preview`,
         ttl_hours: 24,
+        with_data: false,
       });
     }
   }, [projectRef, project]);
   const mutation = useMutation({
-    mutationFn: ({ ref, input }: { ref: string; input: { ref: string; name: string; ttl_hours: number } }) => createProjectBranch(ref, input),
+    mutationFn: ({ ref, input }: { ref: string; input: { ref: string; name: string; ttl_hours: number; with_data: boolean } }) => createProjectBranch(ref, input),
     onSuccess: (payload, variables) => {
       onSelect(payload.project.ref);
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["project-branches", variables.ref] });
       void queryClient.invalidateQueries({ queryKey: ["connect", payload.project.ref] });
       void queryClient.invalidateQueries({ queryKey: ["cli-profile", payload.project.ref] });
-      void queryClient.invalidateQueries({ queryKey: ["project-routes", payload.project.ref] });
+      void queryClient.invalidateQueries({ queryKey: ["project-route-manifest", payload.project.ref] });
       void queryClient.invalidateQueries({ queryKey: ["org-quota", project?.org_id ?? ""] });
       void queryClient.invalidateQueries({ queryKey: ["org-usage", project?.org_id ?? ""] });
       void queryClient.invalidateQueries({ queryKey: ["project-logs", variables.ref] });
@@ -320,7 +325,7 @@ export function BranchesPanel({ project, branches, loading, onSelect, enabled }:
       void queryClient.invalidateQueries({ queryKey: ["project", variables.branchRef] });
       void queryClient.invalidateQueries({ queryKey: ["connect", variables.branchRef] });
       void queryClient.invalidateQueries({ queryKey: ["cli-profile", variables.branchRef] });
-      void queryClient.invalidateQueries({ queryKey: ["project-routes", variables.branchRef] });
+      void queryClient.invalidateQueries({ queryKey: ["project-route-manifest", variables.branchRef] });
       void queryClient.invalidateQueries({ queryKey: ["org-quota", project?.org_id ?? ""] });
       void queryClient.invalidateQueries({ queryKey: ["org-usage", project?.org_id ?? ""] });
       void queryClient.invalidateQueries({ queryKey: ["fleet-metrics"] });
@@ -360,6 +365,10 @@ export function BranchesPanel({ project, branches, loading, onSelect, enabled }:
         </div>
         <div className="flex gap-2 max-sm:flex-col">
           <input className="input" disabled={!enabled} placeholder="Preview name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+          <label className="checkbox-row compact">
+            <input checked={form.with_data} disabled={!enabled} onChange={(event) => setForm({ ...form, with_data: event.target.checked })} type="checkbox" />
+            Clone data
+          </label>
           <button className="button secondary justify-center" disabled={!enabled || !project || mutation.isPending || form.ref.trim().length === 0} type="submit">
             <Plus size={14} />
             Branch
@@ -375,6 +384,7 @@ export function BranchesPanel({ project, branches, loading, onSelect, enabled }:
               <button className="w-full min-w-0 text-left" onClick={() => onSelect(branch.project_ref)} type="button">
               <p className="truncate text-sm font-medium">{branch.name}</p>
               <p className="truncate font-mono text-xs text-muted">{branch.project_ref}</p>
+              <p className="truncate text-xs text-faint">{branch.with_data ? "Includes source data" : "Schema-only branch"}</p>
               {branch.expires_at ? <p className="truncate text-xs text-faint">Expires {formatTime(branch.expires_at)}</p> : null}
               </button>
               {deleteTarget === branch.id ? (
@@ -545,7 +555,8 @@ export function ReplicasPanel({ project, hosts, replicas, routing, loading, enab
           <div className="replica-row" key={replica.id}>
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">{replica.name}</p>
-              <p className="truncate font-mono text-xs text-muted">{replica.read_uri}</p>
+              <p className="truncate font-mono text-xs text-muted">{replica.public_read_uri || replica.read_uri}</p>
+              {replica.internal_read_uri ? <p className="truncate font-mono text-xs text-faint">{replica.internal_read_uri}</p> : null}
               <p className="truncate text-xs text-faint">{replica.region || "local"} · {replica.tier} · weight {replica.read_weight} · priority {replica.failover_priority}{replica.message ? ` · ${replica.message}` : ""}</p>
               {deleteTarget === replica.id ? (
                 <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2 max-sm:grid-cols-1">
@@ -575,7 +586,7 @@ export function ReplicasPanel({ project, hosts, replicas, routing, loading, enab
               <button className="icon-button" disabled={!project || replica.status !== "healthy" || replica.role === "primary" || promoteMutation.isPending} onClick={() => project && promoteMutation.mutate({ ref: project.ref, id: replica.id })} type="button">
                 <ShieldCheck size={14} />
               </button>
-              <button className="icon-button" onClick={() => void navigator.clipboard.writeText(replica.read_uri)} type="button">
+              <button className="icon-button" onClick={() => void navigator.clipboard.writeText(replica.public_read_uri || replica.read_uri)} type="button">
                 <Copy size={14} />
               </button>
               <button

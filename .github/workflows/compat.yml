@@ -1,0 +1,354 @@
+name: Supadupa Compatibility
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+    inputs:
+      test_ref:
+        description: "Existing project ref to inspect, or leave empty when creating a disposable project"
+        required: false
+        default: ""
+      create_project:
+        description: "Create and clean up a disposable project"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      restore_validate:
+        description: "Run destructive backup/restore validation against the disposable project"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      durable_backup_target:
+        description: "Use repository durable S3/R2 backup target secrets for hosted-grade recovery checks"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      physical_backup_validate:
+        description: "Trigger physical backup validation"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      pitr_restore_validate:
+        description: "Run destructive PITR restore validation against the disposable project"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      durable_create_bucket:
+        description: "Create/list the durable S3 bucket before registering the backup target"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      upgrade_matrix:
+        description: "Run stable upgrade matrix against the selected project"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      source_stack_version:
+        description: "Stack version for disposable project creation, for example 15.8.1.049"
+        required: false
+        default: ""
+      upgrade_targets:
+        description: "Comma-separated upgrade target versions; empty uses newest /v1/stack-releases entry"
+        required: false
+        default: ""
+      upgrade_failure_targets:
+        description: "Comma-separated stable versions to intentionally fail with guarded failure injection"
+        required: false
+        default: ""
+      upgrade_failure_restore_validate:
+        description: "Restore the pre-upgrade backup after an intentionally failed upgrade"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      upgrade_failure_auto_restore:
+        description: "Require API failed-upgrade auto-restore response fields; destructive, use disposable projects"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+jobs:
+  local-checks:
+    name: Local Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+      - name: Go tests
+        run: go test ./...
+      - name: Frontend build
+        run: npm --prefix frontend run build
+      - name: Compat script syntax
+        run: bash -n scripts/compat/*.sh
+
+  live-compat:
+    name: Live Compatibility
+    runs-on: ubuntu-latest
+    needs: local-checks
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure live run
+        id: live
+        env:
+          API_URL: ${{ secrets.SUPADUPA_COMPAT_API_URL }}
+          EMAIL: ${{ secrets.SUPADUPA_COMPAT_EMAIL }}
+          PASSWORD: ${{ secrets.SUPADUPA_COMPAT_PASSWORD }}
+          ORG_ID: ${{ secrets.SUPADUPA_COMPAT_ORG_ID }}
+          APPS_DOMAIN: ${{ secrets.SUPADUPA_COMPAT_APPS_DOMAIN }}
+          SECRET_TEST_REF: ${{ secrets.SUPADUPA_COMPAT_TEST_REF }}
+          INPUT_TEST_REF: ${{ github.event.inputs.test_ref }}
+          INPUT_CREATE_PROJECT: ${{ github.event.inputs.create_project }}
+          INPUT_RESTORE_VALIDATE: ${{ github.event.inputs.restore_validate }}
+          INPUT_DURABLE_BACKUP_TARGET: ${{ github.event.inputs.durable_backup_target }}
+          INPUT_PHYSICAL_BACKUP_VALIDATE: ${{ github.event.inputs.physical_backup_validate }}
+          INPUT_PITR_RESTORE_VALIDATE: ${{ github.event.inputs.pitr_restore_validate }}
+          INPUT_DURABLE_CREATE_BUCKET: ${{ github.event.inputs.durable_create_bucket }}
+          INPUT_UPGRADE_MATRIX: ${{ github.event.inputs.upgrade_matrix }}
+          INPUT_SOURCE_STACK_VERSION: ${{ github.event.inputs.source_stack_version }}
+          INPUT_UPGRADE_TARGETS: ${{ github.event.inputs.upgrade_targets }}
+          INPUT_UPGRADE_FAILURE_TARGETS: ${{ github.event.inputs.upgrade_failure_targets }}
+          INPUT_UPGRADE_FAILURE_RESTORE_VALIDATE: ${{ github.event.inputs.upgrade_failure_restore_validate }}
+          INPUT_UPGRADE_FAILURE_AUTO_RESTORE: ${{ github.event.inputs.upgrade_failure_auto_restore }}
+          DEFAULT_CREATE_PROJECT: ${{ vars.SUPADUPA_COMPAT_CREATE_PROJECT }}
+          DEFAULT_RESTORE_VALIDATE: ${{ vars.SUPADUPA_COMPAT_RESTORE_VALIDATE }}
+          DEFAULT_DURABLE_BACKUP_TARGET: ${{ vars.SUPADUPA_COMPAT_DURABLE_BACKUP_TARGET }}
+          DEFAULT_PHYSICAL_BACKUP_VALIDATE: ${{ vars.SUPADUPA_COMPAT_PHYSICAL_BACKUP_VALIDATE }}
+          DEFAULT_PITR_RESTORE_VALIDATE: ${{ vars.SUPADUPA_COMPAT_PITR_RESTORE_VALIDATE }}
+          DEFAULT_REQUIRE_RECOVERY_READY_TARGETS: ${{ vars.SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS }}
+          DEFAULT_REQUIRE_DURABLE_UPGRADE_BACKUP: ${{ vars.SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP }}
+          DEFAULT_DURABLE_CREATE_BUCKET: ${{ vars.SUPADUPA_COMPAT_DURABLE_S3_CREATE_BUCKET }}
+          DEFAULT_UPGRADE_MATRIX: ${{ vars.SUPADUPA_COMPAT_UPGRADE_MATRIX }}
+          DEFAULT_SOURCE_STACK_VERSION: ${{ vars.SUPADUPA_STACK_VERSION }}
+          DEFAULT_UPGRADE_TARGETS: ${{ vars.SUPADUPA_UPGRADE_TARGETS }}
+          DEFAULT_UPGRADE_FAILURE_TARGETS: ${{ vars.SUPADUPA_UPGRADE_FAILURE_TARGETS }}
+          DEFAULT_UPGRADE_FAILURE_RESTORE_VALIDATE: ${{ vars.SUPADUPA_UPGRADE_FAILURE_RESTORE_VALIDATE }}
+          DEFAULT_UPGRADE_FAILURE_AUTO_RESTORE: ${{ vars.SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE }}
+          DURABLE_TARGET_NAME: ${{ vars.SUPADUPA_COMPAT_DURABLE_BACKUP_TARGET_NAME }}
+          DURABLE_TARGET_PREFIX: ${{ vars.SUPADUPA_COMPAT_DURABLE_S3_PREFIX }}
+          DURABLE_TARGET_DEFAULT: ${{ vars.SUPADUPA_COMPAT_DURABLE_BACKUP_TARGET_DEFAULT }}
+          DURABLE_S3_FORCE_PATH_STYLE: ${{ vars.SUPADUPA_COMPAT_DURABLE_S3_FORCE_PATH_STYLE }}
+          DURABLE_S3_ENDPOINT: ${{ secrets.SUPADUPA_COMPAT_DURABLE_S3_ENDPOINT }}
+          DURABLE_S3_REGION: ${{ secrets.SUPADUPA_COMPAT_DURABLE_S3_REGION }}
+          DURABLE_S3_BUCKET: ${{ secrets.SUPADUPA_COMPAT_DURABLE_S3_BUCKET }}
+          DURABLE_S3_ACCESS_KEY_ID: ${{ secrets.SUPADUPA_COMPAT_DURABLE_S3_ACCESS_KEY_ID }}
+          DURABLE_S3_SECRET_ACCESS_KEY: ${{ secrets.SUPADUPA_COMPAT_DURABLE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$API_URL" || -z "$EMAIL" || -z "$PASSWORD" ]]; then
+            echo "enabled=false" >>"$GITHUB_OUTPUT"
+            echo "Live compatibility skipped because SUPADUPA_COMPAT_API_URL, EMAIL, or PASSWORD is missing."
+            exit 0
+          fi
+
+          choose_bool() {
+            local input="${1:-}"
+            local fallback="${2:-false}"
+            if [[ "$input" == "true" || "$input" == "false" ]]; then
+              printf '%s' "$input"
+            elif [[ "$fallback" == "true" ]]; then
+              printf 'true'
+            else
+              printf 'false'
+            fi
+          }
+
+          create_project="$(choose_bool "$INPUT_CREATE_PROJECT" "$DEFAULT_CREATE_PROJECT")"
+          restore_validate="$(choose_bool "$INPUT_RESTORE_VALIDATE" "$DEFAULT_RESTORE_VALIDATE")"
+          durable_backup_target="$(choose_bool "$INPUT_DURABLE_BACKUP_TARGET" "$DEFAULT_DURABLE_BACKUP_TARGET")"
+          physical_backup_validate="$(choose_bool "$INPUT_PHYSICAL_BACKUP_VALIDATE" "$DEFAULT_PHYSICAL_BACKUP_VALIDATE")"
+          pitr_restore_validate="$(choose_bool "$INPUT_PITR_RESTORE_VALIDATE" "$DEFAULT_PITR_RESTORE_VALIDATE")"
+          require_recovery_ready_targets="$(choose_bool "" "$DEFAULT_REQUIRE_RECOVERY_READY_TARGETS")"
+          require_durable_upgrade_backup="$(choose_bool "" "$DEFAULT_REQUIRE_DURABLE_UPGRADE_BACKUP")"
+          durable_create_bucket="$(choose_bool "$INPUT_DURABLE_CREATE_BUCKET" "$DEFAULT_DURABLE_CREATE_BUCKET")"
+          upgrade_matrix="$(choose_bool "$INPUT_UPGRADE_MATRIX" "$DEFAULT_UPGRADE_MATRIX")"
+          upgrade_failure_restore_validate="$(choose_bool "$INPUT_UPGRADE_FAILURE_RESTORE_VALIDATE" "$DEFAULT_UPGRADE_FAILURE_RESTORE_VALIDATE")"
+          upgrade_failure_auto_restore="$(choose_bool "$INPUT_UPGRADE_FAILURE_AUTO_RESTORE" "$DEFAULT_UPGRADE_FAILURE_AUTO_RESTORE")"
+          source_stack_version="${INPUT_SOURCE_STACK_VERSION:-${DEFAULT_SOURCE_STACK_VERSION:-}}"
+          upgrade_targets="${INPUT_UPGRADE_TARGETS:-${DEFAULT_UPGRADE_TARGETS:-}}"
+          upgrade_failure_targets="${INPUT_UPGRADE_FAILURE_TARGETS:-${DEFAULT_UPGRADE_FAILURE_TARGETS:-}}"
+          if [[ -n "$INPUT_TEST_REF" ]]; then
+            test_ref="$INPUT_TEST_REF"
+          elif [[ "$create_project" == "true" ]]; then
+            test_ref="compat-ci-${GITHUB_RUN_ID}"
+          else
+            test_ref="${SECRET_TEST_REF:-smoke}"
+          fi
+          if [[ "$create_project" == "true" && -z "$ORG_ID" ]]; then
+            echo "enabled=false" >>"$GITHUB_OUTPUT"
+            echo "Live compatibility skipped because disposable create requires SUPADUPA_COMPAT_ORG_ID."
+            exit 0
+          fi
+          if [[ "$pitr_restore_validate" == "true" && "$create_project" != "true" ]]; then
+            echo "::error::PITR restore validation is destructive and requires create_project=true in CI."
+            exit 1
+          fi
+          if [[ "$pitr_restore_validate" == "true" && "$physical_backup_validate" != "true" ]]; then
+            echo "::error::PITR restore validation requires physical_backup_validate=true."
+            exit 1
+          fi
+          if [[ "$upgrade_failure_restore_validate" == "true" && "$create_project" != "true" ]]; then
+            echo "::error::Failed-upgrade restore validation is destructive and requires create_project=true in CI."
+            exit 1
+          fi
+          if [[ "$upgrade_failure_auto_restore" == "true" && "$create_project" != "true" ]]; then
+            echo "::error::Failed-upgrade auto-restore validation is destructive and requires create_project=true in CI."
+            exit 1
+          fi
+          if [[ -n "${upgrade_failure_targets//[[:space:],]/}" && "$upgrade_matrix" != "true" ]]; then
+            echo "::error::upgrade_failure_targets requires upgrade_matrix=true."
+            exit 1
+          fi
+          if [[ "$durable_backup_target" == "true" ]]; then
+            if [[ -z "$DURABLE_S3_ENDPOINT" || -z "$DURABLE_S3_BUCKET" || -z "$DURABLE_S3_ACCESS_KEY_ID" || -z "$DURABLE_S3_SECRET_ACCESS_KEY" ]]; then
+              echo "::error::Durable backup target is enabled, but one or more SUPADUPA_COMPAT_DURABLE_S3_* secrets are missing."
+              exit 1
+            fi
+          fi
+
+          {
+            echo "SUPADUPA_API_URL=$API_URL"
+            echo "SUPADUPA_TEST_EMAIL=$EMAIL"
+            echo "SUPADUPA_TEST_REF=$test_ref"
+            echo "SUPADUPA_COMPAT_CREATE_PROJECT=$create_project"
+            echo "SUPADUPA_COMPAT_KEEP_PROJECT=false"
+            echo "SUPADUPA_COMPAT_RESTORE_VALIDATE=$restore_validate"
+            echo "SUPADUPA_COMPAT_DURABLE_BACKUP_TARGET=$durable_backup_target"
+            echo "SUPADUPA_COMPAT_PHYSICAL_BACKUP_VALIDATE=$physical_backup_validate"
+            echo "SUPADUPA_COMPAT_PITR_RESTORE_VALIDATE=$pitr_restore_validate"
+            echo "SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS=$require_recovery_ready_targets"
+            echo "SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP=$require_durable_upgrade_backup"
+            echo "SUPADUPA_COMPAT_UPGRADE_MATRIX=$upgrade_matrix"
+            echo "SUPADUPA_UPGRADE_FAILURE_RESTORE_VALIDATE=$upgrade_failure_restore_validate"
+            echo "SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE=$upgrade_failure_auto_restore"
+            echo "SUPADUPA_COMPAT_ARTIFACT_ROOT=$RUNNER_TEMP/supadupa-compat"
+          } >>"$GITHUB_ENV"
+          {
+            echo "SUPADUPA_TEST_PASSWORD<<EOF"
+            echo "$PASSWORD"
+            echo "EOF"
+          } >>"$GITHUB_ENV"
+          if [[ -n "$ORG_ID" ]]; then
+            echo "SUPADUPA_TEST_ORG_ID=$ORG_ID" >>"$GITHUB_ENV"
+          fi
+          if [[ -n "$APPS_DOMAIN" ]]; then
+            echo "SUPADUPA_APPS_DOMAIN=$APPS_DOMAIN" >>"$GITHUB_ENV"
+          fi
+          if [[ -n "$source_stack_version" ]]; then
+            echo "SUPADUPA_STACK_VERSION=$source_stack_version" >>"$GITHUB_ENV"
+          fi
+          if [[ -n "$upgrade_targets" ]]; then
+            echo "SUPADUPA_UPGRADE_TARGETS=$upgrade_targets" >>"$GITHUB_ENV"
+          fi
+          if [[ -n "$upgrade_failure_targets" ]]; then
+            echo "SUPADUPA_UPGRADE_FAILURE_TARGETS=$upgrade_failure_targets" >>"$GITHUB_ENV"
+          fi
+          if [[ "$durable_backup_target" == "true" ]]; then
+            {
+              echo "SUPADUPA_COMPAT_DURABLE_S3_ENDPOINT=$DURABLE_S3_ENDPOINT"
+              echo "SUPADUPA_COMPAT_DURABLE_S3_REGION=${DURABLE_S3_REGION:-auto}"
+              echo "SUPADUPA_COMPAT_DURABLE_S3_BUCKET=$DURABLE_S3_BUCKET"
+              echo "SUPADUPA_COMPAT_DURABLE_S3_CREATE_BUCKET=$durable_create_bucket"
+            } >>"$GITHUB_ENV"
+            if [[ -n "$DURABLE_TARGET_NAME" ]]; then
+              echo "SUPADUPA_COMPAT_DURABLE_BACKUP_TARGET_NAME=$DURABLE_TARGET_NAME" >>"$GITHUB_ENV"
+            fi
+            if [[ -n "$DURABLE_TARGET_PREFIX" ]]; then
+              echo "SUPADUPA_COMPAT_DURABLE_S3_PREFIX=$DURABLE_TARGET_PREFIX" >>"$GITHUB_ENV"
+            fi
+            if [[ -n "$DURABLE_TARGET_DEFAULT" ]]; then
+              echo "SUPADUPA_COMPAT_DURABLE_BACKUP_TARGET_DEFAULT=$DURABLE_TARGET_DEFAULT" >>"$GITHUB_ENV"
+            fi
+            if [[ -n "$DURABLE_S3_FORCE_PATH_STYLE" ]]; then
+              echo "SUPADUPA_COMPAT_DURABLE_S3_FORCE_PATH_STYLE=$DURABLE_S3_FORCE_PATH_STYLE" >>"$GITHUB_ENV"
+            fi
+            {
+              echo "SUPADUPA_COMPAT_DURABLE_S3_ACCESS_KEY_ID<<EOF"
+              echo "$DURABLE_S3_ACCESS_KEY_ID"
+              echo "EOF"
+              echo "SUPADUPA_COMPAT_DURABLE_S3_SECRET_ACCESS_KEY<<EOF"
+              echo "$DURABLE_S3_SECRET_ACCESS_KEY"
+              echo "EOF"
+            } >>"$GITHUB_ENV"
+          fi
+          echo "enabled=true" >>"$GITHUB_OUTPUT"
+          echo "Live compatibility configured for $test_ref."
+      - uses: actions/setup-go@v5
+        if: steps.live.outputs.enabled == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        if: steps.live.outputs.enabled == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install system tools
+        if: steps.live.outputs.enabled == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq postgresql-client
+      - name: Install frontend dependencies
+        if: steps.live.outputs.enabled == 'true'
+        run: npm --prefix frontend ci
+      - name: Run compatibility suite
+        if: steps.live.outputs.enabled == 'true'
+        run: scripts/compat/run.sh
+      - name: Sanitize compatibility artifacts
+        if: always() && steps.live.outputs.enabled == 'true'
+        run: |
+          bash scripts/compat/sanitize-artifacts.sh \
+            "$SUPADUPA_COMPAT_ARTIFACT_ROOT/$SUPADUPA_TEST_REF" \
+            "$RUNNER_TEMP/supadupa-compat-sanitized/$SUPADUPA_TEST_REF"
+      - name: Upload compatibility artifacts
+        if: always() && steps.live.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: supadupa-compat-${{ env.SUPADUPA_TEST_REF }}
+          path: ${{ runner.temp }}/supadupa-compat-sanitized/${{ env.SUPADUPA_TEST_REF }}
+          if-no-files-found: warn

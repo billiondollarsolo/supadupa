@@ -37,7 +37,7 @@ func TestRunnerInitializeListToolsAndCallManagementAPI(t *testing.T) {
 		case "/v1/projects":
 			_, _ = w.Write([]byte(`[{"ref":"alpha","name":"Alpha","status":"healthy"}]`))
 		case "/v1/projects/alpha/connect":
-			_, _ = w.Write([]byte(`{"api_url":"https://alpha.example.test","studio_url":"https://studio.alpha.example.test"}`))
+			_, _ = w.Write([]byte(`{"api_url":"https://alpha.example.test","custom_api_urls":["https://api.example.com"],"custom_domains":[{"project_ref":"alpha","fqdn":"api.example.com","cert_status":"issued","cert_mode":"acme"}],"studio_url":"https://studio.alpha.example.test"}`))
 		case "/v1/projects/alpha/metrics":
 			_, _ = w.Write([]byte(`{"project_ref":"alpha","status":"healthy","analytics_buckets":1}`))
 		case "/v1/projects/alpha/config/ai":
@@ -345,7 +345,7 @@ func TestRunnerInitializeListToolsAndCallManagementAPI(t *testing.T) {
 	if !strings.Contains(responses[2], `"structuredContent":[{"name":"Alpha","ref":"alpha","status":"healthy"}]`) {
 		t.Fatalf("expected structured project list: %s", responses[2])
 	}
-	if !strings.Contains(responses[3], `"api_url":"https://alpha.example.test"`) {
+	if !strings.Contains(responses[3], `"api_url":"https://alpha.example.test"`) || !strings.Contains(responses[3], `"custom_api_urls":["https://api.example.com"]`) || !strings.Contains(responses[3], `"fqdn":"api.example.com"`) {
 		t.Fatalf("expected connect payload: %s", responses[3])
 	}
 	if !strings.Contains(responses[4], `"analytics_buckets":1`) || !strings.Contains(responses[6], `"studio_assistant_enabled":"true"`) || !strings.Contains(responses[8], `"storage_uri":"s3://lake/events"`) {
@@ -1475,7 +1475,7 @@ func TestOperationalToolsUseProjectEndpoints(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got["ref"] != "alpha-preview" || got["name"] != "Alpha Preview" || got["ttl_hours"] != float64(24) {
+			if got["ref"] != "alpha-preview" || got["name"] != "Alpha Preview" || got["ttl_hours"] != float64(24) || got["with_data"] != true {
 				t.Fatalf("unexpected branch payload %#v", got)
 			}
 			_, _ = w.Write([]byte(`{"branch":{"project_ref":"alpha-preview"},"project":{"ref":"alpha-preview"}}`))
@@ -1522,7 +1522,7 @@ func TestOperationalToolsUseProjectEndpoints(t *testing.T) {
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_set_project_pitr_policy","arguments":{"ref":"alpha","enabled":true,"archive_bucket":"s3://archive/alpha","retention_days":14}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"supadupa_list_project_wal_archives","arguments":{"ref":"alpha"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"supadupa_archive_project_wal","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"supadupa_create_project_branch","arguments":{"ref":"alpha","branch_ref":"alpha-preview","name":"Alpha Preview","ttl_hours":24}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"supadupa_create_project_branch","arguments":{"ref":"alpha","branch_ref":"alpha-preview","name":"Alpha Preview","ttl_hours":24,"with_data":true}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"supadupa_delete_project_branch","arguments":{"ref":"alpha","branch_ref":"alpha-preview"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"supadupa_create_project_replica","arguments":{"ref":"alpha","name":"east","host_id":"host-one","region":"us-east","tier":"medium","read_weight":75,"failover_priority":2}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"supadupa_promote_project_replica","arguments":{"ref":"alpha","id":"replica_1","reason":"planned maintenance"}}}`)

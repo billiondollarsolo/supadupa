@@ -1,0 +1,2 @@
+ALTER TABLE project_branches
+ADD COLUMN IF NOT EXISTS with_data BOOLEAN NOT NULL DEFAULT false;

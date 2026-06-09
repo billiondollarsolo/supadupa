@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.26.4-alpine@sha256:103c743516b0d9dd69c203ed64f730eb342cae4b85d3f6c5cb376d91abbc6bcb AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -7,18 +7,25 @@ COPY cmd ./cmd
 COPY internal ./internal
 COPY migrations ./migrations
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/supadupa ./cmd/supadupa \
-  && CGO_ENABLED=0 GOOS=linux go build -o /out/supadupa-cli ./cmd/supadupa-cli
+  && CGO_ENABLED=0 GOOS=linux go build -o /out/supadupa-cli ./cmd/supadupa-cli \
+  && CGO_ENABLED=0 GOOS=linux go build -o /out/supadupa-docker-proxy ./cmd/supadupa-docker-proxy
 
-FROM alpine:3.22
+FROM alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
 
-RUN apk add --no-cache ca-certificates docker-cli docker-cli-compose tzdata
+RUN apk add --no-cache ca-certificates docker-cli docker-cli-compose kubectl tzdata \
+  && addgroup -g 10001 -S supadupa \
+  && adduser -u 10001 -S -D -H -G supadupa supadupa
 WORKDIR /app
 COPY --from=build /out/supadupa /usr/local/bin/supadupa
 COPY --from=build /out/supadupa-cli /usr/local/bin/supadupa-cli
+COPY --from=build /out/supadupa-docker-proxy /usr/local/bin/supadupa-docker-proxy
 COPY --from=build /src/migrations ./migrations
+RUN mkdir -p /app/runtime \
+  && chown -R supadupa:supadupa /app
 
 ENV SUPADUPA_ADDR=:8080
 ENV SUPADUPA_MIGRATIONS_DIR=/app/migrations
 EXPOSE 8080
 
+USER supadupa
 CMD ["supadupa"]

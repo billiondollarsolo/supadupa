@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - "release/**"
   pull_request:
   schedule:
     - cron: "17 8 * * *"
@@ -109,7 +110,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.26.4"
           cache: true
       - uses: actions/setup-node@v4
         with:
@@ -118,12 +119,103 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
+      - name: Install compat dependencies
+        run: npm --prefix scripts/compat ci
+      - name: Prepare security artifacts
+        run: mkdir -p artifacts/security
       - name: Go tests
         run: go test ./...
+      - name: Go toolchain guard
+        run: test "$(go env GOVERSION)" = "go1.26.4"
+      - name: Go vulnerability check
+        run: |
+          set -euo pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./... | tee artifacts/security/govulncheck.txt
       - name: Frontend build
         run: npm --prefix frontend run build
-      - name: Compat script syntax
-        run: bash -n scripts/compat/*.sh
+      - name: Frontend static remediation checks
+        run: npm --prefix frontend run check
+      - name: Install Playwright Chromium
+        run: npm --prefix frontend exec playwright install --with-deps chromium
+      - name: Frontend browser smoke
+        run: npm --prefix frontend run browser-smoke
+      - name: Frontend audit
+        run: |
+          set -euo pipefail
+          npm --prefix frontend audit --json | tee artifacts/security/frontend-npm-audit.json
+      - name: Compat audit
+        run: |
+          set -euo pipefail
+          npm --prefix scripts/compat audit --json | tee artifacts/security/compat-npm-audit.json
+      - name: Upload security audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-results
+          path: artifacts/security
+          if-no-files-found: ignore
+      - name: Dockerignore policy
+        run: scripts/check-dockerignore.sh
+      - name: Release note policy
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$BASE_REF" ]]; then
+            git fetch --no-tags --depth=50 origin "$BASE_REF"
+            export SUPADUPA_RELEASE_NOTE_BASE="origin/$BASE_REF"
+          elif [[ -n "$EVENT_BEFORE" && "$EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            git fetch --no-tags --depth=1 origin "$EVENT_BEFORE" || true
+            if git rev-parse --verify "$EVENT_BEFORE" >/dev/null 2>&1; then
+              export SUPADUPA_RELEASE_NOTE_BASE="$EVENT_BEFORE"
+            else
+              export SUPADUPA_RELEASE_NOTE_SKIP_DIFF=true
+            fi
+          else
+            export SUPADUPA_RELEASE_NOTE_SKIP_DIFF=true
+          fi
+          scripts/check-release-note-policy.sh
+      - name: Documentation remediation checks
+        run: python3 scripts/check-docs-remediation.py
+      - name: Compose config hardening checks
+        run: scripts/check-compose-hardening.py
+      - name: Kubernetes CRD schema checks
+        run: python3 scripts/check-kubernetes-crds.py
+      - name: Install Helm
+        run: |
+          set -euo pipefail
+          curl -fsSL https://get.helm.sh/helm-v3.21.0-linux-amd64.tar.gz -o /tmp/helm-v3.21.0-linux-amd64.tar.gz
+          echo "0093eb572e3d2380f094df162ddb525e219249de88957afe24cfbb19632acd36  /tmp/helm-v3.21.0-linux-amd64.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/helm-v3.21.0-linux-amd64.tar.gz -C /tmp
+          sudo install /tmp/linux-amd64/helm /usr/local/bin/helm
+      - name: Helm chart checks
+        run: scripts/check-helm-chart.sh
+      - name: Install Kubernetes smoke tools
+        run: |
+          set -euo pipefail
+          curl -fsSL https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64 -o /tmp/kind
+          echo "50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54  /tmp/kind" | sha256sum -c -
+          sudo install /tmp/kind /usr/local/bin/kind
+          curl -fsSL https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl -o /tmp/kubectl
+          echo "629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7  /tmp/kubectl" | sha256sum -c -
+          sudo install /tmp/kubectl /usr/local/bin/kubectl
+      - name: Docker image builds
+        run: |
+          set -euo pipefail
+          docker build -f deploy/Dockerfile.control-plane -t supadupa-control-plane:ci .
+          docker build -f deploy/Dockerfile.admin -t supadupa-admin:ci .
+          docker build -f deploy/Dockerfile.operator -t supadupa-operator:ci .
+          docker run --rm --entrypoint id supadupa-control-plane:ci | grep -q 'uid=10001'
+          docker run --rm --entrypoint id supadupa-operator:ci | grep -q 'uid=10001'
+      - name: Kubernetes Kind smoke
+        env:
+          SUPADUPA_KIND_REBUILD_IMAGES: "false"
+        run: scripts/check-kubernetes-kind-smoke.sh
+      - name: Script syntax
+        run: |
+          bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh
+          python3 -m py_compile scripts/check-compose-hardening.py scripts/check-docs-remediation.py scripts/check-kubernetes-crds.py
 
   live-compat:
     name: Live Compatibility
@@ -320,7 +412,7 @@ jobs:
       - uses: actions/setup-go@v5
         if: steps.live.outputs.enabled == 'true'
         with:
-          go-version-file: go.mod
+          go-version: "1.26.4"
           cache: true
       - uses: actions/setup-node@v4
         if: steps.live.outputs.enabled == 'true'

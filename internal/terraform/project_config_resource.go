@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -65,12 +62,8 @@ func (r *projectConfigResource) Schema(ctx context.Context, req resource.SchemaR
 }
 
 func (r *projectConfigResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -156,16 +149,7 @@ func (r *projectConfigResource) Delete(ctx context.Context, req resource.DeleteR
 }
 
 func (r *projectConfigResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, area, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, area, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(area) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/area, for example alpha/auth.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("area"), strings.TrimSpace(area))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "area", "Use ref/area, for example alpha/auth.")
 }
 
 func configMapFromTerraform(ctx context.Context, value types.Map, addError func(string, string)) (map[string]string, bool) {
@@ -182,9 +166,8 @@ func setProjectConfigState(ctx context.Context, model *projectConfigResourceMode
 	model.ID = types.StringValue(config.ProjectRef + "/" + config.Area)
 	model.Ref = types.StringValue(config.ProjectRef)
 	model.Area = types.StringValue(config.Area)
-	value, diags := types.MapValueFrom(ctx, types.StringType, config.Config)
-	if diags.HasError() {
-		addError("Unable to encode config map", diags.Errors()[0].Detail())
+	value, ok := stringMapStateValue(ctx, "config", config.Config, addError)
+	if !ok {
 		return
 	}
 	model.Config = value

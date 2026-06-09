@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -140,15 +137,15 @@ func (r *projectDatabaseQueueResource) Schema(ctx context.Context, req resource.
 }
 
 func (r *projectDatabaseQueueResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectDatabaseQueueResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "name")
 }
 
 func (r *projectDatabaseQueueResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -200,32 +197,7 @@ func (r *projectDatabaseQueueResource) Read(ctx context.Context, req resource.Re
 }
 
 func (r *projectDatabaseQueueResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectDatabaseQueueResourceModel
-	var state projectDatabaseQueueResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := databaseQueueInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectDatabaseQueue(ctx, state.Ref.ValueString(), state.Name.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project database queue", err.Error())
-		return
-	}
-	queue, err := r.client.CreateProjectDatabaseQueue(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project database queue", err.Error())
-		return
-	}
-	setProjectDatabaseQueueState(ctx, &plan, queue, input.Metadata, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project database queue")
 }
 
 func (r *projectDatabaseQueueResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -242,16 +214,7 @@ func (r *projectDatabaseQueueResource) Delete(ctx context.Context, req resource.
 }
 
 func (r *projectDatabaseQueueResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, name, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, name, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name, for example alpha/events.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(name))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "name", "Use ref/name, for example alpha/events.")
 }
 
 func (r *projectDatabaseQueueResource) findDatabaseQueue(ctx context.Context, ref string, name string) (ProjectDatabaseQueue, error) {
@@ -259,12 +222,7 @@ func (r *projectDatabaseQueueResource) findDatabaseQueue(ctx context.Context, re
 	if err != nil {
 		return ProjectDatabaseQueue{}, err
 	}
-	for _, queue := range queues {
-		if queue.Name == name {
-			return queue, nil
-		}
-	}
-	return ProjectDatabaseQueue{}, ErrNotFound
+	return findInList(queues, func(queue ProjectDatabaseQueue) bool { return queue.Name == name })
 }
 
 func databaseQueueInputFromModel(ctx context.Context, model projectDatabaseQueueResourceModel, addError func(string, string)) (ProjectDatabaseQueueInput, bool) {
@@ -299,9 +257,8 @@ func setProjectDatabaseQueueState(ctx context.Context, model *projectDatabaseQue
 	model.CreatedAt = optionalTimeString(queue.CreatedAt)
 	model.UpdatedAt = optionalTimeString(queue.UpdatedAt)
 
-	metadata, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(queue.Metadata, previousMetadata))
-	if diags.HasError() {
-		addError("Unable to encode metadata map", diags.Errors()[0].Detail())
+	metadata, ok := sensitiveStringMapStateValue(ctx, "metadata", queue.Metadata, previousMetadata, addError)
+	if !ok {
 		return
 	}
 	model.Metadata = metadata

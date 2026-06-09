@@ -46,6 +46,10 @@ type TelemetryCollector interface {
 	CollectProjectTelemetry(ctx context.Context, ref string) (TelemetrySampleInput, error)
 }
 
+type NodeTelemetryCollector interface {
+	CollectNodeTelemetry(ctx context.Context, host Host) (NodeTelemetrySampleInput, error)
+}
+
 type BranchCloneOptions struct {
 	SourceRef string
 	BranchRef string

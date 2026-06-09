@@ -89,7 +89,7 @@ RustFS backup target validation is opt-in because it pulls and starts `rustfs/ru
 
 ```bash
 export SUPADUPA_COMPAT_RUSTFS_BACKUP_TARGET=true
-export SUPADUPA_COMPAT_RUSTFS_IMAGE="rustfs/rustfs:latest"
+export SUPADUPA_COMPAT_RUSTFS_IMAGE="rustfs/rustfs:1.0.0-beta.2"
 ```
 
 The RustFS phase starts a loopback-only container, creates a bucket with SigV4, creates and tests a temporary Supadupa backup target, verifies loopback RustFS does not satisfy off-host recoverability gates, and deletes the target/container on exit. Project logical backup, physical backup, and WAL artifact upload through RustFS only run for compat-created disposable projects. When strict recovery-ready targets are enabled, the RustFS phase expects physical/WAL uploads and PITR bucket derivation to be rejected while logical upload plumbing can still run. When `SUPADUPA_TEST_ORG_ID` is set, the phase snapshots org feature overrides, temporarily enables `pitr` for WAL upload validation, and restores the original overrides on cleanup. Set `SUPADUPA_COMPAT_RUSTFS_REQUIRE_PHYSICAL=true` or `SUPADUPA_COMPAT_RUSTFS_REQUIRE_WAL=true` when the run must fail instead of skipping those deep checks. Control-plane backup upload through RustFS is skipped unless both `SUPADUPA_COMPAT_RUSTFS_KEEP_TARGET=true` and `SUPADUPA_COMPAT_RUSTFS_PLATFORM_BACKUP=true` are set, because platform backup records must remain restorable after the phase ends.
@@ -252,6 +252,8 @@ For upgrade coverage, set `create_project=true`, `upgrade_matrix=true`, and `sou
 ## Included Checks
 
 `scripts/compat/run.sh` defines the default phase order. The list below also documents additional phase scripts that are present for direct or opt-in use.
+
+When passing explicit phase arguments, use phase filenames from this directory. Slash-containing external phase paths are rejected unless `SUPADUPA_COMPAT_ALLOW_EXTERNAL_PHASES=true` is set for an intentional local run.
 
 - `00-preflight.sh`: required tool checks, `go test ./...`, frontend build, and management API health.
 - `01-create-project.sh`: optional disposable project create when `SUPADUPA_COMPAT_CREATE_PROJECT=true`.

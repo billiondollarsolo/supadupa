@@ -1,7 +1,12 @@
 import { useMemo } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { AppPanel } from "../../components/app/app-panel";
+import { MetricCard } from "../../components/app/metric-card";
+import { Segmented } from "../../components/ui/segmented";
+import { StatusPill } from "../../components/ui/status-pill";
 import { useDashboardContext } from "../../lib/dashboard-context";
 import { authSections, type AuthSection } from "../../lib/project-config";
+import { projectPath, projectSectionFromPathname } from "../../lib/routes";
 import { AccessScopePanel, AuthClientsPanel, AuthEmailPanel, AuthHooksPanel, AuthConfigPanel, AuthProvidersPanel, ProjectAccessPanel } from "./auth-panels";
 import { ProjectPage } from "./layout";
 
@@ -9,7 +14,7 @@ export function ProjectAuthPage() {
   const { activeProject, authClients, authEmailTemplatesConfig, authHooks, authProviderConfig, authSMTPConfig, projectAccess, projectConfig, teams } = useDashboardContext();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const selectedSection = pathname.match(/^\/projects\/[^/]+\/auth\/([^/]+)/)?.[1];
+  const selectedSection = projectSectionFromPathname(pathname, "auth");
   const activeSection: AuthSection = authSections.some((section) => section.id === selectedSection) ? selectedSection as AuthSection : "overview";
   const stats = useMemo(() => {
     const auth = projectConfig.data?.config ?? {};
@@ -24,41 +29,42 @@ export function ProjectAuthPage() {
       providers.web3_ethereum_enabled,
       providers.web3_solana_enabled,
     ].filter((value) => value === "true").length;
-    const mfaEnabled = (auth.mfa_totp_enabled ?? "true") === "true" || (auth.mfa_phone_enabled ?? "false") === "true";
+    const loginEnabled = (auth.email_enabled ?? "true") === "true";
     return {
-      login: (auth.email_enabled ?? "true") === "true" ? "Email enabled" : "Email disabled",
-      mfa: mfaEnabled ? "MFA available" : "MFA off",
+      loginEnabled,
+      login: loginEnabled ? "Email enabled" : "Email disabled",
       providers: enabledProviders,
-      smtp: (authSMTPConfig.data?.config.enabled ?? "false") === "true" ? "Custom SMTP" : "Default mailer",
       clients: authClients.data?.length ?? 0,
       hooks: authHooks.data?.length ?? 0,
       grants: projectAccess.data?.length ?? 0,
       teams: teams.data?.length ?? 0,
     };
-  }, [authClients.data, authHooks.data, authProviderConfig.data, authSMTPConfig.data, projectAccess.data, projectConfig.data, teams.data]);
+  }, [authClients.data, authHooks.data, authProviderConfig.data, projectAccess.data, projectConfig.data, teams.data]);
 
   return (
     <ProjectPage>
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Auth workspace</p>
-            <h2>{activeProject?.ref ?? "Project auth"}</h2>
-            <p className="mt-1 text-xs text-faint">Use the project sidebar to drill into runtime, providers, email, clients, hooks, and access.</p>
+      <AppPanel
+        eyebrow="Auth workspace"
+        title={activeProject?.name ?? "Project auth"}
+        actions={<StatusPill label={stats.login} tone={stats.loginEnabled ? "success" : "neutral"} />}
+      >
+        {activeProject ? <p className="-mt-2 truncate font-mono text-xs text-faint">{activeProject.ref}</p> : null}
+        <SectionNav
+          activeSection={activeSection}
+          onSelect={(section) => {
+            if (!activeProject) return;
+            void navigate({ to: section === "overview" ? projectPath(activeProject.ref, "auth") : projectPath(activeProject.ref, "auth", section) });
+          }}
+        />
+        {activeSection === "overview" ? (
+          <div className="mt-4 grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
+            <MetricCard label="Providers enabled" value={stats.providers} detail="OAuth, OIDC, SAML, SMS, Web3" tone={stats.providers > 0 ? "success" : "default"} />
+            <MetricCard label="OAuth clients" value={stats.clients} detail="project as identity provider" />
+            <MetricCard label="Auth hooks" value={stats.hooks} detail="enabled customizations" />
+            <MetricCard label="Project grants" value={stats.grants} detail={`${stats.teams} teams available`} tone={stats.grants > 0 ? "success" : "default"} />
           </div>
-          <span className="pill healthy">{stats.login}</span>
-        </div>
-        <div className="mt-4">
-          <AuthSectionSummary
-            activeSection={activeSection}
-            stats={stats}
-            onSelect={(section) => {
-              if (!activeProject) return;
-              void navigate({ to: section === "overview" ? `/projects/${activeProject.ref}/auth` : `/projects/${activeProject.ref}/auth/${section}` });
-            }}
-          />
-        </div>
-      </section>
+        ) : null}
+      </AppPanel>
 
       {activeSection === "runtime" ? <AuthConfigPanel project={activeProject} config={projectConfig.data} loading={projectConfig.isLoading} /> : null}
       {activeSection === "providers" ? <AuthProvidersPanel project={activeProject} config={authProviderConfig.data} loading={authProviderConfig.isLoading} /> : null}
@@ -75,52 +81,16 @@ export function ProjectAuthPage() {
   );
 }
 
-function AuthSectionSummary({
-  activeSection,
-  onSelect,
-  stats,
-}: {
-  activeSection: AuthSection;
-  stats: {
-    login: string;
-    mfa: string;
-    providers: number;
-    smtp: string;
-    clients: number;
-    hooks: number;
-    grants: number;
-    teams: number;
-  };
-  onSelect: (section: AuthSection) => void;
-}) {
-  if (activeSection !== "overview") {
-    const current = authSections.find((section) => section.id === activeSection);
-    return (
-      <div className="rounded-md border border-border bg-bg p-3">
-        <p className="label">{current?.label ?? "Section"}</p>
-        <p className="mt-1 text-sm text-muted">{current?.description}</p>
-      </div>
-    );
-  }
-
+// In-page section navigation so users switch Auth subsections from the content
+// area instead of being told to "use the project sidebar".
+function SectionNav({ activeSection, onSelect }: { activeSection: AuthSection; onSelect: (section: AuthSection) => void }) {
   return (
-    <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
-      <AuthSummaryCard label="Runtime" value={stats.login} detail={stats.mfa} onClick={() => onSelect("runtime")} />
-      <AuthSummaryCard label="Providers" value={`${stats.providers} enabled`} detail="OAuth, OIDC, SAML, SMS, Web3" onClick={() => onSelect("providers")} />
-      <AuthSummaryCard label="Email" value={stats.smtp} detail="SMTP and templates" onClick={() => onSelect("email")} />
-      <AuthSummaryCard label="OAuth clients" value={`${stats.clients} registered`} detail="Project as identity provider" onClick={() => onSelect("clients")} />
-      <AuthSummaryCard label="Hooks" value={`${stats.hooks} configured`} detail="Auth customization" onClick={() => onSelect("hooks")} />
-      <AuthSummaryCard label="Access" value={`${stats.grants} grants`} detail={`${stats.teams} teams available`} onClick={() => onSelect("access")} />
-    </div>
+    <Segmented
+      className="mt-3"
+      options={authSections.map((section) => ({ value: section.id, label: section.label }))}
+      value={activeSection}
+      onChange={onSelect}
+    />
   );
 }
 
-function AuthSummaryCard({ detail, label, onClick, value }: { label: string; value: string; detail: string; onClick: () => void }) {
-  return (
-    <button className="rounded-md border border-border bg-bg p-3 text-left transition hover:border-border-strong hover:bg-surface-2" onClick={onClick} type="button">
-      <p className="label">{label}</p>
-      <p className="mt-2 truncate text-sm font-medium">{value}</p>
-      <p className="mt-1 truncate text-xs text-muted">{detail}</p>
-    </button>
-  );
-}

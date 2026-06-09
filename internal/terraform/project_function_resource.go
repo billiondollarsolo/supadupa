@@ -3,7 +3,6 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -123,12 +122,8 @@ func (r *projectFunctionResource) Schema(ctx context.Context, req resource.Schem
 }
 
 func (r *projectFunctionResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -223,12 +218,7 @@ func (r *projectFunctionResource) findFunction(ctx context.Context, ref string, 
 		return ProjectFunction{}, err
 	}
 	normalized := strings.ToLower(strings.TrimSpace(name))
-	for _, function := range functions {
-		if function.Name == normalized {
-			return function, nil
-		}
-	}
-	return ProjectFunction{}, ErrNotFound
+	return findInList(functions, func(function ProjectFunction) bool { return function.Name == normalized })
 }
 
 func functionInputFromModel(ctx context.Context, model projectFunctionResourceModel, addError func(string, string)) (ProjectFunctionInput, bool) {
@@ -259,9 +249,8 @@ func setProjectFunctionState(ctx context.Context, model *projectFunctionResource
 	model.CreatedAt = optionalTimeString(function.CreatedAt)
 	model.UpdatedAt = optionalTimeString(function.UpdatedAt)
 
-	secrets, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(function.Secrets, previousSecrets))
-	if diags.HasError() {
-		addError("Unable to encode function secrets map", diags.Errors()[0].Detail())
+	secrets, ok := sensitiveStringMapStateValue(ctx, "function secrets", function.Secrets, previousSecrets, addError)
+	if !ok {
 		return
 	}
 	model.Secrets = secrets

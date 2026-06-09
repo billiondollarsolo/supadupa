@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
@@ -30,7 +27,7 @@ type projectEmbeddingJobResourceModel struct {
 	PrimaryKeyColumn  types.String `tfsdk:"primary_key_column"`
 	DestinationTable  types.String `tfsdk:"destination_table"`
 	DestinationColumn types.String `tfsdk:"destination_column"`
-	Provider          types.String `tfsdk:"provider"`
+	Provider          types.String `tfsdk:"embedding_provider"`
 	Model             types.String `tfsdk:"model"`
 	Dimension         types.Int64  `tfsdk:"dimension"`
 	Schedule          types.String `tfsdk:"schedule"`
@@ -102,7 +99,7 @@ func (r *projectEmbeddingJobResource) Schema(ctx context.Context, req resource.S
 				Default:     stringdefault.StaticString("embedding"),
 				Description: "Destination vector column.",
 			},
-			"provider": resourceschema.StringAttribute{
+			"embedding_provider": resourceschema.StringAttribute{
 				Optional:    true,
 				Computed:    true,
 				Default:     stringdefault.StaticString("openai"),
@@ -165,15 +162,15 @@ func (r *projectEmbeddingJobResource) Schema(ctx context.Context, req resource.S
 }
 
 func (r *projectEmbeddingJobResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectEmbeddingJobResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "id")
 }
 
 func (r *projectEmbeddingJobResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -212,26 +209,7 @@ func (r *projectEmbeddingJobResource) Read(ctx context.Context, req resource.Rea
 }
 
 func (r *projectEmbeddingJobResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectEmbeddingJobResourceModel
-	var state projectEmbeddingJobResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input := embeddingJobInputFromModel(plan)
-	err := r.client.DeleteProjectEmbeddingJob(ctx, state.Ref.ValueString(), state.ID.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project embedding job", err.Error())
-		return
-	}
-	job, err := r.client.CreateProjectEmbeddingJob(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project embedding job", err.Error())
-		return
-	}
-	setProjectEmbeddingJobState(&plan, job)
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project embedding job")
 }
 
 func (r *projectEmbeddingJobResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -248,16 +226,7 @@ func (r *projectEmbeddingJobResource) Delete(ctx context.Context, req resource.D
 }
 
 func (r *projectEmbeddingJobResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, id, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, id, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(id) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/id, for example alpha/emb_123.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strings.TrimSpace(id))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "id", "Use ref/id, for example alpha/emb_123.")
 }
 
 func (r *projectEmbeddingJobResource) findEmbeddingJob(ctx context.Context, ref string, id string) (ProjectEmbeddingJob, error) {
@@ -265,12 +234,7 @@ func (r *projectEmbeddingJobResource) findEmbeddingJob(ctx context.Context, ref 
 	if err != nil {
 		return ProjectEmbeddingJob{}, err
 	}
-	for _, job := range jobs {
-		if job.ID == id {
-			return job, nil
-		}
-	}
-	return ProjectEmbeddingJob{}, ErrNotFound
+	return findInList(jobs, func(job ProjectEmbeddingJob) bool { return job.ID == id })
 }
 
 func embeddingJobInputFromModel(model projectEmbeddingJobResourceModel) ProjectEmbeddingJobInput {

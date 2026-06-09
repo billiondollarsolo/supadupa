@@ -53,22 +53,28 @@ case "$noauth_status" in
 esac
 
 control_token="$(read_secret_file "$ARTIFACT_DIR/token")"
-studio_session_body="$ARTIFACT_DIR/studio-auth-session.body"
-studio_session_err="$ARTIFACT_DIR/studio-auth-session.stderr"
-studio_session_status="$(curl -sS -o "$studio_session_body" -w '%{http_code}' \
-  -H "Authorization: Bearer $control_token" \
-  "$api_base/v1/projects/$SUPADUPA_TEST_REF/studio-session" \
-  2>"$studio_session_err")"
-case "$studio_session_status" in
-  2??) ;;
-  *) fail "studio_auth.session_token" "expected 2xx, got HTTP $studio_session_status" ;;
-esac
-studio_token="$(json_get_file "$studio_session_body" token)"
+studio_session_counter=0
+new_studio_code() {
+  studio_session_counter=$((studio_session_counter + 1))
+  local body="$ARTIFACT_DIR/studio-auth-session-$studio_session_counter.body"
+  local err="$ARTIFACT_DIR/studio-auth-session-$studio_session_counter.stderr"
+  local status
+  status="$(curl -sS -o "$body" -w '%{http_code}' \
+    -H "Authorization: Bearer $control_token" \
+    "$api_base/v1/projects/$SUPADUPA_TEST_REF/studio-session" \
+    2>"$err")"
+  case "$status" in
+    2??) ;;
+    *) fail "studio_auth.session_code" "expected 2xx, got HTTP $status" ;;
+  esac
+  json_get_file "$body" code
+}
+studio_code="$(new_studio_code)"
 studio_separator="?"
 case "$studio_url" in
   *\?*) studio_separator="&" ;;
 esac
-studio_load_url="$studio_url${studio_separator}supadupa_studio_token=$studio_token"
+studio_load_url="$studio_url${studio_separator}supadupa_studio_code=$studio_code"
 
 studio_body="$ARTIFACT_DIR/studio-auth.body"
 studio_headers="$ARTIFACT_DIR/studio-auth.headers"
@@ -118,8 +124,9 @@ for link_name in rest_docs graphql_explorer; do
   esac
   link_body="$ARTIFACT_DIR/studio-auth-$link_name.body"
   link_err="$ARTIFACT_DIR/studio-auth-$link_name.stderr"
+  link_code="$(new_studio_code)"
   link_status="$(curl -sSL -o "$link_body" -w '%{http_code}' \
-    "$link_url${separator}supadupa_studio_token=$studio_token" \
+    "$link_url${separator}supadupa_studio_code=$link_code" \
     2>"$link_err")"
   case "$link_status" in
     2??) ;;

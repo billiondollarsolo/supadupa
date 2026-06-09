@@ -772,7 +772,6 @@ func (r Runner) hosts(ctx context.Context, c apiClient, args []string) error {
 		cpu := fs.Int("cpu", 0, "CPU capacity")
 		ramMB := fs.Int("ram-mb", 0, "RAM capacity in MB")
 		diskGB := fs.Int("disk-gb", 0, "Disk capacity in GB")
-		diskIOPS := fs.Int("disk-iops", 0, "Disk IOPS capacity")
 		projects := fs.Int("projects", 0, "Project capacity")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -781,11 +780,10 @@ func (r Runner) hosts(ctx context.Context, c apiClient, args []string) error {
 			"name":    *name,
 			"address": *address,
 			"capacity": map[string]int{
-				"cpu":       *cpu,
-				"ram_mb":    *ramMB,
-				"disk_gb":   *diskGB,
-				"disk_iops": *diskIOPS,
-				"projects":  *projects,
+				"cpu":      *cpu,
+				"ram_mb":   *ramMB,
+				"disk_gb":  *diskGB,
+				"projects": *projects,
 			},
 		}
 		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/hosts", payload, false))
@@ -822,7 +820,6 @@ func (r Runner) quotas(ctx context.Context, c apiClient, args []string) error {
 	maxCPU := fs.Int("max-cpu", 0, "Max CPU")
 	maxRAMMB := fs.Int("max-ram-mb", 0, "Max RAM in MB")
 	maxDiskGB := fs.Int("max-disk-gb", 0, "Max disk in GB")
-	maxDiskIOPS := fs.Int("max-disk-iops", 0, "Max disk IOPS")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -832,11 +829,10 @@ func (r Runner) quotas(ctx context.Context, c apiClient, args []string) error {
 		return r.printResponse(c.do(ctx, http.MethodGet, path, nil, false))
 	case "set":
 		payload := map[string]int{
-			"max_projects":  *maxProjects,
-			"max_cpu":       *maxCPU,
-			"max_ram_mb":    *maxRAMMB,
-			"max_disk_gb":   *maxDiskGB,
-			"max_disk_iops": *maxDiskIOPS,
+			"max_projects": *maxProjects,
+			"max_cpu":      *maxCPU,
+			"max_ram_mb":   *maxRAMMB,
+			"max_disk_gb":  *maxDiskGB,
 		}
 		return r.printResponse(c.do(ctx, http.MethodPut, path, payload, false))
 	default:

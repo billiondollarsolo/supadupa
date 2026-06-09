@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -140,15 +137,15 @@ func (r *projectDatabaseSchemaResource) Schema(ctx context.Context, req resource
 }
 
 func (r *projectDatabaseSchemaResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectDatabaseSchemaResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "name")
 }
 
 func (r *projectDatabaseSchemaResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -200,32 +197,7 @@ func (r *projectDatabaseSchemaResource) Read(ctx context.Context, req resource.R
 }
 
 func (r *projectDatabaseSchemaResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectDatabaseSchemaResourceModel
-	var state projectDatabaseSchemaResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := databaseSchemaInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectDatabaseSchema(ctx, state.Ref.ValueString(), state.Name.ValueString(), state.Version.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project database schema", err.Error())
-		return
-	}
-	schema, err := r.client.CreateProjectDatabaseSchema(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project database schema", err.Error())
-		return
-	}
-	setProjectDatabaseSchemaState(ctx, &plan, schema, input.Metadata, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project database schema")
 }
 
 func (r *projectDatabaseSchemaResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -242,17 +214,7 @@ func (r *projectDatabaseSchemaResource) Delete(ctx context.Context, req resource
 }
 
 func (r *projectDatabaseSchemaResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	parts := strings.Split(req.ID, "/")
-	if len(parts) != 3 {
-		parts = strings.Split(req.ID, ":")
-	}
-	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name/version, for example alpha/app-schema/20260605_001.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(parts[0]))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(parts[1]))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("version"), strings.TrimSpace(parts[2]))...)
+	setThreePartImportState(ctx, req.ID, resp, "ref", "name", "version", "Use ref/name/version, for example alpha/app-schema/20260605_001.", true)
 }
 
 func (r *projectDatabaseSchemaResource) findDatabaseSchema(ctx context.Context, ref string, name string, version string) (ProjectDatabaseSchema, error) {
@@ -260,12 +222,9 @@ func (r *projectDatabaseSchemaResource) findDatabaseSchema(ctx context.Context, 
 	if err != nil {
 		return ProjectDatabaseSchema{}, err
 	}
-	for _, schema := range schemas {
-		if schema.Name == name && schema.Version == version {
-			return schema, nil
-		}
-	}
-	return ProjectDatabaseSchema{}, ErrNotFound
+	return findInList(schemas, func(schema ProjectDatabaseSchema) bool {
+		return schema.Name == name && schema.Version == version
+	})
 }
 
 func databaseSchemaInputFromModel(ctx context.Context, model projectDatabaseSchemaResourceModel, addError func(string, string)) (ProjectDatabaseSchemaInput, bool) {
@@ -299,9 +258,8 @@ func setProjectDatabaseSchemaState(ctx context.Context, model *projectDatabaseSc
 	model.CreatedAt = optionalTimeString(schema.CreatedAt)
 	model.UpdatedAt = optionalTimeString(schema.UpdatedAt)
 
-	metadata, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(schema.Metadata, previousMetadata))
-	if diags.HasError() {
-		addError("Unable to encode metadata map", diags.Errors()[0].Detail())
+	metadata, ok := sensitiveStringMapStateValue(ctx, "metadata", schema.Metadata, previousMetadata, addError)
+	if !ok {
 		return
 	}
 	model.Metadata = metadata

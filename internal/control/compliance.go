@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"supadupa2026/internal/env"
 	"time"
 )
 
@@ -72,7 +73,7 @@ func FleetComplianceReport(ctx context.Context, store Store) (ComplianceReport, 
 	report.Controls = append(report.Controls,
 		complianceControl("COM-001", "Immutable audit chain", "audit", []string{"SOC 2 CC7.2", "HIPAA 164.312(b)"}, statusForBool(integrity.Verified), []string{
 			fmt.Sprintf("%d audit events sealed", integrity.Events),
-			fmt.Sprintf("head hash %s", emptyFallback(integrity.HeadHash, "genesis")),
+			fmt.Sprintf("head hash %s", env.FirstNonEmpty(integrity.HeadHash, "genesis")),
 		}, "Keep audit retention policies aligned with the operator's evidence retention schedule."),
 		complianceControl("COM-002", "Platform MFA for administrators", "access", []string{"SOC 2 CC6.1", "HIPAA 164.312(d)"}, statusForBool(admins > 0 && admins == adminsWithMFA), []string{
 			fmt.Sprintf("%d/%d admin users have MFA enabled", adminsWithMFA, admins),
@@ -116,7 +117,7 @@ func FleetComplianceReport(ctx context.Context, store Store) (ComplianceReport, 
 		if err != nil {
 			return ComplianceReport{}, err
 		}
-		if strings.TrimSpace(networkConfig.Config["ip_allowlist"]) != "" {
+		if strings.TrimSpace(networkConfig.Config["db_allowlist"]) != "" || strings.TrimSpace(networkConfig.Config["http_allowlist"]) != "" {
 			counters.networkScoped++
 		}
 		drains, err := store.ListProjectLogDrains(ctx, ref)
@@ -208,11 +209,4 @@ func statusForFleet(total int, ok int) string {
 		return "manual_review"
 	}
 	return statusForBool(total == ok)
-}
-
-func emptyFallback(value string, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
 }

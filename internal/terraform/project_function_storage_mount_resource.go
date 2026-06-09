@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -120,15 +117,15 @@ func (r *projectFunctionStorageMountResource) Schema(ctx context.Context, req re
 }
 
 func (r *projectFunctionStorageMountResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectFunctionStorageMountResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "id")
 }
 
 func (r *projectFunctionStorageMountResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -166,25 +163,7 @@ func (r *projectFunctionStorageMountResource) Read(ctx context.Context, req reso
 }
 
 func (r *projectFunctionStorageMountResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectFunctionStorageMountResourceModel
-	var state projectFunctionStorageMountResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	err := r.client.DeleteProjectFunctionStorageMount(ctx, state.Ref.ValueString(), state.ID.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project function storage mount", err.Error())
-		return
-	}
-	mount, err := r.client.CreateProjectFunctionStorageMount(ctx, plan.Ref.ValueString(), functionStorageMountInputFromModel(plan))
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project function storage mount", err.Error())
-		return
-	}
-	setProjectFunctionStorageMountState(&plan, mount)
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project function storage mount")
 }
 
 func (r *projectFunctionStorageMountResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -201,16 +180,7 @@ func (r *projectFunctionStorageMountResource) Delete(ctx context.Context, req re
 }
 
 func (r *projectFunctionStorageMountResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, id, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, id, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(id) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/id, for example alpha/mount_123.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strings.TrimSpace(id))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "id", "Use ref/id, for example alpha/mount_123.")
 }
 
 func (r *projectFunctionStorageMountResource) findFunctionStorageMount(ctx context.Context, ref string, id string) (ProjectFunctionStorageMount, error) {
@@ -218,12 +188,7 @@ func (r *projectFunctionStorageMountResource) findFunctionStorageMount(ctx conte
 	if err != nil {
 		return ProjectFunctionStorageMount{}, err
 	}
-	for _, mount := range mounts {
-		if mount.ID == id {
-			return mount, nil
-		}
-	}
-	return ProjectFunctionStorageMount{}, ErrNotFound
+	return findInList(mounts, func(mount ProjectFunctionStorageMount) bool { return mount.ID == id })
 }
 
 func functionStorageMountInputFromModel(model projectFunctionStorageMountResourceModel) ProjectFunctionStorageMountInput {

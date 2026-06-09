@@ -17,6 +17,12 @@ import (
 	"time"
 )
 
+const (
+	maxMCPMessageBytes    = 1024 * 1024
+	maxMCPHeaderLineBytes = 64 * 1024
+	maxManagementAPIBytes = 10 * 1024 * 1024
+)
+
 type Runner struct {
 	HTTPClient *http.Client
 	Stdin      io.Reader
@@ -183,7 +189,6 @@ type orgQuotaArgs struct {
 	MaxCPU      int    `json:"max_cpu"`
 	MaxRAMMB    int    `json:"max_ram_mb"`
 	MaxDiskGB   int    `json:"max_disk_gb"`
-	MaxDiskIOPS int    `json:"max_disk_iops"`
 }
 
 type hostArgs struct {
@@ -193,7 +198,6 @@ type hostArgs struct {
 	CapacityCPU      int    `json:"capacity_cpu"`
 	CapacityRAMMB    int    `json:"capacity_ram_mb"`
 	CapacityDiskGB   int    `json:"capacity_disk_gb"`
-	CapacityDiskIOPS int    `json:"capacity_disk_iops"`
 	CapacityProjects int    `json:"capacity_projects"`
 }
 
@@ -762,11 +766,10 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 			"name":    args.Name,
 			"address": args.Address,
 			"capacity": map[string]int{
-				"cpu":       args.CapacityCPU,
-				"ram_mb":    args.CapacityRAMMB,
-				"disk_gb":   args.CapacityDiskGB,
-				"disk_iops": args.CapacityDiskIOPS,
-				"projects":  args.CapacityProjects,
+				"cpu":      args.CapacityCPU,
+				"ram_mb":   args.CapacityRAMMB,
+				"disk_gb":  args.CapacityDiskGB,
+				"projects": args.CapacityProjects,
 			},
 		}
 	case "supadupa_get_host":
@@ -854,11 +857,10 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 		}
 		method, path = http.MethodPut, "/v1/orgs/"+url.PathEscape(args.OrgID)+"/quotas"
 		body = map[string]int{
-			"max_projects":  args.MaxProjects,
-			"max_cpu":       args.MaxCPU,
-			"max_ram_mb":    args.MaxRAMMB,
-			"max_disk_gb":   args.MaxDiskGB,
-			"max_disk_iops": args.MaxDiskIOPS,
+			"max_projects": args.MaxProjects,
+			"max_cpu":      args.MaxCPU,
+			"max_ram_mb":   args.MaxRAMMB,
+			"max_disk_gb":  args.MaxDiskGB,
 		}
 	case "supadupa_list_org_usage_snapshots":
 		args, err := decodeOrgArgs(params.Arguments)
@@ -2451,12 +2453,11 @@ func tools() []map[string]any {
 	orgQuotaSchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"org_id":        map[string]string{"type": "string", "description": "Organization ID"},
-			"max_projects":  map[string]string{"type": "integer", "description": "Maximum projects"},
-			"max_cpu":       map[string]string{"type": "integer", "description": "Maximum CPU"},
-			"max_ram_mb":    map[string]string{"type": "integer", "description": "Maximum RAM in MB"},
-			"max_disk_gb":   map[string]string{"type": "integer", "description": "Maximum disk in GB"},
-			"max_disk_iops": map[string]string{"type": "integer", "description": "Maximum disk IOPS"},
+			"org_id":       map[string]string{"type": "string", "description": "Organization ID"},
+			"max_projects": map[string]string{"type": "integer", "description": "Maximum projects"},
+			"max_cpu":      map[string]string{"type": "integer", "description": "Maximum CPU"},
+			"max_ram_mb":   map[string]string{"type": "integer", "description": "Maximum RAM in MB"},
+			"max_disk_gb":  map[string]string{"type": "integer", "description": "Maximum disk in GB"},
 		},
 		"required": []string{"org_id"},
 	}
@@ -2470,13 +2471,12 @@ func tools() []map[string]any {
 	hostCreateSchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"name":               map[string]string{"type": "string", "description": "Host display name"},
-			"address":            map[string]string{"type": "string", "description": "Host address"},
-			"capacity_cpu":       map[string]string{"type": "integer", "description": "CPU capacity"},
-			"capacity_ram_mb":    map[string]string{"type": "integer", "description": "RAM capacity in MB"},
-			"capacity_disk_gb":   map[string]string{"type": "integer", "description": "Disk capacity in GB"},
-			"capacity_disk_iops": map[string]string{"type": "integer", "description": "Disk IOPS capacity"},
-			"capacity_projects":  map[string]string{"type": "integer", "description": "Project slot capacity"},
+			"name":              map[string]string{"type": "string", "description": "Host display name"},
+			"address":           map[string]string{"type": "string", "description": "Host address"},
+			"capacity_cpu":      map[string]string{"type": "integer", "description": "CPU capacity"},
+			"capacity_ram_mb":   map[string]string{"type": "integer", "description": "RAM capacity in MB"},
+			"capacity_disk_gb":  map[string]string{"type": "integer", "description": "Disk capacity in GB"},
+			"capacity_projects": map[string]string{"type": "integer", "description": "Project slot capacity"},
 		},
 		"required": []string{"name", "address"},
 	}
@@ -4146,7 +4146,14 @@ func (c apiClient) do(ctx context.Context, method string, path string, body any)
 		return nil, 0, err
 	}
 	defer res.Body.Close()
-	payload, err := io.ReadAll(res.Body)
+	limited := io.LimitReader(res.Body, maxManagementAPIBytes+1)
+	payload, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(payload) > maxManagementAPIBytes {
+		return nil, 0, fmt.Errorf("management API response exceeded %d bytes", maxManagementAPIBytes)
+	}
 	return payload, res.StatusCode, err
 }
 
@@ -4166,11 +4173,10 @@ func normalizeBaseURL(input string) (string, error) {
 }
 
 func readMessage(reader *bufio.Reader) ([]byte, error) {
-	line, err := reader.ReadString('\n')
+	line, err := readFirstMessageLine(reader)
 	if err != nil {
 		return nil, err
 	}
-	line = strings.TrimRight(line, "\r\n")
 	if strings.HasPrefix(strings.TrimSpace(line), "{") {
 		return []byte(line), nil
 	}
@@ -4187,18 +4193,74 @@ func readMessage(reader *bufio.Reader) ([]byte, error) {
 			}
 			contentLength = parsed
 		}
-		line, err = reader.ReadString('\n')
+		line, err = readLimitedLine(reader, maxMCPHeaderLineBytes, "MCP header")
 		if err != nil {
 			return nil, err
 		}
-		line = strings.TrimRight(line, "\r\n")
 	}
 	if contentLength < 0 {
 		return nil, fmt.Errorf("missing Content-Length")
 	}
+	if contentLength > maxMCPMessageBytes {
+		return nil, fmt.Errorf("MCP message exceeded %d bytes", maxMCPMessageBytes)
+	}
 	payload := make([]byte, contentLength)
 	_, err = io.ReadFull(reader, payload)
 	return payload, err
+}
+
+func readFirstMessageLine(reader *bufio.Reader) (string, error) {
+	var out []byte
+	limit := maxMCPHeaderLineBytes
+	label := "MCP header"
+	sawNonSpace := false
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			if err == io.EOF && len(out) > 0 {
+				return strings.TrimRight(string(out), "\r\n"), nil
+			}
+			return "", err
+		}
+		if b == '\n' {
+			return strings.TrimRight(string(out), "\r\n"), nil
+		}
+		if !sawNonSpace && !isMCPLineSpace(b) {
+			sawNonSpace = true
+			if b == '{' {
+				limit = maxMCPMessageBytes
+				label = "MCP message"
+			}
+		}
+		if len(out) >= limit {
+			return "", fmt.Errorf("%s exceeded %d bytes", label, limit)
+		}
+		out = append(out, b)
+	}
+}
+
+func readLimitedLine(reader *bufio.Reader, limit int, label string) (string, error) {
+	var out []byte
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			if err == io.EOF && len(out) > 0 {
+				return strings.TrimRight(string(out), "\r\n"), nil
+			}
+			return "", err
+		}
+		if b == '\n' {
+			return strings.TrimRight(string(out), "\r\n"), nil
+		}
+		if len(out) >= limit {
+			return "", fmt.Errorf("%s exceeded %d bytes", label, limit)
+		}
+		out = append(out, b)
+	}
+}
+
+func isMCPLineSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r'
 }
 
 func writeMessage(output io.Writer, value any) error {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Eye, Pause, Play, RotateCcw, Server, SlidersHorizontal } from "lucide-react";
+import { Copy, Eye, Pause, Play, RotateCcw, SlidersHorizontal } from "lucide-react";
 import {
   auditProjectSecretCopy,
   listStackReleases,
@@ -13,7 +13,15 @@ import {
   upgradeProject,
 } from "../../api";
 import { Modal } from "../../components/modal";
+import { AppPanel } from "../../components/app/app-panel";
+import { Badge } from "../../components/ui/badge";
+import { CollapsibleCard } from "../../components/ui/collapsible-card";
+import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
+import { NativeSelect } from "../../components/ui/native-select";
+import { StatusPill } from "../../components/ui/status-pill";
 import { useUIStore } from "../../lib/ui-store";
+import type { Tone } from "../../lib/status";
 import { formatDateTime, formatTime } from "../../lib/format";
 import type { Project, ProjectSecret } from "../../types";
 
@@ -131,49 +139,43 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
 
   return (
     <>
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Lifecycle</p>
-            <h2>Runtime actions</h2>
-          </div>
-        </div>
+      <AppPanel eyebrow="Lifecycle" title="Runtime actions">
         {!project ? (
           <p className="mt-4 text-sm text-muted">Select a project to manage lifecycle actions.</p>
         ) : (
           <div className="mt-4 grid gap-3">
             <div className="grid grid-cols-3 gap-2">
-              <button className="button secondary justify-center" disabled={busy || project.status === "paused"} onClick={() => setConfirmAction("pause")} type="button">
+              <Button disabled={busy || project.status === "paused"} onClick={() => setConfirmAction("pause")} type="button" variant="secondary">
                 <Pause size={14} />
                 Pause
-              </button>
-              <button className="button secondary justify-center" disabled={busy || project.status === "healthy"} onClick={() => setConfirmAction("resume")} type="button">
+              </Button>
+              <Button disabled={busy || project.status === "healthy"} onClick={() => setConfirmAction("resume")} type="button" variant="secondary">
                 <Play size={14} />
                 Resume
-              </button>
-              <button className="button secondary justify-center" disabled={busy} onClick={() => setConfirmAction("restart")} type="button">
+              </Button>
+              <Button disabled={busy} onClick={() => setConfirmAction("restart")} type="button" variant="secondary">
                 <RotateCcw size={14} />
                 Restart
-              </button>
+              </Button>
             </div>
             <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
               <p className="text-sm text-muted">Upgrade stack version from <span className="font-mono text-text">{project.spec.stack_version}</span>.</p>
               <div className="flex gap-2 max-sm:flex-col">
                 {releaseVersions.length > 0 ? (
-                  <select className="input font-mono" disabled={stackReleasesQuery.isPending} value={version} onChange={(event) => setVersion(event.target.value)}>
+                  <NativeSelect className="font-mono" disabled={stackReleasesQuery.isPending} value={version} onChange={(event) => setVersion(event.target.value)}>
                     {releaseVersions.map((releaseVersion) => (
                       <option key={releaseVersion} value={releaseVersion}>
                         {releaseVersion}{releaseVersion === project.spec.stack_version ? " (current)" : ""}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 ) : (
-                  <input className="input font-mono" value={version} onChange={(event) => setVersion(event.target.value)} />
+                  <Input className="font-mono" value={version} onChange={(event) => setVersion(event.target.value)} />
                 )}
-                <button className="button secondary justify-center" disabled={busy || version.trim().length === 0 || version === project.spec.stack_version} onClick={() => setConfirmAction("upgrade")} type="button">
+                <Button disabled={busy || version.trim().length === 0 || version === project.spec.stack_version} onClick={() => setConfirmAction("upgrade")} type="button" variant="secondary">
                   <RotateCcw size={14} />
                   Upgrade
-                </button>
+                </Button>
               </div>
               {selectedRelease ? (
                 <p className="text-xs text-muted">Postgres {selectedRelease.postgres} · API {selectedRelease.rest} · Auth {selectedRelease.auth}</p>
@@ -187,9 +189,7 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
                         {lastUpgrade.previous_version} to {lastUpgrade.target_version}
                       </p>
                     </div>
-                    <span className={`pill ${lastUpgrade.rollback_available ? "healthy" : "warning"}`}>
-                      {lastUpgrade.rollback_available ? "rollback ready" : "rollback unavailable"}
-                    </span>
+                    <StatusPill tone={lastUpgrade.rollback_available ? "success" : "warning"} label={lastUpgrade.rollback_available ? "rollback ready" : "rollback unavailable"} />
                   </div>
                   <div className="grid gap-1 text-xs text-muted">
                     <p className="truncate">Pre-upgrade backup <span className="font-mono text-text">{lastUpgrade.backup.id}</span></p>
@@ -201,15 +201,15 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
             <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
               <p className="text-sm text-muted">Resize resource tier from <span className="font-mono text-text">{project.spec.resource_tier}</span>.</p>
               <div className="flex gap-2 max-sm:flex-col">
-                <select className="input" value={tier} onChange={(event) => setTier(event.target.value)}>
+                <NativeSelect value={tier} onChange={(event) => setTier(event.target.value)}>
                   <option value="small">Small</option>
                   <option value="medium">Medium</option>
                   <option value="large">Large</option>
-                </select>
-                <button className="button secondary justify-center" disabled={busy || tier === project.spec.resource_tier} onClick={() => setConfirmAction("scale")} type="button">
+                </NativeSelect>
+                <Button disabled={busy || tier === project.spec.resource_tier} onClick={() => setConfirmAction("scale")} type="button" variant="secondary">
                   <SlidersHorizontal size={14} />
                   Scale
-                </button>
+                </Button>
               </div>
             </div>
             {stackReleasesQuery.error ? <p className="text-sm text-danger">{stackReleasesQuery.error.message}</p> : null}
@@ -222,7 +222,7 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
             )}
           </div>
         )}
-      </section>
+      </AppPanel>
       <Modal
         description={activeConfirm?.description}
         onClose={() => !confirmPending && setConfirmAction(null)}
@@ -230,10 +230,10 @@ export function LifecyclePanel({ orgId, project }: { orgId: string; project?: Pr
         title={activeConfirm?.title ?? "Confirm action"}
         footer={(
           <>
-            <button className="button secondary" disabled={confirmPending} onClick={() => setConfirmAction(null)} type="button">Cancel</button>
-            <button className={activeConfirm?.tone === "danger" ? "button danger" : "button"} disabled={confirmPending} onClick={runConfirmedAction} type="button">
+            <Button disabled={confirmPending} onClick={() => setConfirmAction(null)} type="button" variant="secondary">Cancel</Button>
+            <Button disabled={confirmPending} onClick={runConfirmedAction} type="button" variant={activeConfirm?.tone === "danger" ? "danger" : "default"}>
               {confirmPending ? "Working..." : activeConfirm?.confirmLabel ?? "Confirm"}
-            </button>
+            </Button>
           </>
         )}
       >
@@ -289,31 +289,40 @@ function lifecycleConfirmCopy(action: LifecycleConfirm, project: Project | undef
   }
 }
 
-export function RuntimeStatusPanel({ project }: { project?: Project }) {
+export function RuntimeStatusPanel({ project, defaultOpen = false }: { project?: Project; defaultOpen?: boolean }) {
   const runtime = project?.runtime_status;
   const phase = runtime?.phase ?? project?.status ?? "unknown";
   const message = runtime?.message || project?.message || "Runtime status has not been sampled yet.";
   const drift = message.toLowerCase().includes("drift") || phase === "degraded";
+  const services = runtime?.services ?? [];
+  const runningServices = services.filter((service) => {
+    const state = (service.state || "").toLowerCase();
+    return state === "running" || state === "rendered";
+  }).length;
+  const summary = services.length
+    ? `${runningServices}/${services.length} services running`
+    : runtime
+      ? "Provisioner sample recorded"
+      : "Awaiting first sample";
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Runtime</p>
-          <h2>Reconciliation status</h2>
-        </div>
-        <Server size={15} className="text-faint" />
-      </div>
+    <CollapsibleCard
+      actions={<StatusPill status={phase} />}
+      defaultOpen={defaultOpen}
+      description={summary}
+      eyebrow="Runtime"
+      title="Reconciliation status"
+    >
       {!project ? (
-        <p className="mt-4 text-sm text-muted">Select a project to inspect runtime state.</p>
+        <p className="text-sm text-muted">Select a project to inspect runtime state.</p>
       ) : (
-        <div className="mt-4 grid gap-3">
+        <div className="grid gap-3">
           <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-bg p-3">
             <div className="min-w-0">
               <p className="label">Control plane</p>
               <p className="truncate text-sm text-muted">{project.message || "Desired state recorded"}</p>
             </div>
-            <span className={`pill ${project.status}`}>{project.status}</span>
+            <StatusPill status={project.status} />
           </div>
           <div className={`rounded-md border p-3 ${drift ? "border-warning/60 bg-warning/5" : "border-border bg-bg"}`}>
             <div className="flex items-center justify-between gap-3">
@@ -321,7 +330,7 @@ export function RuntimeStatusPanel({ project }: { project?: Project }) {
                 <p className="label">Provisioner sample</p>
                 <p className="truncate text-sm text-muted">{runtime ? message : "Waiting for project detail sample"}</p>
               </div>
-              <span className={`pill ${phase}`}>{phase}</span>
+              <StatusPill status={phase} />
             </div>
             {drift ? <p className="mt-2 text-xs text-warning">Drift detected. Reconcile should converge actual runtime back to desired state.</p> : null}
           </div>
@@ -339,9 +348,9 @@ export function RuntimeStatusPanel({ project }: { project?: Project }) {
                       <p className="truncate font-mono text-[11px] text-faint">{service.compose_service}{service.message ? ` · ${service.message}` : ""}</p>
                     </div>
                     <div className="flex items-center gap-1">
-                      {!service.desired ? <span className="pill">disabled</span> : null}
-                      {service.health ? <span className={`pill ${service.health === "healthy" ? "healthy" : "provisioning"}`}>{service.health}</span> : null}
-                      <span className={`pill ${runtimeServiceTone(service.state)}`}>{service.state || "unknown"}</span>
+                      {!service.desired ? <Badge variant="muted">disabled</Badge> : null}
+                      {service.health ? <StatusPill tone={service.health === "healthy" ? "success" : "warning"} label={service.health} /> : null}
+                      <StatusPill tone={runtimeServiceTone(service.state)} label={service.state || "unknown"} />
                     </div>
                   </div>
                 ))}
@@ -350,15 +359,15 @@ export function RuntimeStatusPanel({ project }: { project?: Project }) {
           ) : null}
         </div>
       )}
-    </section>
+    </CollapsibleCard>
   );
 }
 
-function runtimeServiceTone(state: string) {
+function runtimeServiceTone(state: string): Tone {
   const normalized = state.toLowerCase();
-  if (normalized === "running" || normalized === "rendered") return "healthy";
-  if (normalized === "missing" || normalized === "exited" || normalized === "dead") return "error";
-  return "provisioning";
+  if (normalized === "running" || normalized === "rendered") return "success";
+  if (normalized === "missing" || normalized === "exited" || normalized === "dead") return "danger";
+  return "warning";
 }
 
 export function SecretsPanel({ project, secrets, loading }: { project?: Project; secrets: ProjectSecret[]; loading: boolean }) {
@@ -401,13 +410,7 @@ export function SecretsPanel({ project, secrets, loading }: { project?: Project;
   });
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Secrets</p>
-          <h2>Keys and credentials</h2>
-        </div>
-      </div>
+    <AppPanel eyebrow="Secrets" title="Keys and credentials">
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading secrets...</p> : null}
         {!loading && secrets.length === 0 ? <p className="text-sm text-muted">No generated secrets yet.</p> : null}
@@ -422,15 +425,15 @@ export function SecretsPanel({ project, secrets, loading }: { project?: Project;
                 {secret.rotated_at ? <p className="mt-1 text-xs text-faint">Rotated {formatTime(secret.rotated_at)}</p> : null}
               </div>
               <div className="flex gap-2">
-                <button className="icon-button" disabled={!project || revealMutation.isPending} onClick={() => project && revealMutation.mutate({ ref: project.ref, kind: secret.kind })} type="button">
+                <Button disabled={!project || revealMutation.isPending} onClick={() => project && revealMutation.mutate({ ref: project.ref, kind: secret.kind })} size="icon" type="button" variant="ghost">
                   <Eye size={14} />
-                </button>
-                <button className="icon-button" disabled={!project || copyMutation.isPending || !revealedValue} onClick={() => project && revealedValue && copyMutation.mutate({ ref: project.ref, kind: secret.kind, value: revealedValue })} type="button">
+                </Button>
+                <Button disabled={!project || copyMutation.isPending || !revealedValue} onClick={() => project && revealedValue && copyMutation.mutate({ ref: project.ref, kind: secret.kind, value: revealedValue })} size="icon" type="button" variant="ghost">
                   <Copy size={14} />
-                </button>
-                <button className="icon-button" disabled={!project || rotateMutation.isPending} onClick={() => project && rotateMutation.mutate({ ref: project.ref, kind: secret.kind })} type="button">
+                </Button>
+                <Button disabled={!project || rotateMutation.isPending} onClick={() => project && rotateMutation.mutate({ ref: project.ref, kind: secret.kind })} size="icon" type="button" variant="ghost">
                   <RotateCcw size={14} />
-                </button>
+                </Button>
               </div>
             </div>
           );
@@ -439,6 +442,6 @@ export function SecretsPanel({ project, secrets, loading }: { project?: Project;
         {copyMutation.error ? <p className="text-sm text-danger">{copyMutation.error.message}</p> : null}
         {rotateMutation.error ? <p className="text-sm text-danger">{rotateMutation.error.message}</p> : null}
       </div>
-    </section>
+    </AppPanel>
   );
 }

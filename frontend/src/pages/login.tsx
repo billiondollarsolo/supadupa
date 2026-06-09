@@ -1,9 +1,8 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { FormEvent, useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
   bootstrapAdmin,
-  getApiBase,
   getApiHealth,
   getAuthState,
   login,
@@ -11,17 +10,20 @@ import {
 } from "../api";
 import { BrandLogo } from "../components/brand-logo";
 import { BrandWordmark } from "../components/brand-wordmark";
+import { AppPanel } from "../components/app/app-panel";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
 import { useAuthSession } from "../lib/auth-session";
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const setAuthenticated = useAuthSession((state) => state.setAuthenticated);
   const [mode, setMode] = useState<"bootstrap" | "login">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [totpCode, setTOTPCode] = useState("");
   const [mfaRequired, setMFARequired] = useState(false);
-  const apiBase = useMemo(() => getApiBase(), []);
   const health = useQuery({
     queryKey: ["api-health"],
     queryFn: getApiHealth,
@@ -30,7 +32,7 @@ export function LoginPage() {
   });
   const authState = useQuery({
     queryKey: ["auth-state"],
-    queryFn: getAuthState,
+    queryFn: ({ signal }) => getAuthState({ signal }),
     retry: 1,
     refetchInterval: 15_000,
   });
@@ -52,12 +54,20 @@ export function LoginPage() {
 
   const mutation = useMutation({
     mutationFn: mode === "bootstrap" ? bootstrapAdmin : login,
-    onSuccess: (payload) => {
-      if (payload.mfa_required || !payload.token) {
+    onSuccess: async (payload) => {
+      if (payload.mfa_required) {
         setMFARequired(true);
         return;
       }
-      setAuthenticated(payload.token);
+      setAuthenticated(payload.user);
+      await queryClient.cancelQueries({ queryKey: ["auth-state"] });
+      queryClient.setQueryData(["auth-state"], (current: unknown) => ({
+        ...(typeof current === "object" && current !== null ? current : {}),
+        authenticated: true,
+        bootstrapped: true,
+        user: payload.user,
+      }));
+      await queryClient.invalidateQueries({ queryKey: ["auth-state"] });
       void navigate({ to: "/" });
     },
     onError: (error) => {
@@ -91,27 +101,27 @@ export function LoginPage() {
     mutation.mutate({ email, password, ...(mfaRequired ? { totp_code: totpCode } : {}) });
   }
 
-  const healthMessage = health.isLoading
-    ? "Checking Management API"
-    : health.isError
-      ? `Cannot reach Management API at ${apiBase}`
-      : `Management API online at ${apiBase}`;
-  const healthTone = health.isLoading ? "muted" : health.isError ? "danger" : "success";
-  const authStateMessage = authState.isError
-    ? "Auth state unavailable"
-    : authState.isLoading
-      ? "Checking platform auth state"
-      : authState.data?.bootstrapped
-        ? "Admin account exists"
-        : "No admin detected. Bootstrap is available below for first-run installs.";
-  const authError = mutation.error ? authErrorMessage(mutation.error, apiBase, authState.data?.bootstrapped) : "";
-  const ssoError = ssoMutation.error ? authErrorMessage(ssoMutation.error, apiBase, authState.data?.bootstrapped) : "";
+  // Both queries hit the same control plane, so a failure of either is one
+  // connectivity problem, not two. Collapse to a single banner.
+  const connectivityError = health.isError || authState.isError;
+  const connectivityMessage = connectivityError
+    ? "Cannot reach the Management API. Start the control plane or check the deployment configuration."
+    : "";
+  const noticeMessage = !connectivityError && !authState.isLoading && authState.data?.bootstrapped === false
+    ? "No admin detected. Bootstrap is available below for first-run installs."
+    : "";
+  const authError = mutation.error ? authErrorMessage(mutation.error, authState.data?.bootstrapped) : "";
+  const ssoError = ssoMutation.error ? authErrorMessage(ssoMutation.error, authState.data?.bootstrapped) : "";
   const showBootstrapToggle = mode === "bootstrap" || authState.data?.bootstrapped === false;
+  // Only offer SSO when the control plane reports it enabled (safe pre-auth
+  // signal from /v1/auth/state), and never during first-run bootstrap — there is
+  // no IdP to fall back to before an admin exists.
+  const showSSO = mode !== "bootstrap" && authState.data?.bootstrapped === true && authState.data?.sso_enabled === true;
   const canSubmit = email.trim().length > 0 && password.length > 0 && (!mfaRequired || totpCode.length >= 6) && !mutation.isPending;
 
   return (
     <main className="grid min-h-screen place-items-center bg-bg p-6 text-text">
-      <section className="panel w-full max-w-[420px]">
+      <AppPanel className="w-full max-w-[420px]">
         <div className="section-head">
           <div className="flex min-w-0 items-center gap-3">
             <div className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-border-strong bg-surface-2">
@@ -123,48 +133,63 @@ export function LoginPage() {
             </div>
           </div>
         </div>
-        <div className={`mt-4 rounded-md border px-3 py-2 text-sm ${healthTone === "danger" ? "border-danger/40 text-danger" : healthTone === "success" ? "border-success/40 text-success" : "border-border text-muted"}`}>
-          {healthMessage}
-        </div>
-        <div className="mt-2 rounded-md border border-border px-3 py-2 text-sm text-muted">
-          {authStateMessage}
-        </div>
+        {connectivityMessage ? (
+          <div className="mt-4 rounded-md border border-danger/40 px-3 py-2 text-sm text-danger">
+            {connectivityMessage}
+          </div>
+        ) : null}
+        {noticeMessage ? (
+          <div className="mt-4 rounded-md border border-border px-3 py-2 text-sm text-muted">
+            {noticeMessage}
+          </div>
+        ) : null}
         <form className="mt-5 grid gap-3" onSubmit={submit}>
-          <input autoComplete="username" className="input" placeholder="admin@example.com" value={email} onChange={(event) => setEmail(event.target.value)} type="email" />
-          <input autoComplete={mode === "bootstrap" ? "new-password" : "current-password"} className="input" placeholder={mode === "bootstrap" ? "Create password" : "Password"} value={password} onChange={(event) => setPassword(event.target.value)} type="password" />
+          <label className="grid gap-1">
+            <span className="sr-only">Email</span>
+            <Input autoComplete="username" placeholder="admin@example.com" value={email} onChange={(event) => setEmail(event.target.value)} type="email" />
+          </label>
+          <label className="grid gap-1">
+            <span className="sr-only">Password</span>
+            <Input autoComplete={mode === "bootstrap" ? "new-password" : "current-password"} placeholder={mode === "bootstrap" ? "Create password" : "Password"} value={password} onChange={(event) => setPassword(event.target.value)} type="password" />
+          </label>
           {mfaRequired ? (
-            <input autoComplete="one-time-code" className="input" inputMode="numeric" maxLength={6} placeholder="123456" value={totpCode} onChange={(event) => setTOTPCode(event.target.value)} />
+            <label className="grid gap-1">
+              <span className="sr-only">Authenticator code</span>
+              <Input autoComplete="one-time-code" inputMode="numeric" maxLength={6} placeholder="123456" value={totpCode} onChange={(event) => setTOTPCode(event.target.value)} />
+            </label>
           ) : null}
-          <button className="button justify-center" disabled={!canSubmit} type="submit">
-            {mode === "bootstrap" ? "Create admin" : mfaRequired ? "Verify code" : "Login"}
-          </button>
+          <Button className="justify-center" disabled={!canSubmit} type="submit">
+            {mode === "bootstrap" ? "Create first admin" : mfaRequired ? "Verify code" : "Login"}
+          </Button>
           {showBootstrapToggle ? (
-            <button className="button secondary justify-center" onClick={() => {
+            <Button className="justify-center" variant="secondary" onClick={() => {
               setMode(mode === "bootstrap" ? "login" : "bootstrap");
               setMFARequired(false);
               setTOTPCode("");
             }} type="button">
               {mode === "bootstrap" ? "Back to login" : "Create first admin"}
-            </button>
+            </Button>
           ) : null}
-          <button className="button secondary justify-center" disabled={ssoMutation.isPending} onClick={() => ssoMutation.mutate()} type="button">
-            Continue with SSO
-          </button>
+          {showSSO ? (
+            <Button className="justify-center" variant="secondary" disabled={ssoMutation.isPending} onClick={() => ssoMutation.mutate()} type="button">
+              Continue with SSO
+            </Button>
+          ) : null}
           {mfaRequired ? <p className="text-sm text-muted">Enter the six-digit code from your authenticator app.</p> : null}
           {authError ? <p className="text-sm text-danger">{authError}</p> : null}
           {ssoError ? <p className="text-sm text-danger">{ssoError}</p> : null}
         </form>
-      </section>
+      </AppPanel>
     </main>
   );
 }
 
-function authErrorMessage(error: Error, apiBase: string, bootstrapped?: boolean) {
+function authErrorMessage(error: Error, bootstrapped?: boolean) {
   if (error.message === "Failed to fetch" || error.message === "NetworkError when attempting to fetch resource.") {
-    return `Cannot reach the Management API at ${apiBase}. Start the control plane there or set VITE_API_BASE_URL to the running API.`;
+    return "Cannot reach the Management API. Start the control plane or check VITE_API_BASE_URL.";
   }
   if (error.message.includes("404")) {
-    return `The server at ${apiBase} is not exposing the supadupa auth API. Check SUPADUPA_ADDR or VITE_API_BASE_URL.`;
+    return "The configured server is not exposing the supadupa auth API. Check SUPADUPA_ADDR or VITE_API_BASE_URL.";
   }
   if (error.message.includes("admin user already exists")) {
     return "An admin already exists. Switch to Admin login.";

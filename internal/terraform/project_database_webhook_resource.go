@@ -3,11 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -163,15 +160,15 @@ func (r *projectDatabaseWebhookResource) Schema(ctx context.Context, req resourc
 }
 
 func (r *projectDatabaseWebhookResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectDatabaseWebhookResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "name")
 }
 
 func (r *projectDatabaseWebhookResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -227,32 +224,7 @@ func (r *projectDatabaseWebhookResource) Read(ctx context.Context, req resource.
 }
 
 func (r *projectDatabaseWebhookResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectDatabaseWebhookResourceModel
-	var state projectDatabaseWebhookResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := databaseWebhookInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectDatabaseWebhook(ctx, state.Ref.ValueString(), state.Name.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project database webhook", err.Error())
-		return
-	}
-	webhook, err := r.client.CreateProjectDatabaseWebhook(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project database webhook", err.Error())
-		return
-	}
-	setProjectDatabaseWebhookState(ctx, &plan, webhook, input.Headers, input.Metadata, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project database webhook")
 }
 
 func (r *projectDatabaseWebhookResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -269,16 +241,7 @@ func (r *projectDatabaseWebhookResource) Delete(ctx context.Context, req resourc
 }
 
 func (r *projectDatabaseWebhookResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, name, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, name, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name, for example alpha/orders-events.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(name))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "name", "Use ref/name, for example alpha/orders-events.")
 }
 
 func (r *projectDatabaseWebhookResource) findDatabaseWebhook(ctx context.Context, ref string, name string) (ProjectDatabaseWebhook, error) {
@@ -286,12 +249,7 @@ func (r *projectDatabaseWebhookResource) findDatabaseWebhook(ctx context.Context
 	if err != nil {
 		return ProjectDatabaseWebhook{}, err
 	}
-	for _, webhook := range webhooks {
-		if webhook.Name == name {
-			return webhook, nil
-		}
-	}
-	return ProjectDatabaseWebhook{}, ErrNotFound
+	return findInList(webhooks, func(webhook ProjectDatabaseWebhook) bool { return webhook.Name == name })
 }
 
 func databaseWebhookInputFromModel(ctx context.Context, model projectDatabaseWebhookResourceModel, addError func(string, string)) (ProjectDatabaseWebhookInput, bool) {
@@ -338,21 +296,18 @@ func setProjectDatabaseWebhookState(ctx context.Context, model *projectDatabaseW
 	model.CreatedAt = optionalTimeString(webhook.CreatedAt)
 	model.UpdatedAt = optionalTimeString(webhook.UpdatedAt)
 
-	events, diags := types.ListValueFrom(ctx, types.StringType, webhook.Events)
-	if diags.HasError() {
-		addError("Unable to encode events list", diags.Errors()[0].Detail())
+	events, ok := stringListStateValue(ctx, "events", webhook.Events, addError)
+	if !ok {
 		return
 	}
 	model.Events = events
-	headers, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(webhook.Headers, previousHeaders))
-	if diags.HasError() {
-		addError("Unable to encode headers map", diags.Errors()[0].Detail())
+	headers, ok := sensitiveStringMapStateValue(ctx, "headers", webhook.Headers, previousHeaders, addError)
+	if !ok {
 		return
 	}
 	model.Headers = headers
-	metadata, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(webhook.Metadata, previousMetadata))
-	if diags.HasError() {
-		addError("Unable to encode metadata map", diags.Errors()[0].Detail())
+	metadata, ok := sensitiveStringMapStateValue(ctx, "metadata", webhook.Metadata, previousMetadata, addError)
+	if !ok {
 		return
 	}
 	model.Metadata = metadata

@@ -1,11 +1,21 @@
 import { useEffect, useState } from "react";
-import { Activity, Boxes, Copy, Database, ExternalLink, Globe2, KeyRound, Network, Shield } from "lucide-react";
+import { Activity, Boxes, Database, Globe2, KeyRound, Network, Play, RotateCcw, Shield } from "lucide-react";
+import { AppPanel } from "../../components/app/app-panel";
+import { ResourceMeter } from "../../components/app/resource-meter";
+import { TelemetryLineChart } from "../../components/charts/telemetry-line-chart";
+import { Badge } from "../../components/ui/badge";
+import { Button, buttonVariants } from "../../components/ui/button";
+import { CardButton } from "../../components/ui/card-button";
+import { RevealField } from "../../components/ui/reveal-field";
 import { RuntimeLink } from "../../components/runtime-link";
+import { StatusPill } from "../../components/ui/status-pill";
+import { auditProjectSecretCopy } from "../../api";
 import { useDashboardContext } from "../../lib/dashboard-context";
 import { formatBytes, formatTime } from "../../lib/format";
-import { useUIStore } from "../../lib/ui-store";
-import type { ConnectPayload, Project, ProjectMetrics, TelemetrySample } from "../../types";
+import type { ProjectTab } from "../../lib/project-config";
+import type { ConnectPayload, Project, ProjectMetrics } from "../../types";
 import { ProjectPage } from "./layout";
+import { RuntimeStatusPanel } from "./side-panels";
 
 type ProjectTelemetryPoint = {
   projectRef: string;
@@ -17,6 +27,7 @@ type ProjectTelemetryPoint = {
 export function ProjectOverviewPage() {
   const { activeProject, connect, projectMetrics, routeToProject } = useDashboardContext();
   const [telemetryHistory, setTelemetryHistory] = useState<ProjectTelemetryPoint[]>([]);
+  const openTab = (tab: ProjectTab) => activeProject && routeToProject(activeProject.ref, tab);
 
   useEffect(() => {
     const point = telemetryPointFromMetrics(projectMetrics.data);
@@ -36,21 +47,17 @@ export function ProjectOverviewPage() {
 
   return (
     <ProjectPage>
-      <ProjectStatusStrip project={activeProject} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
-      <div className="grid grid-cols-[minmax(0,1fr)_340px] gap-4 max-xl:grid-cols-1">
-        <div className="grid gap-4">
-          <ObservedMetricsPanel history={telemetryHistory} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
-          <OperationalSurfacePanel metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
-        </div>
-        <div className="grid content-start gap-4">
-          <ConnectionBasicsPanel projectRef={activeProject?.ref} payload={connect.data} loading={connect.isLoading} onOpenConnect={() => activeProject && routeToProject(activeProject.ref, "connect")} />
-        </div>
-      </div>
+      <ProjectStatusStrip project={activeProject} metrics={projectMetrics.data} loading={projectMetrics.isLoading} studioUrl={connect.data?.studio_url} />
+      <NextStepsStrip project={activeProject} metrics={projectMetrics.data} onOpenTab={openTab} />
+      <ObservedMetricsPanel history={telemetryHistory} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
+      <OperationalSurfacePanel metrics={projectMetrics.data} loading={projectMetrics.isLoading} onOpenTab={openTab} />
+      <ConnectionBasicsPanel payload={connect.data} loading={connect.isLoading} onOpenConnect={() => openTab("connect")} project={activeProject} />
+      <RuntimeStatusPanel project={activeProject} />
     </ProjectPage>
   );
 }
 
-function ProjectStatusStrip({ loading, metrics, project }: { project?: Project; metrics?: ProjectMetrics; loading: boolean }) {
+function ProjectStatusStrip({ loading, metrics, project, studioUrl }: { project?: Project; metrics?: ProjectMetrics; loading: boolean; studioUrl?: string }) {
   return (
     <section className="rounded-md border border-border bg-surface px-3 py-2">
       <div className="flex min-h-9 flex-wrap items-center justify-between gap-3">
@@ -62,12 +69,52 @@ function ProjectStatusStrip({ loading, metrics, project }: { project?: Project; 
           </div>
         </div>
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-xs text-muted">
-          <span className={`pill ${project?.status === "healthy" ? "healthy" : project?.status === "error" ? "error" : "provisioning"}`}>{metrics?.status ?? project?.status ?? (loading ? "loading" : "-")}</span>
-          {project ? <span className="pill">{project.spec.resource_tier}</span> : null}
-          {project ? <span className="pill">{project.spec.profile}</span> : null}
+          <StatusPill label={metrics?.status ?? project?.status ?? (loading ? "loading" : "-")} status={metrics?.status ?? project?.status} />
+          {project ? <Badge variant="muted">{project.spec.resource_tier}</Badge> : null}
+          {project ? <Badge variant="muted">{project.spec.profile}</Badge> : null}
           {metrics ? <span className="font-mono text-faint">{metrics.resources.cpu} vCPU · {formatBytes(metrics.resources.ram_mb * 1024 * 1024)} RAM · {formatBytes(metrics.db_allocated_bytes)} disk</span> : null}
+          {studioUrl && project ? (
+            <RuntimeLink className={buttonVariants({ variant: "secondary", size: "sm" })} label="Open Studio" projectRef={project.ref} url={studioUrl} />
+          ) : null}
         </div>
       </div>
+    </section>
+  );
+}
+
+// Surfaces the most urgent "what do I do next" actions on the landing page so a
+// paused stack or a project with no backups gets a clear, in-content CTA instead
+// of forcing the user to discover it in the lifecycle side panel.
+function NextStepsStrip({ metrics, onOpenTab, project }: { project?: Project; metrics?: ProjectMetrics; onOpenTab: (tab: ProjectTab) => void }) {
+  if (!project) {
+    return null;
+  }
+  const steps: Array<{ key: string; label: string; detail: string; icon: typeof Play; tab: ProjectTab; cta: string }> = [];
+  if (project.status === "paused") {
+    steps.push({ key: "resume", label: "Project is paused", detail: "Resume the stack to restore API, database, and runtime traffic.", icon: Play, tab: "config", cta: "Manage runtime" });
+  }
+  if (metrics && metrics.backups === 0) {
+    steps.push({ key: "backups", label: "No backups yet", detail: "Capture a first backup so this project is recoverable.", icon: RotateCcw, tab: "backups", cta: "Open backups" });
+  }
+  if (steps.length === 0) {
+    return null;
+  }
+  return (
+    <section className="grid gap-2">
+      {steps.map((step) => (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/50 bg-warning/5 px-3 py-2" key={step.key}>
+          <div className="flex min-w-0 items-center gap-2">
+            <step.icon className="text-warning" size={15} />
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{step.label}</p>
+              <p className="truncate text-xs text-muted">{step.detail}</p>
+            </div>
+          </div>
+          <Button onClick={() => onOpenTab(step.tab)} size="sm" type="button" variant="secondary">
+            {step.cta}
+          </Button>
+        </div>
+      ))}
     </section>
   );
 }
@@ -75,180 +122,86 @@ function ProjectStatusStrip({ loading, metrics, project }: { project?: Project; 
 function ObservedMetricsPanel({ history, loading, metrics }: { history: ProjectTelemetryPoint[]; metrics?: ProjectMetrics; loading: boolean }) {
   const observed = metrics?.observed;
   const hasDiskSample = Boolean(observed && (observed.disk_used_bytes > 0 || observed.disk_limit_bytes > 0));
+  const memoryPercent = observed && observed.memory_limit_bytes > 0 ? (observed.memory_bytes / observed.memory_limit_bytes) * 100 : 0;
+  const diskPercent = hasDiskSample && observed && observed.disk_limit_bytes > 0 ? (observed.disk_used_bytes / observed.disk_limit_bytes) * 100 : 0;
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Monitoring</p>
-          <h2>Resource telemetry</h2>
-        </div>
-        {observed ? <time className="text-xs text-faint">{formatTime(observed.sampled_at)}</time> : null}
-      </div>
+    <AppPanel actions={observed ? <time className="text-xs text-faint">{formatTime(observed.sampled_at)}</time> : null} eyebrow="Monitoring" title="Resource telemetry">
       {loading ? <p className="mt-4 text-sm text-muted">Loading project metrics...</p> : null}
       <div className="mt-4 grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-        <TelemetryCard label="CPU" observed={observed} value={observed ? `${observed.cpu_percent.toFixed(1)}%` : "No sample"} detail={observed ? observed.source : "Collector pending"} percent={observed ? Math.min(100, observed.cpu_percent) : 0} />
-        <TelemetryCard label="Memory" observed={observed} value={observed ? formatBytes(observed.memory_bytes) : "No sample"} detail={observed && observed.memory_limit_bytes > 0 ? `of ${formatBytes(observed.memory_limit_bytes)}` : "Collector pending"} percent={observed && observed.memory_limit_bytes > 0 ? (observed.memory_bytes / observed.memory_limit_bytes) * 100 : 0} />
-        <TelemetryCard label="Disk" observed={hasDiskSample ? observed : undefined} value={hasDiskSample && observed ? formatBytes(observed.disk_used_bytes) : "No volume sample"} detail={hasDiskSample && observed && observed.disk_limit_bytes > 0 ? `of ${formatBytes(observed.disk_limit_bytes)}` : metrics ? `${formatBytes(metrics.db_allocated_bytes)} reserved` : "Collector pending"} percent={hasDiskSample && observed && observed.disk_limit_bytes > 0 ? (observed.disk_used_bytes / observed.disk_limit_bytes) * 100 : 0} />
+        <ResourceMeter label="CPU" value={observed ? `${observed.cpu_percent.toFixed(1)}%` : "No sample"} detail={observed ? observed.source : "Collector pending"} footer={observed ? "observed" : "reserved"} percent={observed ? Math.min(100, observed.cpu_percent) : 0} />
+        <ResourceMeter label="Memory" value={observed ? `${memoryPercent.toFixed(1)}%` : "No sample"} detail={observed && observed.memory_limit_bytes > 0 ? `${formatBytes(observed.memory_bytes)} of ${formatBytes(observed.memory_limit_bytes)}` : "Collector pending"} footer={observed ? "observed" : "reserved"} percent={memoryPercent} />
+        <ResourceMeter label="Disk" value={hasDiskSample ? `${diskPercent.toFixed(1)}%` : "No volume sample"} detail={hasDiskSample && observed && observed.disk_limit_bytes > 0 ? `${formatBytes(observed.disk_used_bytes)} of ${formatBytes(observed.disk_limit_bytes)}` : metrics ? `${formatBytes(metrics.db_allocated_bytes)} reserved` : "Collector pending"} footer={hasDiskSample ? "observed" : "reserved"} percent={diskPercent} />
       </div>
-      <ProjectTelemetryTrend points={history} />
+      <TelemetryLineChart ariaLabel="Recent project CPU and memory utilization" points={history.map((point) => ({ sampledAt: point.sampledAt, cpu: point.cpuPercent, memory: point.memoryPercent }))} title="Recent telemetry" />
       {!observed ? (
         <p className="mt-3 text-xs text-faint">
           Showing reserved capacity until a Compose or Kubernetes telemetry collector records live samples.
         </p>
       ) : null}
-    </section>
+    </AppPanel>
   );
 }
 
-function ConnectionBasicsPanel({ loading, onOpenConnect, payload, projectRef }: { payload?: ConnectPayload; projectRef?: string; loading: boolean; onOpenConnect: () => void }) {
+function ConnectionBasicsPanel({ loading, onOpenConnect, payload, project }: { payload?: ConnectPayload; loading: boolean; onOpenConnect: () => void; project?: Project }) {
+  const ref = project?.ref ?? "";
+  const anonKey = payload?.api_keys.anon ?? payload?.api_keys.anon_key ?? payload?.api_keys.publishable ?? "";
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Connection basics</p>
-          <h2>Connect</h2>
-        </div>
-        <button className="button secondary h-8 min-h-8" onClick={onOpenConnect} type="button">
+    <AppPanel
+      actions={
+        <Button onClick={onOpenConnect} size="sm" type="button" variant="secondary">
           <KeyRound size={14} />
           Full connect
-        </button>
+        </Button>
+      }
+      eyebrow="Connection basics"
+      title="Connect"
+    >
+      <div className="mt-4 grid gap-2">
+        {loading ? <p className="text-sm text-muted">Loading connection basics...</p> : null}
+        {!loading && !payload ? <p className="text-sm text-muted">Connection details unavailable.</p> : null}
+        {payload ? (
+          <>
+            {payload.api_url ? <RevealField label="API URL" sensitive={false} value={payload.api_url} /> : null}
+            {anonKey ? <RevealField hint="Public client key" label="anon / publishable key" onCopy={() => auditProjectSecretCopy(ref, "anon_key")} sensitive value={anonKey} /> : null}
+            {payload.studio_url ? <RevealField label="Studio" sensitive={false} value={payload.studio_url} /> : null}
+          </>
+        ) : null}
       </div>
-      {loading ? <p className="mt-4 text-sm text-muted">Loading connection basics...</p> : null}
-      {payload ? (
-        <div className="mt-4 grid gap-2">
-          {payload.local_api_url ? <CopyMiniRow label="Local API URL" value={payload.local_api_url} /> : null}
-          <CopyMiniRow label="API URL" value={payload.api_url} />
-          <CopyMiniRow label="Postgres direct" value={payload.postgres.uri ?? payload.postgres.direct ?? ""} />
-          <RuntimeLink className="button secondary mt-1 h-8 min-h-8 justify-center" label="Studio" projectRef={projectRef} url={payload.studio_url} />
-        </div>
-      ) : null}
-    </section>
+    </AppPanel>
   );
 }
 
-function OperationalSurfacePanel({ loading, metrics }: { metrics?: ProjectMetrics; loading: boolean }) {
+function OperationalSurfacePanel({ loading, metrics, onOpenTab }: { metrics?: ProjectMetrics; loading: boolean; onOpenTab: (tab: ProjectTab) => void }) {
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Surface area</p>
-          <h2>Enabled project capabilities</h2>
-        </div>
-        {metrics ? <time className="text-xs text-faint">{formatTime(metrics.sampled_at)}</time> : null}
-      </div>
+    <AppPanel actions={metrics ? <time className="text-xs text-faint">{formatTime(metrics.sampled_at)}</time> : null} eyebrow="Surface area" title="Project capabilities">
       {loading ? <p className="mt-4 text-sm text-muted">Loading counters...</p> : null}
       {metrics ? (
         <div className="mt-4 grid grid-cols-4 gap-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
-          <OverviewMetric icon={Globe2} label="Routes" value={metrics.routes.toString()} />
-          <OverviewMetric icon={Database} label="DB objects" value={`${metrics.database_extensions} ext · ${metrics.database_roles} roles`} />
-          <OverviewMetric icon={Boxes} label="Storage" value={`${metrics.storage_buckets} buckets`} />
-          <OverviewMetric icon={Activity} label="Functions" value={`${metrics.function_deployments} deployed`} />
-          <OverviewMetric icon={Network} label="Networks" value={`${metrics.custom_domains} domains · ${metrics.network_connections} private`} />
-          <OverviewMetric icon={Shield} label="Secrets" value={metrics.secrets.toString()} />
-          <OverviewMetric icon={Activity} label="Logs" value={metrics.project_log_events.toString()} />
-          <OverviewMetric icon={Database} label="Retained" value={formatBytes(metrics.storage_bytes)} />
+          <SurfaceTile icon={Database} label="Database" value={`${metrics.database_extensions} ext`} detail={`${metrics.database_roles} roles`} onClick={() => onOpenTab("database")} />
+          <SurfaceTile icon={Boxes} label="Storage" value={`${metrics.storage_buckets} buckets`} detail={formatBytes(metrics.storage_bytes)} onClick={() => onOpenTab("storage")} />
+          <SurfaceTile icon={Activity} label="Functions" value={`${metrics.function_deployments}`} detail="deployed" onClick={() => onOpenTab("functions")} />
+          <SurfaceTile icon={Globe2} label="Routes" value={`${metrics.routes}`} detail={`${metrics.custom_domains} domains`} onClick={() => onOpenTab("config")} />
+          <SurfaceTile icon={Network} label="Networks" value={`${metrics.network_connections}`} detail="private" onClick={() => onOpenTab("config")} />
+          <SurfaceTile icon={Shield} label="Secrets" value={`${metrics.secrets}`} detail="handles" onClick={() => onOpenTab("connect")} />
+          <SurfaceTile icon={Activity} label="Logs" value={`${metrics.project_log_events}`} detail="events" onClick={() => onOpenTab("logs")} />
+          <SurfaceTile icon={RotateCcw} label="Backups" value={`${metrics.backups}`} detail="recovery points" onClick={() => onOpenTab("backups")} />
         </div>
       ) : null}
-    </section>
+    </AppPanel>
   );
 }
 
-function ProjectTelemetryTrend({ points }: { points: ProjectTelemetryPoint[] }) {
-  const cpuLine = trendPolyline(points.map((point) => point.cpuPercent));
-  const memoryLine = trendPolyline(points.map((point) => point.memoryPercent));
-  const latest = points[points.length - 1];
+function SurfaceTile({ detail, icon: Icon, label, onClick, value }: { icon: typeof Activity; label: string; value: string; detail: string; onClick: () => void }) {
   return (
-    <div className="usage-trend mt-4">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="label">Recent telemetry</p>
-          <p className="mt-1 text-sm font-medium">{points.length > 1 ? `${points.length} samples` : "Waiting for samples"}</p>
-        </div>
-        <div className="flex flex-wrap justify-end gap-2 text-xs text-muted">
-          <span className="trend-legend cpu">CPU</span>
-          <span className="trend-legend memory">RAM</span>
-          {latest ? <span>{formatTime(latest.sampledAt)}</span> : null}
-        </div>
-      </div>
-      <svg aria-label="Recent project CPU and memory utilization" className="trend-chart mt-3" preserveAspectRatio="none" viewBox="0 0 100 48">
-        <line className="trend-grid-line" x1="0" x2="100" y1="12" y2="12" />
-        <line className="trend-grid-line" x1="0" x2="100" y1="24" y2="24" />
-        <line className="trend-grid-line" x1="0" x2="100" y1="36" y2="36" />
-        {points.length > 1 ? <polyline className="trend-line cpu" points={cpuLine} /> : null}
-        {points.length > 1 ? <polyline className="trend-line memory" points={memoryLine} /> : null}
-      </svg>
-    </div>
+    <CardButton className="p-2.5" onClick={onClick}>
+      <p className="label flex items-center gap-1">
+        <Icon size={13} className="text-faint" />
+        {label}
+      </p>
+      <p className="mt-1 truncate text-sm font-medium">{value}</p>
+      <p className="mt-0.5 truncate text-xs text-faint">{detail}</p>
+    </CardButton>
   );
-}
-
-function OverviewMetric({ icon: Icon, label, value }: { icon: typeof Activity; label: string; value: string }) {
-  return (
-    <div className="metric-cell bg-bg">
-      <div className="mb-1 flex items-center gap-1 text-faint">
-        <Icon size={13} />
-        <p className="label">{label}</p>
-      </div>
-      <p className="truncate text-sm font-medium">{value}</p>
-    </div>
-  );
-}
-
-function TelemetryCard({ detail, label, observed, percent, value }: { label: string; value: string; detail: string; percent: number; observed?: TelemetrySample }) {
-  const normalized = Math.min(100, Math.max(0, percent || 0));
-  return (
-    <div className="rounded-md border border-border bg-bg p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="label">{label}</p>
-          <p className="mt-1 text-lg font-medium">{value}</p>
-        </div>
-        <span className={`pill ${observed ? "healthy" : ""}`}>{observed ? "observed" : "reserved"}</span>
-      </div>
-      <p className="mt-1 truncate text-xs text-muted">{detail}</p>
-      <div className="resource-bar mt-3" aria-label={`${label} utilization`}>
-        <span style={{ width: `${normalized || 8}%` }} />
-      </div>
-    </div>
-  );
-}
-
-function CopyMiniRow({ label, value }: { label: string; value: string }) {
-  const addToast = useUIStore((state) => state.addToast);
-  const url = httpURL(value);
-  async function copy() {
-    await navigator.clipboard?.writeText(value);
-    addToast({ title: "Copied", detail: label });
-  }
-  return (
-    <div className="copy-row compact text-left">
-      <div className="min-w-0">
-        <p className="label">{label}</p>
-        <p className="truncate font-mono text-xs text-muted">{value || "-"}</p>
-      </div>
-      <div className="flex justify-end gap-1">
-        {url ? (
-          <a className="icon-button h-8 min-h-8 min-w-8" href={url} rel="noreferrer" target="_blank" title={`Open ${label}`}>
-            <ExternalLink size={14} />
-          </a>
-        ) : null}
-        <button className="icon-button h-8 min-h-8 min-w-8" disabled={!value} onClick={() => void copy()} title={`Copy ${label}`} type="button">
-          <Copy size={14} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function httpURL(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-    return "";
-  }
-  try {
-    return new URL(trimmed).toString();
-  } catch {
-    return "";
-  }
 }
 
 function telemetryPointFromMetrics(metrics?: ProjectMetrics): ProjectTelemetryPoint | null {
@@ -262,20 +215,4 @@ function telemetryPointFromMetrics(metrics?: ProjectMetrics): ProjectTelemetryPo
     cpuPercent: observed.cpu_percent,
     memoryPercent: observed.memory_limit_bytes > 0 ? (observed.memory_bytes / observed.memory_limit_bytes) * 100 : 0,
   };
-}
-
-function trendPolyline(values: number[]) {
-  if (values.length <= 1) {
-    return "";
-  }
-  const maxIndex = Math.max(1, values.length - 1);
-  return values.map((value, index) => {
-    const x = (index / maxIndex) * 100;
-    const y = 48 - (clampPercent(value) / 100) * 44 - 2;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
-}
-
-function clampPercent(value: number) {
-  return Math.min(100, Math.max(0, Number.isFinite(value) ? value : 0));
 }

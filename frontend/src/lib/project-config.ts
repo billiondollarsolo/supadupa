@@ -1,6 +1,15 @@
 import { Activity, Boxes, Command, Database, Gauge, KeyRound, RadioTower, RotateCcw, Shield, SlidersHorizontal, type LucideIcon } from "lucide-react";
 
-export type ConfigArea = "database" | "auth" | "auth_providers" | "email_templates" | "storage" | "functions" | "realtime" | "pooler" | "network" | "smtp" | "ai";
+export type ConfigArea = "general" | "database" | "auth" | "auth_providers" | "email_templates" | "storage" | "functions" | "realtime" | "pooler" | "network" | "smtp" | "ai";
+
+// Shared shape for a single editable config field. `select` renders a dropdown
+// constrained to `options`; everything else falls back to text/number/boolean.
+export type ConfigField = {
+  key: string;
+  label: string;
+  kind?: "text" | "number" | "boolean" | "textarea" | "select";
+  options?: Array<{ value: string; label: string }>;
+};
 export type ProjectTab = "overview" | "connect" | "auth" | "database" | "storage" | "functions" | "realtime" | "logs" | "backups" | "config" | "activity";
 export type ConnectSection = "overview" | "endpoints" | "keys" | "jwt" | "database" | "storage" | "links" | "cli" | "snippets" | "secrets";
 export type AuthSection = "overview" | "runtime" | "providers" | "email" | "clients" | "hooks" | "access";
@@ -20,7 +29,7 @@ export type DatabaseSection =
   | "roles"
   | "ai";
 export type ProjectSettingsSection = "overview" | "runtime" | "services" | "domains" | "network" | "operations" | "danger";
-export type PlatformSettingsSection = "overview" | "defaults" | "features" | "backups" | "smtp" | "sso" | "scim" | "hosts";
+export type PlatformSettingsSection = "overview" | "defaults" | "features" | "db-ingress" | "backups" | "smtp" | "sso" | "scim" | "hosts";
 export type OrganizationSection = "overview" | "members" | "teams" | "features" | "quotas" | "usage" | "billing";
 export type SecuritySection = "overview" | "mfa" | "access" | "advisor" | "compliance";
 
@@ -28,9 +37,14 @@ export type ProjectSubnavItem<T extends string = string> = {
   id: T;
   label: string;
   description: string;
+  // Optional cluster label for grouped sub-navs (e.g. Database). When present on
+  // a tab's items, the sidebar renders small group headers between clusters.
+  // Items without a group (or tabs whose items have no groups) render unchanged.
+  group?: string;
 };
 
 export const configAreaLabels: Record<ConfigArea, string> = {
+  general: "General",
   database: "Database",
   auth: "Auth",
   auth_providers: "Providers",
@@ -69,7 +83,18 @@ const socialOAuthProviderFields = [
   { key: `oauth_${key}_skip_nonce_check`, label: `${label} skip nonce`, kind: "boolean" as const },
 ]);
 
-export const configSchemas: Record<ConfigArea, Array<{ key: string; label: string; kind?: "text" | "number" | "boolean" | "textarea" }>> = {
+export const configSchemas: Record<ConfigArea, ConfigField[]> = {
+  general: [
+    {
+      key: "environment",
+      label: "Environment",
+      kind: "select",
+      options: [
+        { value: "development", label: "Development" },
+        { value: "production", label: "Production" },
+      ],
+    },
+  ],
   database: [
     { key: "pg_graphql_enabled", label: "GraphQL API", kind: "boolean" },
     { key: "database_webhooks", label: "Webhooks", kind: "boolean" },
@@ -80,6 +105,7 @@ export const configSchemas: Record<ConfigArea, Array<{ key: string; label: strin
     { key: "pgvector_enabled", label: "pgvector", kind: "boolean" },
     { key: "supavisor_enabled", label: "Supavisor", kind: "boolean" },
     { key: "ssl_enforced", label: "DB SSL", kind: "boolean" },
+    { key: "rls_enforce_system_tables", label: "Enforce RLS on system tables", kind: "boolean" },
     { key: "extension_toggle_ui", label: "Extension UI", kind: "boolean" },
     { key: "performance_advisor_mode", label: "Advisor mode" },
     { key: "orioledb_profile", label: "OrioleDB" },
@@ -207,7 +233,8 @@ export const configSchemas: Record<ConfigArea, Array<{ key: string; label: strin
     { key: "max_client_connections", label: "Max clients", kind: "number" },
   ],
   network: [
-    { key: "ip_allowlist", label: "IP allowlist" },
+    { key: "http_allowlist", label: "HTTP/Studio allowlist" },
+    { key: "db_allowlist", label: "Database allowlist" },
     { key: "ssl_enforced", label: "SSL enforced", kind: "boolean" },
   ],
   smtp: [
@@ -235,6 +262,74 @@ export const configSchemas: Record<ConfigArea, Array<{ key: string; label: strin
     { key: "studio_assistant_key_handle", label: "Assistant key handle" },
   ],
 };
+
+// Additive: cross-links from a raw Runtime Config area to the friendly,
+// guided feature tab that edits the same surface. Used to frame Runtime Config
+// as the advanced/raw editor without removing either UI. Only areas with a
+// dedicated first-class tab are listed; others fall back to "no guided tab".
+export const configAreaGuidedTab: Partial<Record<ConfigArea, { tab: ProjectTab; label: string }>> = {
+  database: { tab: "database", label: "Database" },
+  auth: { tab: "auth", label: "Auth" },
+  auth_providers: { tab: "auth", label: "Auth" },
+  email_templates: { tab: "auth", label: "Auth" },
+  smtp: { tab: "auth", label: "Auth" },
+  storage: { tab: "storage", label: "Storage" },
+  functions: { tab: "functions", label: "Functions" },
+  realtime: { tab: "realtime", label: "Realtime" },
+  pooler: { tab: "database", label: "Database" },
+  ai: { tab: "database", label: "Database" },
+};
+
+export type ConfigFieldGroup = {
+  id: string;
+  label: string;
+  fields: ConfigField[];
+};
+
+// Additive: derive scannable groups for a Runtime Config area so the flat list
+// of every field (120+ for auth_providers) becomes collapsible clusters.
+// auth_providers is grouped by provider/feature derived from the key prefix;
+// every other area falls back to a single group, which is fine for short lists.
+export function configFieldGroups(area: ConfigArea): ConfigFieldGroup[] {
+  const schema = configSchemas[area];
+  if (area !== "auth_providers") {
+    return [{ id: area, label: configAreaLabels[area], fields: schema }];
+  }
+  const order: string[] = [];
+  const groups = new Map<string, ConfigFieldGroup>();
+  const push = (id: string, label: string, field: ConfigFieldGroup["fields"][number]) => {
+    let group = groups.get(id);
+    if (!group) {
+      group = { id, label, fields: [] };
+      groups.set(id, group);
+      order.push(id);
+    }
+    group.fields.push(field);
+  };
+  for (const field of schema) {
+    const key = field.key;
+    if (key.startsWith("oauth_oidc_")) {
+      push("oauth_oidc", "Custom OIDC", field);
+    } else if (key.startsWith("oauth_")) {
+      // oauth_<provider>_... — group per provider using its enabled-field label
+      const provider = key.slice("oauth_".length).replace(/_(enabled|client_id|client_secret_handle|url|redirect_uri|skip_nonce_check)$/, "");
+      const enabledLabel = schema.find((entry) => entry.key === `oauth_${provider}_enabled`)?.label;
+      const label = enabledLabel ? enabledLabel.replace(/ OAuth$/, "") : provider;
+      push(`oauth_${provider}`, `${label} OAuth`, field);
+    } else if (key.startsWith("sms_") || key === "phone_enabled") {
+      push("phone", "Phone / SMS", field);
+    } else if (key.startsWith("saml_")) {
+      push("saml", "SAML SSO", field);
+    } else if (key.startsWith("third_party_jwt_")) {
+      push("third_party_jwt", "External JWT", field);
+    } else if (key.startsWith("web3_")) {
+      push("web3", "Web3 wallets", field);
+    } else {
+      push("other", "Other", field);
+    }
+  }
+  return order.map((id) => groups.get(id)!);
+}
 
 export const projectServiceLabels = [
   { key: "auth", label: "Auth" },
@@ -289,19 +384,19 @@ export const authSections: Array<ProjectSubnavItem<AuthSection>> = [
 
 export const databaseSections: Array<ProjectSubnavItem<DatabaseSection>> = [
   { id: "overview", label: "Overview", description: "Database posture and configured surfaces." },
-  { id: "config", label: "Runtime", description: "GraphQL, webhooks, cron, queues, FDW, Vault, SSL." },
-  { id: "pooler", label: "Pooler", description: "Supavisor modes and connection limits." },
-  { id: "branches", label: "Branches", description: "Preview branches and clone state." },
-  { id: "replicas", label: "Replicas", description: "Read replicas, routing, promotion, and failover." },
-  { id: "replication", label: "Replication", description: "Logical publications and external destinations." },
-  { id: "analytics", label: "Analytics", description: "Iceberg analytics buckets." },
-  { id: "extensions", label: "Extensions", description: "Postgres extension toggles." },
-  { id: "cron", label: "Cron", description: "Scheduled database jobs." },
-  { id: "queues", label: "Queues", description: "pgmq queues and retention." },
-  { id: "webhooks", label: "Webhooks", description: "Database change webhooks." },
-  { id: "schemas", label: "Schemas", description: "Declarative schema versions." },
-  { id: "roles", label: "Roles", description: "Database roles and schema grants." },
-  { id: "ai", label: "Vector / AI", description: "Embeddings jobs and vector buckets." },
+  { id: "config", label: "Runtime", description: "GraphQL, webhooks, cron, queues, FDW, Vault, SSL.", group: "Connectivity" },
+  { id: "pooler", label: "Pooler", description: "Supavisor modes and connection limits.", group: "Connectivity" },
+  { id: "replicas", label: "Replicas", description: "Read replicas, routing, promotion, and failover.", group: "Connectivity" },
+  { id: "branches", label: "Branches", description: "Preview branches and clone state.", group: "Connectivity" },
+  { id: "replication", label: "Replication", description: "Logical publications and external destinations.", group: "Data movement" },
+  { id: "analytics", label: "Analytics", description: "Iceberg analytics buckets.", group: "Data movement" },
+  { id: "extensions", label: "Extensions", description: "Postgres extension toggles.", group: "Extensions & jobs" },
+  { id: "cron", label: "Cron", description: "Scheduled database jobs.", group: "Extensions & jobs" },
+  { id: "queues", label: "Queues", description: "pgmq queues and retention.", group: "Extensions & jobs" },
+  { id: "webhooks", label: "Webhooks", description: "Database change webhooks.", group: "Extensions & jobs" },
+  { id: "schemas", label: "Schemas", description: "Declarative schema versions.", group: "Schema & access" },
+  { id: "roles", label: "Roles", description: "Database roles and schema grants.", group: "Schema & access" },
+  { id: "ai", label: "Vector / AI", description: "Embeddings jobs and vector buckets.", group: "Vector / AI" },
 ];
 
 export const projectSettingsSections: Array<ProjectSubnavItem<ProjectSettingsSection>> = [
@@ -318,11 +413,11 @@ export const platformSettingsSections: Array<ProjectSubnavItem<PlatformSettingsS
   { id: "overview", label: "Overview", description: "Platform defaults and enterprise configuration summary." },
   { id: "defaults", label: "Defaults", description: "New project domain, version, profile, tier, and backup defaults." },
   { id: "features", label: "Feature Flags", description: "Local, Compose, and enterprise feature availability." },
+  { id: "db-ingress", label: "Database Ingress", description: "Trusted client networks for direct Postgres and pooler access." },
   { id: "backups", label: "Backups", description: "S3-compatible backup targets for project and control-plane recovery." },
   { id: "smtp", label: "Platform SMTP", description: "Control-plane email delivery settings." },
   { id: "sso", label: "Platform SSO", description: "Global admin SAML SSO configuration." },
   { id: "scim", label: "SCIM", description: "Platform user and group provisioning status." },
-  { id: "hosts", label: "Hosts", description: "Operator-owned host capacity." },
 ];
 
 export const organizationSections: Array<ProjectSubnavItem<OrganizationSection>> = [
@@ -330,7 +425,7 @@ export const organizationSections: Array<ProjectSubnavItem<OrganizationSection>>
   { id: "members", label: "Members", description: "Global org access and platform users." },
   { id: "teams", label: "Teams", description: "Project-scoped RBAC teams and membership." },
   { id: "features", label: "Features", description: "Org-specific rollout overrides inherited from platform defaults." },
-  { id: "quotas", label: "Quotas", description: "Org-level project, CPU, memory, disk, and IOPS limits." },
+  { id: "quotas", label: "Quotas", description: "Org-level project, CPU, memory, and disk limits." },
   { id: "usage", label: "Usage", description: "Metering, usage snapshots, and data-plane counters." },
   { id: "billing", label: "Billing", description: "Draft invoices from metering snapshots." },
 ];

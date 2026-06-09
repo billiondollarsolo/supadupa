@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -146,15 +143,15 @@ func (r *projectDatabaseCronJobResource) Schema(ctx context.Context, req resourc
 }
 
 func (r *projectDatabaseCronJobResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectDatabaseCronJobResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "name")
 }
 
 func (r *projectDatabaseCronJobResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -206,32 +203,7 @@ func (r *projectDatabaseCronJobResource) Read(ctx context.Context, req resource.
 }
 
 func (r *projectDatabaseCronJobResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectDatabaseCronJobResourceModel
-	var state projectDatabaseCronJobResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := databaseCronJobInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectDatabaseCronJob(ctx, state.Ref.ValueString(), state.Name.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project database cron job", err.Error())
-		return
-	}
-	job, err := r.client.CreateProjectDatabaseCronJob(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project database cron job", err.Error())
-		return
-	}
-	setProjectDatabaseCronJobState(ctx, &plan, job, input.Metadata, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project database cron job")
 }
 
 func (r *projectDatabaseCronJobResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -248,16 +220,7 @@ func (r *projectDatabaseCronJobResource) Delete(ctx context.Context, req resourc
 }
 
 func (r *projectDatabaseCronJobResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, name, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, name, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name, for example alpha/refresh-rollups.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(name))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "name", "Use ref/name, for example alpha/refresh-rollups.")
 }
 
 func (r *projectDatabaseCronJobResource) findDatabaseCronJob(ctx context.Context, ref string, name string) (ProjectDatabaseCronJob, error) {
@@ -265,12 +228,7 @@ func (r *projectDatabaseCronJobResource) findDatabaseCronJob(ctx context.Context
 	if err != nil {
 		return ProjectDatabaseCronJob{}, err
 	}
-	for _, job := range jobs {
-		if job.Name == name {
-			return job, nil
-		}
-	}
-	return ProjectDatabaseCronJob{}, ErrNotFound
+	return findInList(jobs, func(job ProjectDatabaseCronJob) bool { return job.Name == name })
 }
 
 func databaseCronJobInputFromModel(ctx context.Context, model projectDatabaseCronJobResourceModel, addError func(string, string)) (ProjectDatabaseCronJobInput, bool) {
@@ -307,9 +265,8 @@ func setProjectDatabaseCronJobState(ctx context.Context, model *projectDatabaseC
 	model.CreatedAt = optionalTimeString(job.CreatedAt)
 	model.UpdatedAt = optionalTimeString(job.UpdatedAt)
 
-	metadata, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(job.Metadata, previousMetadata))
-	if diags.HasError() {
-		addError("Unable to encode metadata map", diags.Errors()[0].Detail())
+	metadata, ok := sensitiveStringMapStateValue(ctx, "metadata", job.Metadata, previousMetadata, addError)
+	if !ok {
 		return
 	}
 	model.Metadata = metadata

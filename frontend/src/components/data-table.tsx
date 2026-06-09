@@ -1,4 +1,5 @@
 import { flexRender, getCoreRowModel, type ColumnDef, useReactTable } from "@tanstack/react-table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 type DataTableProps<TData> = {
   className?: string;
@@ -22,28 +23,28 @@ export function DataTable<TData>({ className = "", columns, data, emptyText, min
 
   return (
     <div className={`data-table-wrap ${className}`.trim()}>
-      <table className="data-table" style={{ minWidth }}>
-        <thead>
+      <Table className="data-table" style={{ minWidth }}>
+        <TableHeader>
           {table.getHeaderGroups().map((headerGroup) => (
-            <tr key={headerGroup.id}>
+            <TableRow key={headerGroup.id}>
               {headerGroup.headers.map((header) => (
-                <th key={header.id} style={{ width: header.getSize() }}>
+                <TableHead key={header.id} style={{ width: header.getSize() }}>
                   {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
-                </th>
+                </TableHead>
               ))}
-            </tr>
+            </TableRow>
           ))}
-        </thead>
-        <tbody>
+        </TableHeader>
+        <TableBody>
           {table.getRowModel().rows.map((row) => (
-            <tr className={rowClassName?.(row.original)} key={row.id}>
+            <TableRow className={rowClassName?.(row.original)} key={row.id}>
               {row.getVisibleCells().map((cell) => (
-                <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
+                <TableCell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>
               ))}
-            </tr>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </div>
   );
 }

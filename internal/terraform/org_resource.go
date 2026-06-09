@@ -3,9 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -50,12 +48,8 @@ func (r *orgResource) Schema(ctx context.Context, req resource.SchemaRequest, re
 }
 
 func (r *orgResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -124,7 +118,7 @@ func (r *orgResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 }
 
 func (r *orgResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	setOnePartImportState(ctx, req.ID, resp, "id", "Use organization ID, for example org_123.")
 }
 
 func setOrgState(model *orgResourceModel, org Org) {

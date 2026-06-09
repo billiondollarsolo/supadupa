@@ -73,6 +73,7 @@ type memoryStoreSnapshot struct {
 	WALArchives           []WALArchive
 	ProjectLogs           []ProjectLog
 	Telemetry             map[string]TelemetrySample
+	NodeTelemetry         map[string]NodeTelemetrySample
 	AuditEvents           []AuditEvent
 }
 
@@ -125,6 +126,7 @@ func emptySnapshot() memoryStoreSnapshot {
 		WALArchives:           []WALArchive{},
 		ProjectLogs:           []ProjectLog{},
 		Telemetry:             map[string]TelemetrySample{},
+		NodeTelemetry:         map[string]NodeTelemetrySample{},
 		AuditEvents:           []AuditEvent{},
 	}
 }
@@ -232,6 +234,7 @@ func (s *PersistentStore) applySnapshotLocked(snapshot memoryStoreSnapshot) {
 	s.walArchives = append([]WALArchive(nil), snapshot.WALArchives...)
 	s.projectLogs = append([]ProjectLog(nil), snapshot.ProjectLogs...)
 	s.telemetry = nonNilMap(snapshot.Telemetry)
+	s.nodeTelemetry = nonNilMap(snapshot.NodeTelemetry)
 	s.auditEvents = append([]AuditEvent(nil), snapshot.AuditEvents...)
 }
 
@@ -239,16 +242,16 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 	snapshot := emptySnapshot()
 	projectRefs := map[string]string{}
 
-	rows, err := s.db.QueryContext(ctx, `SELECT domain, stack_version, profile, resource_tier, backup_schedule, COALESCE(feature_flags, '{}'::jsonb), smtp_enabled, smtp_host, smtp_port, smtp_sender_name, smtp_sender_email, smtp_username, smtp_password_handle, smtp_tls_mode, updated_at FROM platform_defaults WHERE id = $1`, controlStateCheckpointID)
+	rows, err := s.db.QueryContext(ctx, `SELECT domain, stack_version, profile, resource_tier, backup_schedule, COALESCE(feature_flags, '{}'::jsonb), COALESCE(array_to_json(database_ingress_allowed_cidrs), '[]'::json), smtp_enabled, smtp_host, smtp_port, smtp_sender_name, smtp_sender_email, smtp_username, smtp_password_handle, smtp_tls_mode, updated_at FROM platform_defaults WHERE id = $1`, controlStateCheckpointID)
 	if err != nil {
 		return snapshot, fmt.Errorf("load normalized platform defaults: %w", err)
 	}
 	for rows.Next() {
 		var defaults PlatformDefaults
 		var profile, tier string
-		var featureFlagsPayload []byte
+		var featureFlagsPayload, databaseIngressAllowedCIDRsPayload []byte
 		var smtpHost, smtpSenderName, smtpSenderEmail, smtpUsername, smtpPasswordHandle, smtpTLSMode sql.NullString
-		if err := rows.Scan(&defaults.Domain, &defaults.StackVersion, &profile, &tier, &defaults.BackupSchedule, &featureFlagsPayload, &defaults.SMTP.Enabled, &smtpHost, &defaults.SMTP.Port, &smtpSenderName, &smtpSenderEmail, &smtpUsername, &smtpPasswordHandle, &smtpTLSMode, &defaults.UpdatedAt); err != nil {
+		if err := rows.Scan(&defaults.Domain, &defaults.StackVersion, &profile, &tier, &defaults.BackupSchedule, &featureFlagsPayload, &databaseIngressAllowedCIDRsPayload, &defaults.SMTP.Enabled, &smtpHost, &defaults.SMTP.Port, &smtpSenderName, &smtpSenderEmail, &smtpUsername, &smtpPasswordHandle, &smtpTLSMode, &defaults.UpdatedAt); err != nil {
 			rows.Close()
 			return snapshot, fmt.Errorf("scan normalized platform defaults: %w", err)
 		}
@@ -256,6 +259,12 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 			if err := json.Unmarshal(featureFlagsPayload, &defaults.FeatureFlags); err != nil {
 				rows.Close()
 				return snapshot, fmt.Errorf("decode normalized platform feature flags: %w", err)
+			}
+		}
+		if len(databaseIngressAllowedCIDRsPayload) > 0 {
+			if err := json.Unmarshal(databaseIngressAllowedCIDRsPayload, &defaults.DatabaseIngressAllowedCIDRs); err != nil {
+				rows.Close()
+				return snapshot, fmt.Errorf("decode normalized database ingress allowlist: %w", err)
 			}
 		}
 		defaults.Profile = StackProfile(profile)
@@ -322,7 +331,7 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 		return snapshot, fmt.Errorf("iterate normalized orgs: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, created_at FROM users`)
+	rows, err = s.db.QueryContext(ctx, `SELECT id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, COALESCE(mfa_last_accepted_counter, 0), created_at FROM users`)
 	if err != nil {
 		return snapshot, fmt.Errorf("load normalized users: %w", err)
 	}
@@ -330,7 +339,7 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 		var user User
 		var mfaSecret, pendingSecret sql.NullString
 		var confirmedAt, updatedAt sql.NullTime
-		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Role, &user.MFAEnabled, &mfaSecret, &pendingSecret, &confirmedAt, &updatedAt, &user.CreatedAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Role, &user.MFAEnabled, &mfaSecret, &pendingSecret, &confirmedAt, &updatedAt, &user.MFALastCounter, &user.CreatedAt); err != nil {
 			rows.Close()
 			return snapshot, fmt.Errorf("scan normalized user: %w", err)
 		}
@@ -421,14 +430,14 @@ LEFT JOIN project_specs ps ON ps.project_id = p.id`)
 		return snapshot, fmt.Errorf("iterate normalized projects: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT org_id, max_projects, max_cpu, max_ram_mb, max_disk_gb, max_disk_iops, used, updated_at FROM org_quotas`)
+	rows, err = s.db.QueryContext(ctx, `SELECT org_id, max_projects, max_cpu, max_ram_mb, max_disk_gb, used, updated_at FROM org_quotas`)
 	if err != nil {
 		return snapshot, fmt.Errorf("load normalized org quotas: %w", err)
 	}
 	for rows.Next() {
 		var quota OrgQuota
 		var usedPayload []byte
-		if err := rows.Scan(&quota.OrgID, &quota.MaxProjects, &quota.MaxCPU, &quota.MaxRAMMB, &quota.MaxDiskGB, &quota.MaxDiskIOPS, &usedPayload, &quota.UpdatedAt); err != nil {
+		if err := rows.Scan(&quota.OrgID, &quota.MaxProjects, &quota.MaxCPU, &quota.MaxRAMMB, &quota.MaxDiskGB, &usedPayload, &quota.UpdatedAt); err != nil {
 			rows.Close()
 			return snapshot, fmt.Errorf("scan normalized org quota: %w", err)
 		}
@@ -1538,15 +1547,16 @@ JOIN projects branch ON branch.id = pb.branch_project_id`)
 		return fmt.Errorf("iterate normalized project replicas: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT project_id, enabled, schedule, kind, last_run_at, next_run_at, updated_at FROM backup_policies`)
+	rows, err = s.db.QueryContext(ctx, `SELECT project_id, enabled, schedule, kind, storage_target_id, last_run_at, next_run_at, updated_at FROM backup_policies`)
 	if err != nil {
 		return fmt.Errorf("load normalized backup policies: %w", err)
 	}
 	for rows.Next() {
 		var projectID string
 		var policy BackupPolicy
+		var storageTargetID sql.NullString
 		var lastRunAt, nextRunAt sql.NullTime
-		if err := rows.Scan(&projectID, &policy.Enabled, &policy.Schedule, &policy.Kind, &lastRunAt, &nextRunAt, &policy.UpdatedAt); err != nil {
+		if err := rows.Scan(&projectID, &policy.Enabled, &policy.Schedule, &policy.Kind, &storageTargetID, &lastRunAt, &nextRunAt, &policy.UpdatedAt); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan normalized backup policy: %w", err)
 		}
@@ -1555,6 +1565,7 @@ JOIN projects branch ON branch.id = pb.branch_project_id`)
 			continue
 		}
 		policy.ProjectRef = ref
+		policy.StorageTargetID = storageTargetID.String
 		policy.LastRunAt = timePtr(lastRunAt)
 		policy.NextRunAt = timePtr(nextRunAt)
 		snapshot.Policies[ref] = policy
@@ -1786,6 +1797,7 @@ func (s *PersistentStore) snapshot() memoryStoreSnapshot {
 		WALArchives:           append([]WALArchive(nil), s.walArchives...),
 		ProjectLogs:           append([]ProjectLog(nil), s.projectLogs...),
 		Telemetry:             cloneMap(s.telemetry),
+		NodeTelemetry:         cloneMap(s.nodeTelemetry),
 		AuditEvents:           append([]AuditEvent(nil), s.auditEvents...),
 	}
 }
@@ -1906,42 +1918,18 @@ func (s *PersistentStore) syncNormalizedTablesTx(ctx context.Context, tx *sql.Tx
 		return fmt.Errorf("lock normalized meta sync: %w", err)
 	}
 
-	for _, statement := range []string{
+	deleteStatements := []string{
 		`DELETE FROM audit_events`,
 		`DELETE FROM billing_invoices`,
 		`DELETE FROM usage_snapshots`,
 		`DELETE FROM wal_archives`,
-		`DELETE FROM pitr_policies`,
-		`DELETE FROM backup_policies`,
 		`DELETE FROM backups`,
-		`DELETE FROM log_drains`,
-		`DELETE FROM domains`,
 		`DELETE FROM project_logs`,
-		`DELETE FROM secrets`,
-		`DELETE FROM network_connections`,
-		`DELETE FROM cdn_invalidations`,
-		`DELETE FROM cdn_policies`,
-		`DELETE FROM analytics_buckets`,
-		`DELETE FROM vector_buckets`,
-		`DELETE FROM storage_buckets`,
-		`DELETE FROM database_roles`,
-		`DELETE FROM database_schemas`,
-		`DELETE FROM database_webhooks`,
-		`DELETE FROM database_queues`,
-		`DELETE FROM database_cron_jobs`,
-		`DELETE FROM database_extensions`,
-		`DELETE FROM auth_hooks`,
-		`DELETE FROM auth_clients`,
-		`DELETE FROM embedding_jobs`,
-		`DELETE FROM replication_pipelines`,
-		`DELETE FROM function_regions`,
-		`DELETE FROM function_storage_mounts`,
-		`DELETE FROM edge_functions`,
-		`DELETE FROM project_configs`,
+	}
+	deleteStatements = append(deleteStatements, projectChildNormalizedDeleteStatements()...)
+	deleteStatements = append(deleteStatements,
 		`DELETE FROM project_branches`,
 		`DELETE FROM project_replicas`,
-		`DELETE FROM project_routes`,
-		`DELETE FROM project_access_grants`,
 		`DELETE FROM team_members`,
 		`DELETE FROM teams`,
 		`DELETE FROM project_specs`,
@@ -1953,7 +1941,8 @@ func (s *PersistentStore) syncNormalizedTablesTx(ctx context.Context, tx *sql.Tx
 		`DELETE FROM orgs`,
 		`DELETE FROM platform_sso`,
 		`DELETE FROM platform_defaults`,
-	} {
+	)
+	for _, statement := range deleteStatements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("clear normalized table: %w", err)
 		}
@@ -1968,8 +1957,8 @@ VALUES ($1, $2, $3, $4)`, org.ID, org.Name, mustJSON(org.FeatureFlagOverrides), 
 	}
 	defaults := normalizedPlatformDefaults(snapshot.PlatformDefaults)
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO platform_defaults (id, domain, stack_version, profile, resource_tier, backup_schedule, feature_flags, smtp_enabled, smtp_host, smtp_port, smtp_sender_name, smtp_sender_email, smtp_username, smtp_password_handle, smtp_tls_mode, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, ''), NULLIF($14, ''), $15, $16)`,
+INSERT INTO platform_defaults (id, domain, stack_version, profile, resource_tier, backup_schedule, feature_flags, database_ingress_allowed_cidrs, smtp_enabled, smtp_host, smtp_port, smtp_sender_name, smtp_sender_email, smtp_username, smtp_password_handle, smtp_tls_mode, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, ARRAY[]::TEXT[]), $9, NULLIF($10, ''), $11, NULLIF($12, ''), NULLIF($13, ''), NULLIF($14, ''), NULLIF($15, ''), $16, $17)`,
 		controlStateCheckpointID,
 		defaults.Domain,
 		defaults.StackVersion,
@@ -1977,6 +1966,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, NULLIF($11, ''), NU
 		string(defaults.ResourceTier),
 		defaults.BackupSchedule,
 		mustJSON(defaults.FeatureFlags),
+		nonNilStringSlice(defaults.DatabaseIngressAllowedCIDRs),
 		defaults.SMTP.Enabled,
 		defaults.SMTP.Host,
 		defaults.SMTP.Port,
@@ -1997,9 +1987,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 	}
 	for _, user := range snapshot.Users {
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO users (id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-			user.ID, user.Email, user.PasswordHash, user.Role, user.MFAEnabled, nullString(user.MFASecret), nullString(user.MFAPendingSecret), nullTime(user.MFAConfirmedAt), nullTime(user.MFAUpdatedAt), user.CreatedAt); err != nil {
+	INSERT INTO users (id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, mfa_last_accepted_counter, created_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			user.ID, user.Email, user.PasswordHash, user.Role, user.MFAEnabled, nullString(user.MFASecret), nullString(user.MFAPendingSecret), nullTime(user.MFAConfirmedAt), nullTime(user.MFAUpdatedAt), user.MFALastCounter, user.CreatedAt); err != nil {
 			return fmt.Errorf("sync user %s: %w", user.ID, err)
 		}
 	}
@@ -2036,8 +2026,8 @@ VALUES ($1, $2, $3)`, teamID, member.UserID, member.CreatedAt); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO org_quotas (org_id, max_projects, max_cpu, max_ram_mb, max_disk_gb, max_disk_iops, used, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, orgID, quota.MaxProjects, quota.MaxCPU, quota.MaxRAMMB, quota.MaxDiskGB, quota.MaxDiskIOPS, used, quota.UpdatedAt); err != nil {
+INSERT INTO org_quotas (org_id, max_projects, max_cpu, max_ram_mb, max_disk_gb, used, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)`, orgID, quota.MaxProjects, quota.MaxCPU, quota.MaxRAMMB, quota.MaxDiskGB, used, quota.UpdatedAt); err != nil {
 			return fmt.Errorf("sync org quota %s: %w", orgID, err)
 		}
 	}
@@ -2568,8 +2558,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO backup_policies (project_id, enabled, schedule, kind, last_run_at, next_run_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`, projectID, policy.Enabled, policy.Schedule, policy.Kind, policy.LastRunAt, policy.NextRunAt, policy.UpdatedAt); err != nil {
+INSERT INTO backup_policies (project_id, enabled, schedule, kind, storage_target_id, last_run_at, next_run_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, projectID, policy.Enabled, policy.Schedule, policy.Kind, policy.StorageTargetID, policy.LastRunAt, policy.NextRunAt, policy.UpdatedAt); err != nil {
 			return fmt.Errorf("sync backup policy %s: %w", ref, err)
 		}
 	}
@@ -2701,6 +2691,16 @@ func (s *PersistentStore) CreateUser(ctx context.Context, req CreateUserRequest)
 
 func (s *PersistentStore) UpdateUser(ctx context.Context, id string, req UpdateUserRequest) (User, error) {
 	user, err := s.MemoryStore.UpdateUser(ctx, id, req)
+	return user, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) AuthenticateUser(ctx context.Context, email string, password string) (User, error) {
+	user, err := s.MemoryStore.AuthenticateUser(ctx, email, password)
+	return user, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) VerifyUserMFA(ctx context.Context, userID string, code string) (User, error) {
+	user, err := s.MemoryStore.VerifyUserMFA(ctx, userID, code)
 	return user, s.checkpoint(ctx, err)
 }
 
@@ -3112,6 +3112,11 @@ func (s *PersistentStore) CreateProjectLogDrain(ctx context.Context, ref string,
 	return drain, s.checkpoint(ctx, err)
 }
 
+func (s *PersistentStore) UpdateProjectLogDrain(ctx context.Context, ref string, id string, input LogDrainInput) (LogDrain, error) {
+	drain, err := s.MemoryStore.UpdateProjectLogDrain(ctx, ref, id, input)
+	return drain, s.checkpoint(ctx, err)
+}
+
 func (s *PersistentStore) DeleteProjectLogDrain(ctx context.Context, ref string, id string) error {
 	err := s.MemoryStore.DeleteProjectLogDrain(ctx, ref, id)
 	return s.checkpoint(ctx, err)
@@ -3194,6 +3199,11 @@ func (s *PersistentStore) RecordProjectLog(ctx context.Context, input ProjectLog
 
 func (s *PersistentStore) RecordProjectTelemetry(ctx context.Context, ref string, input TelemetrySampleInput) (TelemetrySample, error) {
 	sample, err := s.MemoryStore.RecordProjectTelemetry(ctx, ref, input)
+	return sample, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) RecordNodeTelemetry(ctx context.Context, hostID string, input NodeTelemetrySampleInput) (NodeTelemetrySample, error) {
+	sample, err := s.MemoryStore.RecordNodeTelemetry(ctx, hostID, input)
 	return sample, s.checkpoint(ctx, err)
 }
 

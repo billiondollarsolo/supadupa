@@ -1,0 +1,37 @@
+name: supadupa
+
+services:
+  supadupavisor:
+    environment:
+      SUPADUPA_COMPOSE_APPLY: "true"
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
+    networks:
+      - supadupa-docker-proxy
+
+  docker-socket-proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control-plane
+    command: ["supadupa-docker-proxy"]
+    user: "${SUPADUPA_CONTROL_PLANE_USER:-10001:10001}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SUPADUPA_DOCKER_PROXY_ADDR: ":2375"
+      SUPADUPA_DOCKER_SOCKET: /var/run/docker.sock
+      SUPADUPA_PROJECT_HOST_ROOT: ${SUPADUPA_PROJECT_HOST_ROOT:-${SUPADUPA_RUNTIME_HOST_DIR:-../runtime}/projects}
+    group_add:
+      - "${SUPADUPA_DOCKER_GID:-0}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - supadupa-docker-proxy
+
+networks:
+  supadupa-docker-proxy:
+    internal: true

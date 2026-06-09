@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -89,12 +87,8 @@ func (r *orgTeamMemberResource) Schema(ctx context.Context, req resource.SchemaR
 }
 
 func (r *orgTeamMemberResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -151,14 +145,7 @@ func (r *orgTeamMemberResource) Delete(ctx context.Context, req resource.DeleteR
 }
 
 func (r *orgTeamMemberResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	parts := strings.Split(req.ID, "/")
-	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use org_id/team_slug/email, for example org_123/platform/dev@example.com.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), strings.TrimSpace(parts[0]))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("team_slug"), strings.TrimSpace(parts[1]))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("email"), strings.TrimSpace(parts[2]))...)
+	setThreePartImportState(ctx, req.ID, resp, "org_id", "team_slug", "email", "Use org_id/team_slug/email, for example org_123/platform/dev@example.com.", false)
 }
 
 func (r *orgTeamMemberResource) findOrgTeamMember(ctx context.Context, orgID string, slug string, email string) (OrgTeamMember, error) {
@@ -167,12 +154,7 @@ func (r *orgTeamMemberResource) findOrgTeamMember(ctx context.Context, orgID str
 		return OrgTeamMember{}, err
 	}
 	normalized := strings.ToLower(strings.TrimSpace(email))
-	for _, member := range members {
-		if member.Email == normalized {
-			return member, nil
-		}
-	}
-	return OrgTeamMember{}, ErrNotFound
+	return findInList(members, func(member OrgTeamMember) bool { return member.Email == normalized })
 }
 
 func setOrgTeamMemberState(model *orgTeamMemberResourceModel, member OrgTeamMember) {

@@ -157,6 +157,55 @@ func TestFleetMetricsExcludesStaleAndDeletedProjectTelemetry(t *testing.T) {
 	}
 }
 
+func TestFleetMetricsIncludesNodeTelemetrySeparatelyFromProjectTelemetry(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	host, err := store.CreateHost(ctx, CreateHostRequest{
+		Name:     "local-docker",
+		Address:  "localhost",
+		Capacity: HostCapacity{CPU: 16, RAMMB: 32768, DiskGB: 600, Project: 20},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampledAt := time.Now().UTC().Add(-30 * time.Second)
+	if _, err := store.RecordNodeTelemetry(ctx, host.ID, NodeTelemetrySampleInput{
+		Source:             "compose-local-node",
+		CPUPercent:         12.5,
+		CPUUsedCores:       2,
+		CPUCapacityCores:   16,
+		MemoryUsedBytes:    4 * 1024 * 1024 * 1024,
+		MemoryTotalBytes:   32 * 1024 * 1024 * 1024,
+		DiskUsedBytes:      80 * 1024 * 1024 * 1024,
+		DiskTotalBytes:     600 * 1024 * 1024 * 1024,
+		DiskAvailableBytes: 520 * 1024 * 1024 * 1024,
+		NetworkSampled:     true,
+		NetworkRxBytes:     1234,
+		NetworkTxBytes:     5678,
+		SampledAt:          sampledAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	metrics, err := store.GetFleetMetrics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics.NodeObserved) != 1 {
+		t.Fatalf("expected one node sample, got %#v", metrics.NodeObserved)
+	}
+	node := metrics.NodeObserved[0]
+	if node.HostID != host.ID || node.Source != "compose-local-node" || node.CPUPercent != 12.5 || node.SampledAt != sampledAt {
+		t.Fatalf("unexpected node telemetry %#v", node)
+	}
+	if !node.NetworkSampled || node.NetworkRxBytes != 1234 || node.NetworkTxBytes != 5678 {
+		t.Fatalf("unexpected node network telemetry %#v", node)
+	}
+	if metrics.Observed.ProjectsSampled != 0 || metrics.Observed.CPUPercent != 0 {
+		t.Fatalf("node telemetry should not change project telemetry rollup: %#v", metrics.Observed)
+	}
+}
+
 func TestCreateProjectDefaultsToAvailableHostCapacity(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()
@@ -167,7 +216,7 @@ func TestCreateProjectDefaultsToAvailableHostCapacity(t *testing.T) {
 	host, err := store.CreateHost(ctx, CreateHostRequest{
 		Name:     "local-docker",
 		Address:  "127.0.0.1",
-		Capacity: HostCapacity{CPU: 16, RAMMB: 32768, DiskGB: 600, DiskIOPS: 48000, Project: 20},
+		Capacity: HostCapacity{CPU: 16, RAMMB: 32768, DiskGB: 600, Project: 20},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +234,7 @@ func TestCreateProjectDefaultsToAvailableHostCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metrics.HostUsed.Project != 1 || metrics.HostUsed.CPU != 1 || metrics.HostUsed.RAMMB != 2048 || metrics.HostUsed.DiskGB != 20 || metrics.HostUsed.DiskIOPS != 3000 {
+	if metrics.HostUsed.Project != 1 || metrics.HostUsed.CPU != 1 || metrics.HostUsed.RAMMB != 2048 || metrics.HostUsed.DiskGB != 20 {
 		t.Fatalf("expected small tier reservation in host usage, got %#v", metrics.HostUsed)
 	}
 }

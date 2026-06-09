@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -159,12 +157,8 @@ func (r *backupStorageTargetResource) Schema(ctx context.Context, req resource.S
 }
 
 func (r *backupStorageTargetResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -235,11 +229,7 @@ func (r *backupStorageTargetResource) Delete(ctx context.Context, req resource.D
 }
 
 func (r *backupStorageTargetResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	if strings.TrimSpace(req.ID) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use the backup storage target ID.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strings.TrimSpace(req.ID))...)
+	setOnePartImportState(ctx, req.ID, resp, "id", "Use the backup storage target ID.")
 }
 
 func (r *backupStorageTargetResource) findTarget(ctx context.Context, id string) (BackupStorageTarget, error) {
@@ -247,12 +237,7 @@ func (r *backupStorageTargetResource) findTarget(ctx context.Context, id string)
 	if err != nil {
 		return BackupStorageTarget{}, err
 	}
-	for _, target := range targets {
-		if target.ID == id {
-			return target, nil
-		}
-	}
-	return BackupStorageTarget{}, ErrNotFound
+	return findInList(targets, func(target BackupStorageTarget) bool { return target.ID == id })
 }
 
 func backupStorageTargetInputFromModel(model backupStorageTargetResourceModel) BackupStorageTargetInput {

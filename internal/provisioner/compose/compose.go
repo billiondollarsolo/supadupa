@@ -16,23 +16,34 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"supadupa2026/internal/env"
+	"sync"
+	"syscall"
 	"time"
 
 	"supadupa2026/internal/control"
+	"supadupa2026/internal/provisioner/artifact"
+	"supadupa2026/internal/provisioner/dbbootstrap"
 )
 
 type Options struct {
 	RootDir            string
+	HostRootDir        string
 	Apply              bool
 	Command            string
 	BranchCloneCommand string
+	ProjectDockerLogs  bool
 }
 
 type Provisioner struct {
 	rootDir            string
+	hostRootDir        string
 	apply              bool
 	command            string
 	branchCloneCommand string
+	projectDockerLogs  bool
+	nodeMu             sync.Mutex
+	lastNodeCPU        procCPUSample
 }
 
 var socialOAuthProviders = map[string]string{
@@ -66,14 +77,17 @@ var authHookEnvTypes = map[string]string{
 
 const (
 	bindMountFileMode = 0o644
+	defaultNodeNetDev = "/host/proc/net/dev"
 )
 
 func New() *Provisioner {
 	return NewWithOptions(Options{
-		RootDir:            envOrDefault("SUPADUPA_PROJECT_ROOT", "./runtime/projects"),
+		RootDir:            env.OrDefault("SUPADUPA_PROJECT_ROOT", "./runtime/projects"),
+		HostRootDir:        os.Getenv("SUPADUPA_PROJECT_HOST_ROOT"),
 		Apply:              os.Getenv("SUPADUPA_COMPOSE_APPLY") == "true",
-		Command:            envOrDefault("SUPADUPA_COMPOSE_COMMAND", "docker compose"),
+		Command:            env.OrDefault("SUPADUPA_COMPOSE_COMMAND", "docker compose"),
 		BranchCloneCommand: os.Getenv("SUPADUPA_BRANCH_CLONE_COMMAND"),
+		ProjectDockerLogs:  env.Bool("SUPADUPA_PROJECT_DOCKER_LOGS"),
 	})
 }
 
@@ -84,11 +98,25 @@ func NewWithOptions(opts Options) *Provisioner {
 	if opts.Command == "" {
 		opts.Command = "docker compose"
 	}
-	return &Provisioner{rootDir: opts.RootDir, apply: opts.Apply, command: opts.Command, branchCloneCommand: opts.BranchCloneCommand}
+	return &Provisioner{
+		rootDir:            opts.RootDir,
+		hostRootDir:        strings.TrimSpace(opts.HostRootDir),
+		apply:              opts.Apply,
+		command:            opts.Command,
+		branchCloneCommand: opts.BranchCloneCommand,
+		projectDockerLogs:  opts.ProjectDockerLogs,
+	}
 }
 
 func (p *Provisioner) Name() string {
 	return "compose"
+}
+
+func (p *Provisioner) projectHostDir(ref string) string {
+	if p.hostRootDir == "" {
+		return ""
+	}
+	return filepath.Join(p.hostRootDir, ref)
 }
 
 func (p *Provisioner) Create(ctx context.Context, spec control.ProjectSpec) error {
@@ -115,7 +143,7 @@ func (p *Provisioner) Create(ctx context.Context, spec control.ProjectSpec) erro
 	if err := writeKongEntrypointFile(filepath.Join(projectDir, "kong-entrypoint.sh")); err != nil {
 		return err
 	}
-	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), spec.Ref); err != nil {
+	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), spec.Ref, p.projectDockerLogs); err != nil {
 		return err
 	}
 	if err := writePoolerConfigFile(filepath.Join(projectDir, "pooler.exs")); err != nil {
@@ -133,11 +161,17 @@ func (p *Provisioner) Create(ctx context.Context, spec control.ProjectSpec) erro
 	if err := writeAuthHooksFile(filepath.Join(projectDir, "auth-hooks.json"), nil); err != nil {
 		return err
 	}
-	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec); err != nil {
+	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec, p.projectDockerLogs, p.projectHostDir(spec.Ref)); err != nil {
 		return err
 	}
 	if !p.apply {
 		return nil
+	}
+	// Create the project's isolated edge network and attach the edge-router
+	// before bringing services up, so kong/studio/db/pooler have a network to
+	// join and are reachable from the ingress.
+	if err := p.ensureEdgeNetwork(ctx, spec.Ref); err != nil {
+		return err
 	}
 	if err := p.runCompose(ctx, projectDir, spec.Ref, "up", "-d", "db"); err != nil {
 		return err
@@ -193,7 +227,7 @@ func (p *Provisioner) SyncSecrets(ctx context.Context, ref string, spec control.
 	if err := writeDefaultFunctionEntrypoint(filepath.Join(projectDir, "functions", "main", "index.ts")); err != nil {
 		return err
 	}
-	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec); err != nil {
+	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec, p.projectDockerLogs, p.projectHostDir(spec.Ref)); err != nil {
 		return err
 	}
 	if !p.apply {
@@ -269,7 +303,7 @@ func (p *Provisioner) SyncServices(ctx context.Context, ref string, spec control
 	if err := writeKongEntrypointFile(filepath.Join(projectDir, "kong-entrypoint.sh")); err != nil {
 		return err
 	}
-	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), spec.Ref); err != nil {
+	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), spec.Ref, p.projectDockerLogs); err != nil {
 		return err
 	}
 	if err := writePoolerConfigFile(filepath.Join(projectDir, "pooler.exs")); err != nil {
@@ -284,7 +318,7 @@ func (p *Provisioner) SyncServices(ctx context.Context, ref string, spec control
 	if err := writeDefaultFunctionEntrypoint(filepath.Join(projectDir, "functions", "main", "index.ts")); err != nil {
 		return err
 	}
-	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec); err != nil {
+	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec, p.projectDockerLogs, p.projectHostDir(spec.Ref)); err != nil {
 		return err
 	}
 	if !p.apply {
@@ -342,8 +376,8 @@ func (p *Provisioner) Destroy(ctx context.Context, ref string) error {
 
 func (p *Provisioner) DestroyWithOptions(ctx context.Context, ref string, opts control.DestroyOptions) error {
 	projectDir := filepath.Join(p.rootDir, ref)
-	if p.apply {
-		args := []string{"down"}
+	if p.apply && composeProjectExists(projectDir) {
+		args := []string{"down", "--remove-orphans"}
 		if !opts.RetainVolumes {
 			args = append(args, "-v")
 		}
@@ -354,8 +388,19 @@ func (p *Provisioner) DestroyWithOptions(ctx context.Context, ref string, opts c
 		if err := p.runComposeWithFiles(ctx, projectDir, ref, composeFiles, args...); err != nil {
 			return err
 		}
+		// Detach the shared edge-router and drop the project's edge network so it
+		// doesn't leak or block removal (compose down can't remove an external
+		// network that still has the router attached).
+		p.disconnectEdgeRouter(ctx, ref)
+		p.removeEdgeNetwork(ctx, ref)
 		if !opts.RetainVolumes {
-			if err := p.removeProjectLabeledVolumes(ctx, ref); err != nil {
+			if err := p.removeProjectLabeledContainers(ctx, ref); err != nil {
+				return err
+			}
+			if err := p.removeProjectLabeledResources(ctx, ref, "volume"); err != nil {
+				return err
+			}
+			if err := p.removeProjectLabeledResources(ctx, ref, "network"); err != nil {
 				return err
 			}
 		}
@@ -366,6 +411,144 @@ func (p *Provisioner) DestroyWithOptions(ctx context.Context, ref string, opts c
 		}
 	}
 	return os.RemoveAll(projectDir)
+}
+
+func composeProjectExists(projectDir string) bool {
+	if _, err := os.Stat(filepath.Join(projectDir, "compose.yaml")); err != nil {
+		return false
+	}
+	return true
+}
+
+func (p *Provisioner) removeProjectLabeledContainers(ctx context.Context, ref string) error {
+	cli := composeVolumeCLI(p.command)
+	if cli == "" {
+		return nil
+	}
+	output, err := exec.CommandContext(ctx, cli, "ps", "-aq", "--filter", "label=com.docker.compose.project="+ref).Output()
+	if err != nil {
+		return fmt.Errorf("list compose project containers: %w", err)
+	}
+	containers := strings.Fields(string(output))
+	if len(containers) == 0 {
+		return nil
+	}
+	args := append([]string{"rm", "-f"}, containers...)
+	removeOutput, err := exec.CommandContext(ctx, cli, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("remove compose project containers: %w: %s", err, strings.TrimSpace(string(removeOutput)))
+	}
+	return nil
+}
+
+// removeProjectLabeledResources lists docker objects of the given kind
+// ("network", "volume") carrying the project's compose label and removes each,
+// tolerating objects that are already gone.
+func (p *Provisioner) removeProjectLabeledResources(ctx context.Context, ref string, kind string) error {
+	cli := composeVolumeCLI(p.command)
+	if cli == "" {
+		return nil
+	}
+	output, err := exec.CommandContext(ctx, cli, kind, "ls", "-q", "--filter", "label=com.docker.compose.project="+ref).Output()
+	if err != nil {
+		return fmt.Errorf("list compose project %ss: %w", kind, err)
+	}
+	for _, id := range strings.Fields(string(output)) {
+		removeOutput, err := exec.CommandContext(ctx, cli, kind, "rm", id).CombinedOutput()
+		if err != nil && !strings.Contains(string(removeOutput), "No such "+kind) {
+			return fmt.Errorf("remove compose project %s %s: %w: %s", kind, id, err, strings.TrimSpace(string(removeOutput)))
+		}
+	}
+	return nil
+}
+
+// edgeNetworkName is each project's dedicated, isolated ingress network. Only
+// that project's edge-facing services (kong/studio/db/pooler) and the shared
+// edge-router join it, so projects can never reach one another's containers.
+func edgeNetworkName(ref string) string { return ref + "-edge" }
+
+// studioProjectName is the human label shown in the Studio header, falling back
+// to the ref when a project has no display name.
+func studioProjectName(spec control.ProjectSpec) string {
+	if name := strings.TrimSpace(spec.Name); name != "" {
+		return name
+	}
+	return spec.Ref
+}
+
+func (p *Provisioner) edgeRouterContainer() string {
+	if v := strings.TrimSpace(os.Getenv("SUPADUPA_EDGE_ROUTER_CONTAINER")); v != "" {
+		return v
+	}
+	return "supadupa-edge-router-1"
+}
+
+// ensureEdgeNetwork creates the project's edge network (idempotent, labeled so
+// the docker-socket-proxy and teardown can manage it) and attaches the shared
+// edge-router so Traefik can route to this project.
+func (p *Provisioner) ensureEdgeNetwork(ctx context.Context, ref string) error {
+	cli := composeVolumeCLI(p.command)
+	if cli == "" {
+		return nil
+	}
+	name := edgeNetworkName(ref)
+	// create is idempotent here: a pre-existing network just yields an
+	// "already exists" error we tolerate, so no separate inspect is needed.
+	createOut, createErr := exec.CommandContext(ctx, cli, "network", "create",
+		"--label", "com.docker.compose.project="+ref,
+		"--label", "supadupa.role=edge",
+		name).CombinedOutput()
+	if createErr != nil && !strings.Contains(string(createOut), "already exists") {
+		return fmt.Errorf("create edge network %s: %w: %s", name, createErr, strings.TrimSpace(string(createOut)))
+	}
+	return p.connectEdgeRouter(ctx, ref)
+}
+
+func (p *Provisioner) connectEdgeRouter(ctx context.Context, ref string) error {
+	cli := composeVolumeCLI(p.command)
+	if cli == "" {
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, cli, "network", "connect", edgeNetworkName(ref), p.edgeRouterContainer()).CombinedOutput()
+	if err != nil {
+		msg := string(out)
+		if strings.Contains(msg, "already exists") || strings.Contains(msg, "is already connected") {
+			return nil
+		}
+		return fmt.Errorf("connect edge router to %s: %w: %s", edgeNetworkName(ref), err, strings.TrimSpace(msg))
+	}
+	return nil
+}
+
+func (p *Provisioner) disconnectEdgeRouter(ctx context.Context, ref string) {
+	cli := composeVolumeCLI(p.command)
+	if cli == "" {
+		return
+	}
+	// Best-effort: the edge-router may not be connected (or already gone).
+	_ = exec.CommandContext(ctx, cli, "network", "disconnect", "-f", edgeNetworkName(ref), p.edgeRouterContainer()).Run()
+}
+
+func (p *Provisioner) removeEdgeNetwork(ctx context.Context, ref string) {
+	cli := composeVolumeCLI(p.command)
+	if cli == "" {
+		return
+	}
+	out, err := exec.CommandContext(ctx, cli, "network", "rm", edgeNetworkName(ref)).CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "No such network") {
+		// Non-fatal during teardown; the labeled-network sweep is a backstop.
+		_ = out
+	}
+}
+
+// EnsureEdgeNetworking is the exported hook used by startup reconciliation to
+// (re)create each project's edge network and reconnect the edge-router after a
+// platform restart recreates the router container.
+func (p *Provisioner) EnsureEdgeNetworking(ctx context.Context, ref string) error {
+	if !p.apply {
+		return nil
+	}
+	return p.ensureEdgeNetwork(ctx, ref)
 }
 
 func projectComposeFilesWithReplicaOverlay(projectDir string) ([]string, error) {
@@ -385,24 +568,6 @@ func projectComposeFilesWithReplicaOverlay(projectDir string) ([]string, error) 
 		return nil, err
 	}
 	return files, nil
-}
-
-func (p *Provisioner) removeProjectLabeledVolumes(ctx context.Context, ref string) error {
-	cli := composeVolumeCLI(p.command)
-	if cli == "" {
-		return nil
-	}
-	output, err := exec.CommandContext(ctx, cli, "volume", "ls", "-q", "--filter", "label=com.docker.compose.project="+ref).Output()
-	if err != nil {
-		return fmt.Errorf("list compose project volumes: %w", err)
-	}
-	for _, volume := range strings.Fields(string(output)) {
-		removeOutput, err := exec.CommandContext(ctx, cli, "volume", "rm", volume).CombinedOutput()
-		if err != nil && !strings.Contains(string(removeOutput), "No such volume") {
-			return fmt.Errorf("remove compose project volume %s: %w: %s", volume, err, strings.TrimSpace(string(removeOutput)))
-		}
-	}
-	return nil
 }
 
 func composeVolumeCLI(command string) string {
@@ -444,7 +609,7 @@ func (p *Provisioner) Status(ctx context.Context, ref string) (control.ProjectSt
 	if err != nil {
 		return control.ProjectStatus{Ref: ref, Phase: control.ProjectError, Message: err.Error()}, err
 	}
-	for _, required := range requiredComposeFragments(serviceStates) {
+	for _, required := range requiredComposeFragments(serviceStates, p.projectHostDir(ref)) {
 		if !strings.Contains(string(composePayload), required) {
 			drift = append(drift, "compose missing "+required)
 		}
@@ -514,9 +679,12 @@ func (p *Provisioner) liveComposeStatus(ctx context.Context, projectDir string, 
 	if err != nil {
 		return control.ProjectError, "", nil, err
 	}
-	runtimeServices := liveRuntimeServices(serviceStates, services)
+	replicaServices := expectedReplicaComposeServices(projectDir)
+	expected := expectedComposeServices(serviceStates)
+	expected = append(expected, replicaServices...)
+	sort.Strings(expected)
+	runtimeServices := liveRuntimeServices(serviceStates, services, replicaServices)
 	if renderedPhase == control.ProjectPaused {
-		expected := expectedComposeServices(serviceStates)
 		if missing := missingComposeServices(services, expected); len(missing) > 0 {
 			return control.ProjectDegraded, "compose desired paused but live services are missing " + strings.Join(missing, ", "), runtimeServices, nil
 		}
@@ -526,9 +694,9 @@ func (p *Provisioner) liveComposeStatus(ctx context.Context, projectDir string, 
 		}
 		return control.ProjectDegraded, "compose desired paused but live services still running " + strings.Join(running, ", "), runtimeServices, nil
 	}
-	missing := missingComposeServices(services, expectedComposeServices(serviceStates))
-	unhealthy := unhealthyComposeServices(services, expectedComposeServices(serviceStates))
-	unexpected := unexpectedComposeServices(services, expectedComposeServices(serviceStates))
+	missing := missingComposeServices(services, expected)
+	unhealthy := unhealthyComposeServices(services, expected)
+	unexpected := unexpectedComposeServices(services, expected)
 	if len(missing) > 0 || len(unhealthy) > 0 || len(unexpected) > 0 {
 		var parts []string
 		if len(missing) > 0 {
@@ -541,6 +709,12 @@ func (p *Provisioner) liveComposeStatus(ctx context.Context, projectDir string, 
 			parts = append(parts, "unexpected live services "+strings.Join(unexpected, ", "))
 		}
 		return control.ProjectDegraded, "compose live drift: " + strings.Join(parts, "; "), runtimeServices, nil
+	}
+	// No failures, but one or more services are still coming up (booting or
+	// mid-recreate after a deploy). Report "starting" rather than "healthy" so
+	// the transient window is distinguishable from a steady-state project.
+	if starting := startingComposeServices(services, expected); len(starting) > 0 {
+		return control.ProjectStarting, "compose project starting: " + strings.Join(starting, ", "), runtimeServices, nil
 	}
 	return control.ProjectHealthy, "compose project running", runtimeServices, nil
 }
@@ -605,6 +779,37 @@ func expectedComposeServices(serviceStates map[string]bool) []string {
 	return services
 }
 
+func expectedReplicaComposeServices(projectDir string) []string {
+	replicaDir := filepath.Join(projectDir, "replicas")
+	if _, err := os.Stat(filepath.Join(replicaDir, "compose.yaml")); err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(replicaDir)
+	if err != nil {
+		return nil
+	}
+	var services []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".env") {
+			continue
+		}
+		env, err := readEnvFile(filepath.Join(replicaDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		name := strings.TrimSpace(env["REPLICA_NAME"])
+		if name == "" {
+			name = strings.TrimSuffix(entry.Name(), ".env")
+		}
+		service := replicaComposeServiceName(name)
+		if service != "" {
+			services = append(services, service)
+		}
+	}
+	sort.Strings(services)
+	return services
+}
+
 func missingComposeServices(actual map[string]composePSService, expected []string) []string {
 	var missing []string
 	for _, service := range expected {
@@ -645,6 +850,12 @@ func unhealthyComposeServices(actual map[string]composePSService, expected []str
 		if !ok {
 			continue
 		}
+		// A service that is still coming up (healthcheck "starting", or freshly
+		// created) is reported separately as "starting", not as a failure — this
+		// keeps a booting/recreating project out of the "degraded" bucket.
+		if composeServiceStarting(row) {
+			continue
+		}
 		if !composeServiceRunning(row) {
 			detail := service
 			if row.State != "" {
@@ -680,6 +891,37 @@ func composeServiceRunning(row composePSService) bool {
 	return row.Health == "" || row.Health == "healthy"
 }
 
+// composeServiceStarting reports whether a service is in a transient come-up
+// state rather than a genuine failure: running with its healthcheck still in the
+// "starting" window, or just created and not yet started. Crash signals
+// (exited, restarting, dead, unhealthy) are deliberately excluded — those stay
+// degraded.
+func composeServiceStarting(row composePSService) bool {
+	if row.State == "created" {
+		return true
+	}
+	return row.State == "running" && row.Health == "starting"
+}
+
+func startingComposeServices(actual map[string]composePSService, expected []string) []string {
+	var starting []string
+	for _, service := range expected {
+		row, ok := actual[service]
+		if !ok {
+			continue
+		}
+		if composeServiceStarting(row) {
+			detail := service
+			if row.Health != "" {
+				detail += "/" + row.Health
+			}
+			starting = append(starting, detail)
+		}
+	}
+	sort.Strings(starting)
+	return starting
+}
+
 func renderedRuntimeServices(serviceStates map[string]bool) []control.RuntimeService {
 	services := composeServiceDescriptors(serviceStates)
 	out := make([]control.RuntimeService, 0, len(services))
@@ -697,8 +939,15 @@ func renderedRuntimeServices(serviceStates map[string]bool) []control.RuntimeSer
 	return out
 }
 
-func liveRuntimeServices(serviceStates map[string]bool, actual map[string]composePSService) []control.RuntimeService {
+func liveRuntimeServices(serviceStates map[string]bool, actual map[string]composePSService, replicaServices []string) []control.RuntimeService {
 	services := composeServiceDescriptors(serviceStates)
+	for _, service := range replicaServices {
+		services = append(services, control.RuntimeService{
+			Name:           serviceDisplayName(service),
+			ComposeService: service,
+			Desired:        true,
+		})
+	}
 	seen := map[string]struct{}{}
 	out := make([]control.RuntimeService, 0, len(services))
 	for _, service := range services {
@@ -790,6 +1039,9 @@ func knownComposeService(service string) bool {
 	if service == "db" || service == "kong" || service == "meta" {
 		return true
 	}
+	if strings.HasPrefix(service, "db-replica-") {
+		return true
+	}
 	for _, allowed := range control.AllowedProjectServices() {
 		if optionalComposeService(allowed) == service {
 			return true
@@ -846,15 +1098,15 @@ func requiredProjectFiles() []string {
 	}
 }
 
-func requiredComposeFragments(services map[string]bool) []string {
+func requiredComposeFragments(services map[string]bool, projectHostDir string) []string {
 	fragments := []string{
 		"supabase/postgres:",
 		"supabase/postgres-meta:",
-		"./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro",
-		"./00-supadupa-init.sql:/etc/postgresql.schema.sql:ro",
-		"./kong.yml:/home/kong/kong.yml:ro",
-		"./kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro",
-		"supadupa-ingress:",
+		composeBindMount(projectHostDir, "pg_hba.conf", "/etc/postgresql/pg_hba.conf", true),
+		composeBindMount(projectHostDir, "00-supadupa-init.sql", "/etc/postgresql.schema.sql", true),
+		composeBindMount(projectHostDir, "kong.yml", "/home/kong/kong.yml", true),
+		composeBindMount(projectHostDir, "kong-entrypoint.sh", "/home/kong/kong-entrypoint.sh", true),
+		"-edge",
 		"internal: true",
 	}
 	optional := map[string]string{
@@ -877,10 +1129,14 @@ func requiredComposeFragments(services map[string]bool) []string {
 		}
 	}
 	if services["functions"] {
-		fragments = append(fragments, "./functions:/home/deno/functions")
+		fragments = append(fragments, composeBindMount(projectHostDir, "functions", "/home/deno/functions", false))
 	}
 	if services["vector"] {
-		fragments = append(fragments, "./vector.yml:/etc/vector/vector.yml:ro", "./log-drains:/etc/vector/log-drains:ro")
+		fragments = append(
+			fragments,
+			composeBindMount(projectHostDir, "vector.yml", "/etc/vector/vector.yml", true),
+			composeBindMount(projectHostDir, "log-drains", "/etc/vector/log-drains", true),
+		)
 	}
 	return fragments
 }
@@ -923,7 +1179,7 @@ func (p *Provisioner) Upgrade(ctx context.Context, ref string, version string) e
 	if err := writeKongEntrypointFile(filepath.Join(projectDir, "kong-entrypoint.sh")); err != nil {
 		return err
 	}
-	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), ref); err != nil {
+	if err := writeVectorConfigFile(filepath.Join(projectDir, "vector.yml"), ref, p.projectDockerLogs); err != nil {
 		return err
 	}
 	if err := writePoolerConfigFile(filepath.Join(projectDir, "pooler.exs")); err != nil {
@@ -941,7 +1197,7 @@ func (p *Provisioner) Upgrade(ctx context.Context, ref string, version string) e
 	if err := writeDefaultFunctionEntrypoint(filepath.Join(projectDir, "functions", "main", "index.ts")); err != nil {
 		return err
 	}
-	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec); err != nil {
+	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec, p.projectDockerLogs, p.projectHostDir(spec.Ref)); err != nil {
 		return err
 	}
 	if !p.apply {
@@ -1173,6 +1429,39 @@ func (p *Provisioner) CollectProjectTelemetry(ctx context.Context, ref string) (
 	return parseComposeStats(output, time.Now().UTC())
 }
 
+func (p *Provisioner) CollectNodeTelemetry(ctx context.Context, host control.Host) (control.NodeTelemetrySampleInput, error) {
+	sampledAt := time.Now().UTC()
+	cpuPercent, err := p.collectNodeCPUPercent(ctx)
+	if err != nil {
+		return control.NodeTelemetrySampleInput{}, err
+	}
+	memoryUsed, memoryTotal, err := readNodeMemory()
+	if err != nil {
+		return control.NodeTelemetrySampleInput{}, err
+	}
+	diskUsed, diskTotal, diskAvailable, err := p.readNodeDisk()
+	if err != nil {
+		return control.NodeTelemetrySampleInput{}, err
+	}
+	networkSampled, networkRx, networkTx := readNodeNetwork()
+	cpuCapacity := host.Capacity.CPU
+	return control.NodeTelemetrySampleInput{
+		Source:             "compose-local-node",
+		CPUPercent:         cpuPercent,
+		CPUUsedCores:       (cpuPercent / 100) * float64(cpuCapacity),
+		CPUCapacityCores:   cpuCapacity,
+		MemoryUsedBytes:    memoryUsed,
+		MemoryTotalBytes:   memoryTotal,
+		DiskUsedBytes:      diskUsed,
+		DiskTotalBytes:     diskTotal,
+		DiskAvailableBytes: diskAvailable,
+		NetworkSampled:     networkSampled,
+		NetworkRxBytes:     networkRx,
+		NetworkTxBytes:     networkTx,
+		SampledAt:          sampledAt,
+	}, nil
+}
+
 func (p *Provisioner) runCompose(ctx context.Context, projectDir string, ref string, args ...string) error {
 	_, err := p.runComposeOutput(ctx, projectDir, ref, args...)
 	return err
@@ -1193,7 +1482,10 @@ func (p *Provisioner) ensurePoolerStarted(ctx context.Context, projectDir string
 	if err := p.runCompose(ctx, projectDir, ref, "up", "-d", "--force-recreate", "pooler"); err != nil {
 		return err
 	}
-	return p.waitForComposeServiceRunning(ctx, projectDir, ref, "pooler", poolerRestartStableDuration())
+	if err := p.waitForComposeServiceRunning(ctx, projectDir, ref, "pooler", poolerRestartStableDuration()); err != nil {
+		return err
+	}
+	return p.waitForPoolerConnections(ctx, projectDir, ref)
 }
 
 func poolerStartStableDuration() time.Duration {
@@ -1217,32 +1509,105 @@ func envDurationSeconds(name string, fallback time.Duration) time.Duration {
 }
 
 func (p *Provisioner) waitForComposeServiceRunning(ctx context.Context, projectDir string, ref string, service string, stableFor time.Duration) error {
-	deadline := time.Now().Add(stableFor)
+	deadline := time.Now().Add(composeServiceStartTimeout() + stableFor)
+	var stableSince time.Time
+	var lastStatus string
 	for {
 		output, err := p.runComposeOutput(ctx, projectDir, ref, "ps", "--format", "json", service)
 		if err != nil {
-			return err
-		}
-		services, err := parseComposePS(output)
-		if err != nil {
-			return err
-		}
-		row, ok := services[service]
-		if !ok {
-			return fmt.Errorf("compose service %s missing", service)
-		}
-		if row.State != "running" {
-			return fmt.Errorf("compose service %s is %s", service, row.State)
+			lastStatus = err.Error()
+			stableSince = time.Time{}
+		} else {
+			services, err := parseComposePS(output)
+			if err != nil {
+				lastStatus = err.Error()
+				stableSince = time.Time{}
+			} else if row, ok := services[service]; !ok {
+				lastStatus = "missing"
+				stableSince = time.Time{}
+			} else if row.State != "running" {
+				lastStatus = row.State
+				stableSince = time.Time{}
+			} else {
+				lastStatus = row.State
+				if stableSince.IsZero() {
+					stableSince = time.Now()
+				}
+				if time.Since(stableSince) >= stableFor {
+					return nil
+				}
+			}
 		}
 		if time.Now().After(deadline) {
-			return nil
+			if lastStatus == "" {
+				lastStatus = "unknown"
+			}
+			return fmt.Errorf("compose service %s did not stay running for %s before timeout: last status %s", service, stableFor, lastStatus)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(3 * time.Second):
+		case <-time.After(composeServicePollInterval()):
 		}
 	}
+}
+
+func (p *Provisioner) waitForPoolerConnections(ctx context.Context, projectDir string, ref string) error {
+	for _, listener := range []struct {
+		name string
+		port string
+	}{
+		{name: "session", port: "5432"},
+		{name: "transaction", port: "6543"},
+	} {
+		if err := p.waitForPoolerConnection(ctx, projectDir, ref, listener.name, listener.port); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Provisioner) waitForPoolerConnection(ctx context.Context, projectDir string, ref string, listener string, port string) error {
+	deadline := time.Now().Add(poolerConnectionReadyTimeout())
+	var lastErr error
+	for {
+		if err := p.probePoolerConnection(ctx, projectDir, ref, port); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("pooler %s listener did not accept database connections before timeout: %w", listener, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(composeServicePollInterval()):
+		}
+	}
+}
+
+func (p *Provisioner) probePoolerConnection(ctx context.Context, projectDir string, ref string, port string) error {
+	query := "select current_database() || ':' || current_user"
+	script := fmt.Sprintf(
+		"PGPASSWORD=\"$POSTGRES_PASSWORD\" psql -h 127.0.0.1 -p %s -U %s -d postgres -v ON_ERROR_STOP=1 -Atc %s >/dev/null",
+		shellQuote(port),
+		shellQuote("postgres."+ref),
+		shellQuote(query),
+	)
+	return p.runCompose(ctx, projectDir, ref, "exec", "-T", "pooler", "sh", "-lc", script)
+}
+
+func poolerConnectionReadyTimeout() time.Duration {
+	return envDurationSeconds("SUPADUPA_POOLER_CONNECTION_READY_TIMEOUT_SECONDS", 120*time.Second)
+}
+
+func composeServiceStartTimeout() time.Duration {
+	return envDurationSeconds("SUPADUPA_COMPOSE_SERVICE_START_TIMEOUT_SECONDS", 180*time.Second)
+}
+
+func composeServicePollInterval() time.Duration {
+	return envDurationSeconds("SUPADUPA_COMPOSE_SERVICE_POLL_INTERVAL_SECONDS", 3*time.Second)
 }
 
 func (p *Provisioner) applyDatabaseBootstrap(ctx context.Context, projectDir string, ref string) error {
@@ -1473,6 +1838,194 @@ func parseComposeBytes(raw string) (int64, error) {
 	return int64(math.Round(number * multiplier)), nil
 }
 
+type procCPUSample struct {
+	total uint64
+	idle  uint64
+	valid bool
+}
+
+func (p *Provisioner) collectNodeCPUPercent(ctx context.Context) (float64, error) {
+	current, err := readProcCPU()
+	if err != nil {
+		return 0, err
+	}
+	p.nodeMu.Lock()
+	previous := p.lastNodeCPU
+	if previous.valid {
+		p.lastNodeCPU = current
+		p.nodeMu.Unlock()
+		return cpuPercentBetween(previous, current), nil
+	}
+	p.lastNodeCPU = current
+	p.nodeMu.Unlock()
+
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-timer.C:
+	}
+	next, err := readProcCPU()
+	if err != nil {
+		return 0, err
+	}
+	p.nodeMu.Lock()
+	p.lastNodeCPU = next
+	p.nodeMu.Unlock()
+	return cpuPercentBetween(current, next), nil
+}
+
+func readProcCPU() (procCPUSample, error) {
+	payload, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return procCPUSample{}, err
+	}
+	line := ""
+	for _, candidate := range strings.Split(string(payload), "\n") {
+		if strings.HasPrefix(candidate, "cpu ") {
+			line = candidate
+			break
+		}
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 5 {
+		return procCPUSample{}, fmt.Errorf("parse /proc/stat cpu line")
+	}
+	values := make([]uint64, 0, len(fields)-1)
+	for _, field := range fields[1:] {
+		value, err := strconv.ParseUint(field, 10, 64)
+		if err != nil {
+			return procCPUSample{}, err
+		}
+		values = append(values, value)
+	}
+	total := uint64(0)
+	for _, value := range values {
+		total += value
+	}
+	idle := values[3]
+	if len(values) > 4 {
+		idle += values[4]
+	}
+	return procCPUSample{total: total, idle: idle, valid: true}, nil
+}
+
+func cpuPercentBetween(previous procCPUSample, current procCPUSample) float64 {
+	if current.total < previous.total || current.idle < previous.idle {
+		return 0
+	}
+	totalDelta := current.total - previous.total
+	idleDelta := current.idle - previous.idle
+	if totalDelta == 0 || idleDelta > totalDelta {
+		return 0
+	}
+	return (float64(totalDelta-idleDelta) / float64(totalDelta)) * 100
+}
+
+func readNodeMemory() (usedBytes int64, totalBytes int64, err error) {
+	payload, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0, err
+	}
+	values := map[string]int64{}
+	for _, line := range strings.Split(string(payload), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		key := strings.TrimSuffix(fields[0], ":")
+		value, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		values[key] = value * 1024
+	}
+	total := values["MemTotal"]
+	available := values["MemAvailable"]
+	if total <= 0 {
+		return 0, 0, fmt.Errorf("parse /proc/meminfo MemTotal")
+	}
+	if available < 0 {
+		available = 0
+	}
+	return total - available, total, nil
+}
+
+func (p *Provisioner) readNodeDisk() (usedBytes int64, totalBytes int64, availableBytes int64, err error) {
+	path := p.rootDir
+	if _, statErr := os.Stat(path); statErr != nil {
+		path = filepath.Dir(path)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		path = "/"
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, 0, 0, err
+	}
+	blockSize := uint64(stat.Bsize)
+	total := stat.Blocks * blockSize
+	free := stat.Bfree * blockSize
+	available := stat.Bavail * blockSize
+	if free > total {
+		free = total
+	}
+	return int64(total - free), int64(total), int64(available), nil
+}
+
+func readNodeNetwork() (sampled bool, rxBytes int64, txBytes int64) {
+	path := strings.TrimSpace(os.Getenv("SUPADUPA_NODE_NET_DEV_PATH"))
+	if path == "" {
+		path = defaultNodeNetDev
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return false, 0, 0
+	}
+	for _, line := range strings.Split(string(payload), "\n") {
+		name, fields, ok := parseProcNetDevLine(line)
+		if !ok || ignoredNodeNetworkInterface(name) {
+			continue
+		}
+		rx, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil || rx < 0 {
+			continue
+		}
+		tx, err := strconv.ParseInt(fields[8], 10, 64)
+		if err != nil || tx < 0 {
+			continue
+		}
+		sampled = true
+		rxBytes += rx
+		txBytes += tx
+	}
+	return sampled, rxBytes, txBytes
+}
+
+func parseProcNetDevLine(line string) (string, []string, bool) {
+	parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+	if len(parts) != 2 {
+		return "", nil, false
+	}
+	name := strings.TrimSpace(parts[0])
+	fields := strings.Fields(parts[1])
+	return name, fields, name != "" && len(fields) >= 16
+}
+
+func ignoredNodeNetworkInterface(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "lo" {
+		return true
+	}
+	for _, prefix := range []string{"br-", "docker", "veth", "virbr", "zt", "tailscale", "wg", "flannel", "cni", "kube", "calico"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Provisioner) writeRetainedVolumeManifest(ref string) error {
 	dir := filepath.Join(p.rootDir, "_retained")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -1498,7 +2051,7 @@ func (p *Provisioner) writeRetainedVolumeManifest(ref string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, ref+"-"+now.Format("20060102T150405Z")+".json"), append(payload, '\n'), 0o600)
+	return artifact.WriteFile(filepath.Join(dir, ref+"-"+now.Format("20060102T150405Z")+".json"), append(payload, '\n'), 0o600)
 }
 
 func writeAuthHooksFile(path string, hooks []control.ProjectAuthHook) error {
@@ -1519,7 +2072,7 @@ func writeAuthHooksFile(path string, hooks []control.ProjectAuthHook) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(payload, '\n'), 0o600)
+	return artifact.WriteFile(path, append(payload, '\n'), 0o600)
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
@@ -1542,7 +2095,7 @@ func (p *Provisioner) runBranchCloneCommand(ctx context.Context, path string, op
 	if len(output) == 0 {
 		output = []byte("branch clone command completed without output\n")
 	}
-	return os.WriteFile(path, output, 0o600)
+	return artifact.WriteFile(path, output, 0o600)
 }
 
 func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
@@ -2015,7 +2568,7 @@ func materializeFunctionImportMap(projectDir string, values map[string]string, i
 	if err := os.MkdirAll(functionsDir, 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(importMapPath, append(payload, '\n'), bindMountFileMode); err != nil {
+	if err := artifact.WriteFile(importMapPath, append(payload, '\n'), bindMountFileMode); err != nil {
 		return err
 	}
 	values["EDGE_RUNTIME_IMPORT_MAP"] = "/home/deno/functions/import_map.json"
@@ -2052,7 +2605,7 @@ func writeEnvValues(path string, values map[string]string) error {
 		builder.WriteString(envFileValue(value))
 		builder.WriteString("\n")
 	}
-	return os.WriteFile(path, []byte(builder.String()), bindMountFileMode)
+	return artifact.WriteFile(path, []byte(builder.String()), bindMountFileMode)
 }
 
 func envFileValue(value string) string {
@@ -2097,7 +2650,7 @@ func updateEnvValue(path string, key string, value string) error {
 	if !found {
 		lines = append(lines, key+"="+value)
 	}
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), bindMountFileMode)
+	return artifact.WriteFile(path, []byte(strings.Join(lines, "\n")), bindMountFileMode)
 }
 
 func readEnvFile(path string) (map[string]string, error) {
@@ -2120,16 +2673,36 @@ func readEnvFile(path string) (map[string]string, error) {
 	return values, nil
 }
 
-func writeComposeFile(path string, spec control.ProjectSpec) error {
+func writeComposeFile(path string, spec control.ProjectSpec, projectDockerLogs bool, projectHostDir string) error {
 	release := composeStackReleaseManifest(spec.StackVersion)
 	services := control.ProjectServiceStates(spec.Services)
 	depends := kongDependencies(services)
+	pgHBAMount := composeBindMount(projectHostDir, "pg_hba.conf", "/etc/postgresql/pg_hba.conf", true)
+	dbInitMount := composeBindMount(projectHostDir, "00-supadupa-init.sql", "/etc/postgresql.schema.sql", true)
+	kongConfigMount := composeBindMount(projectHostDir, "kong.yml", "/home/kong/kong.yml", true)
+	kongEntrypointMount := composeBindMount(projectHostDir, "kong-entrypoint.sh", "/home/kong/kong-entrypoint.sh", true)
+	functionsMount := composeBindMount(projectHostDir, "functions", "/home/deno/functions", false)
+	poolerConfigMount := composeBindMount(projectHostDir, "pooler.exs", "/etc/pooler/pooler.exs", true)
+	vectorConfigMount := composeBindMount(projectHostDir, "vector.yml", "/etc/vector/vector.yml", true)
+	logDrainsMount := composeBindMount(projectHostDir, "log-drains", "/etc/vector/log-drains", true)
+
+	// When the project opts into runtime-limit enforcement, render real
+	// container CPU/memory limits on the database service (the dimension that
+	// matters most for noisy-neighbor isolation). Otherwise sizing stays
+	// placement/quota bookkeeping only and no limits are emitted.
+	dbDeploySection := ""
+	if spec.EnforceLimits {
+		cpu, ramMB, _ := control.EffectiveResourceSizing(spec)
+		dbDeploySection = fmt.Sprintf("    deploy:\n      resources:\n        limits:\n          cpus: \"%d\"\n          memory: %dM\n", cpu, ramMB)
+	}
 
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf(`name: supadupa-%s
 services:
   db:
     image: supabase/postgres:%s
+%s    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -2138,7 +2711,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
     networks:
       internal: {}
-      supadupa-ingress:
+      edge:
         aliases:
           - %s-db
     healthcheck:
@@ -2148,10 +2721,12 @@ services:
       retries: 20
     volumes:
       - db-data:/var/lib/postgresql/data
-      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
-      - ./00-supadupa-init.sql:/etc/postgresql.schema.sql:ro
+      - %s
+      - %s
   kong:
     image: kong/kong:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       KONG_DATABASE: "off"
@@ -2172,33 +2747,55 @@ services:
     entrypoint: /home/kong/kong-entrypoint.sh
     networks:
       internal: {}
-      supadupa-ingress:
+      edge:
         aliases:
           - %s-kong
     volumes:
-      - ./kong.yml:/home/kong/kong.yml:ro
-      - ./kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro
+      - %s
+      - %s
     depends_on:
-`, spec.Ref, release.Postgres, spec.Ref, release.Kong, spec.Ref))
+`, spec.Ref, release.Postgres, dbDeploySection, spec.Ref, pgHBAMount, dbInitMount, release.Kong, spec.Ref, kongConfigMount, kongEntrypointMount))
 	for _, dependency := range depends {
 		builder.WriteString(fmt.Sprintf("      - %s\n", dependency))
 	}
 	if services["studio"] {
 		builder.WriteString(fmt.Sprintf(`  studio:
     image: supabase/studio:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       HOSTNAME: "0.0.0.0"
+      # Names shown in the Studio header (this build reads DEFAULT_*; the
+      # STUDIO_DEFAULT_* names other builds use are ignored here).
+      DEFAULT_PROJECT_NAME: %q
+      DEFAULT_ORGANIZATION_NAME: Supadupa
+      # Internal gateway for Studio's server-side API routes (storage, auth,
+      # etc.). Bare "kong" already resolves uniquely on this project's own
+      # isolated networks; the prefixed alias matches the edge-router's route
+      # addressing (the router is multi-homed across every project network, so
+      # its routes must disambiguate). A reachable gateway is what keeps the
+      # Storage/Auth tabs from 500ing ("failed to retrieve buckets").
+      SUPABASE_URL: http://%s-kong:8000
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      # Lets Studio's Edge Functions tab list the project's functions. Mounted
+      # read-only: functions are deployed through the control plane, not Studio.
+      EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /home/deno/functions
     networks:
       internal: {}
-      supadupa-ingress:
+      edge:
         aliases:
           - %s-studio
+    volumes:
+      - %s
     depends_on: [meta]
-`, release.Studio, spec.Ref))
+`, release.Studio, studioProjectName(spec), spec.Ref, spec.Ref, composeBindMount(projectHostDir, "functions", "/home/deno/functions", true)))
 	}
 	builder.WriteString(fmt.Sprintf(`  meta:
     image: supabase/postgres-meta:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       PG_META_DB_HOST: db
@@ -2214,6 +2811,8 @@ services:
 	if services["auth"] {
 		builder.WriteString(fmt.Sprintf(`  auth:
     image: supabase/gotrue:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       GOTRUE_DB_DRIVER: postgres
@@ -2226,6 +2825,8 @@ services:
 	if services["rest"] {
 		builder.WriteString(fmt.Sprintf(`  rest:
     image: postgrest/postgrest:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     networks: [internal]
     depends_on:
@@ -2236,6 +2837,8 @@ services:
 	if services["realtime"] {
 		builder.WriteString(fmt.Sprintf(`  realtime:
     image: supabase/realtime:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       PORT: 4000
@@ -2269,6 +2872,8 @@ services:
 	if services["storage"] {
 		builder.WriteString(fmt.Sprintf(`  storage:
     image: supabase/storage-api:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       ANON_KEY: ${ANON_KEY}
@@ -2310,6 +2915,8 @@ services:
 	if services["imgproxy"] {
 		builder.WriteString(fmt.Sprintf(`  imgproxy:
     image: darthsim/imgproxy:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
@@ -2321,6 +2928,8 @@ services:
 	if services["functions"] {
 		builder.WriteString(fmt.Sprintf(`  edge-runtime:
     image: supabase/edge-runtime:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       JWT_SECRET: ${JWT_SECRET}
@@ -2335,23 +2944,28 @@ services:
       SUPADUPA_FUNCTION_STORAGE_ROOT: /mnt/.supadupa-storage/${STORAGE_TENANT_ID}/${GLOBAL_S3_BUCKET}
     networks: [internal, egress]
     volumes:
-      - ./functions:/home/deno/functions
+      - %s
       - storage-data:/mnt/.supadupa-storage:ro
     command: ["start", "--main-service", "/home/deno/functions/main"]
-`, release.EdgeRuntime))
+`, release.EdgeRuntime, functionsMount))
 	}
 	if services["pooler"] {
 		builder.WriteString(fmt.Sprintf(`  pooler:
     image: supabase/supavisor:%s
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     env_file: .env
     environment:
       PORT: 4000
       POSTGRES_PORT: ${POSTGRES_PORT}
-      POSTGRES_HOST: db
+      # Bare "db" already resolves uniquely on this project's own isolated
+      # networks; the prefixed alias is used for consistency with the
+      # edge-router's route addressing.
+      POSTGRES_HOST: %s-db
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@db:5432/_supabase
+      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@%s-db:5432/_supabase
       CLUSTER_POSTGRES: "true"
       SECRET_KEY_BASE: ${SECRET_KEY_BASE}
       VAULT_ENC_KEY: ${VAULT_ENC_KEY}
@@ -2365,20 +2979,22 @@ services:
       DB_POOL_SIZE: "5"
     networks:
       internal: {}
-      supadupa-ingress:
+      edge:
         aliases:
           - %s-pooler
     volumes:
-      - ./pooler.exs:/etc/pooler/pooler.exs:ro
+      - %s
     depends_on:
       db:
         condition: service_healthy
     command: ["/bin/sh", "-c", "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"]
-`, release.Pooler, spec.Ref))
+`, release.Pooler, spec.Ref, spec.Ref, spec.Ref, poolerConfigMount))
 	}
 	if services["analytics"] {
 		builder.WriteString(fmt.Sprintf(`  analytics:
     image: supabase/logflare:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     environment:
       LOGFLARE_NODE_HOST: 127.0.0.1
@@ -2402,28 +3018,50 @@ services:
 `, release.Analytics))
 	}
 	if services["vector"] {
+		volumes := []string{
+			"      - " + vectorConfigMount,
+			"      - " + logDrainsMount,
+		}
+		if projectDockerLogs {
+			volumes = append(volumes, "      - /var/run/docker.sock:/var/run/docker.sock:ro")
+		}
 		builder.WriteString(fmt.Sprintf(`  vector:
     image: timberio/vector:%s
+    security_opt:
+      - no-new-privileges:true
     env_file: .env
     networks: [internal, egress]
     volumes:
-      - ./vector.yml:/etc/vector/vector.yml:ro
-      - ./log-drains:/etc/vector/log-drains:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+%s
     command: ["--config", "/etc/vector/vector.yml", "--config-dir", "/etc/vector/log-drains"]
-`, release.Vector))
+`, release.Vector, strings.Join(volumes, "\n")))
 	}
-	builder.WriteString(`networks:
+	builder.WriteString(fmt.Sprintf(`networks:
   internal:
     internal: true
   egress: {}
-  supadupa-ingress:
+  edge:
     external: true
+    name: %s-edge
 volumes:
   db-data:
   storage-data:
-`)
-	return os.WriteFile(path, []byte(builder.String()), bindMountFileMode)
+`, spec.Ref))
+	return artifact.WriteFile(path, []byte(builder.String()), bindMountFileMode)
+}
+
+func composeBindMount(projectHostDir string, source string, target string, readonly bool) string {
+	source = strings.TrimPrefix(filepath.ToSlash(source), "/")
+	if strings.TrimSpace(projectHostDir) == "" {
+		source = "./" + source
+	} else {
+		source = filepath.ToSlash(filepath.Join(projectHostDir, source))
+	}
+	mount := source + ":" + target
+	if readonly {
+		mount += ":ro"
+	}
+	return mount
 }
 
 func kongDependencies(services map[string]bool) []string {
@@ -2696,7 +3334,7 @@ services:
         paths: [/analytics/v1]
 `)
 	}
-	return os.WriteFile(path, []byte(builder.String()), bindMountFileMode)
+	return artifact.WriteFile(path, []byte(builder.String()), bindMountFileMode)
 }
 
 func writeKongEntrypointFile(path string) error {
@@ -2730,14 +3368,16 @@ sed -i '/^[[:space:]]*- key:[[:space:]]*$/d' "$KONG_DECLARATIVE_CONFIG"
 
 exec /entrypoint.sh kong docker-start
 `
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+	if err := artifact.WriteFile(path, []byte(body), 0o755); err != nil {
 		return err
 	}
 	return os.Chmod(path, 0o755)
 }
 
-func writeVectorConfigFile(path string, ref string) error {
-	body := fmt.Sprintf(`sources:
+func writeVectorConfigFile(path string, ref string, projectDockerLogs bool) error {
+	var body string
+	if projectDockerLogs {
+		body = fmt.Sprintf(`sources:
   project_logs:
     type: docker_logs
     docker_host: unix:///var/run/docker.sock
@@ -2758,7 +3398,28 @@ sinks:
     encoding:
       codec: json
 `, ref, ref)
-	return os.WriteFile(path, []byte(body), bindMountFileMode)
+	} else {
+		body = fmt.Sprintf(`sources:
+  project_logs:
+    type: internal_logs
+
+transforms:
+  add_project:
+    type: remap
+    inputs: [project_logs]
+    source: |
+      .project_ref = "%s"
+      .supadupa_log_source = "vector_internal"
+
+sinks:
+  stdout:
+    type: console
+    inputs: [add_project]
+    encoding:
+      codec: json
+`, ref)
+	}
+	return artifact.WriteFile(path, []byte(body), bindMountFileMode)
 }
 
 func writePoolerConfigFile(path string) error {
@@ -2795,7 +3456,7 @@ end
 
 {:ok, _} = Supavisor.Tenants.create_tenant(params)
 `
-	return os.WriteFile(path, []byte(body), bindMountFileMode)
+	return artifact.WriteFile(path, []byte(body), bindMountFileMode)
 }
 
 func writeDefaultFunctionEntrypoint(path string) error {
@@ -3266,24 +3927,22 @@ Deno.serve(async (req: Request) => {
   }
 
   const servicePath = "/home/deno/functions/" + functionName;
-  try {
-    const stat = await Deno.stat(servicePath);
-    if (!stat.isDirectory) {
-      return json(404, { msg: "function not found" });
-    }
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) {
-      return json(404, { msg: "function not found" });
-    }
-    throw error;
-  }
-
   const functionEnv = await loadFunctionEnv(servicePath);
   if (!(await requestIsAuthorized(req, functionEnv))) {
     return json(401, { msg: "Invalid JWT" });
   }
   const resolvedRegion = await resolveFunctionRegion(req, servicePath);
   const runtimeServicePath = await resolveFunctionServicePath(functionName, servicePath, functionEnv);
+  if (functionName === "main" && runtimeServicePath === servicePath) {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    headers.set("x-sb-edge-region", resolvedRegion);
+    return new Response(JSON.stringify({
+      name: "main",
+      status: "ok",
+      project_ref: Deno.env.get("PROJECT_REF") ?? "",
+      region: resolvedRegion,
+    }), { status: 200, headers });
+  }
   const functionEntrypoint = await loadFunctionEntrypoint(runtimeServicePath);
   let storageMounts: PreparedStorageMounts = { env: {}, servicePath: runtimeServicePath, staticPatterns: [] };
   try {
@@ -3324,107 +3983,12 @@ Deno.serve(async (req: Request) => {
   }
 });
 `
-	return os.WriteFile(path, []byte(body), bindMountFileMode)
+	return artifact.WriteFile(path, []byte(body), bindMountFileMode)
 }
 
 func writeDatabaseInitFile(path string, postgresPassword string) error {
-	passwordLiteral := sqlQuoteLiteral(postgresPassword)
-	body := fmt.Sprintf(`-- supadupa per-project database post-bootstrap.
--- The Supabase Postgres image runs this after its bundled init scripts and migrations.
-
-CREATE SCHEMA IF NOT EXISTS auth;
-CREATE SCHEMA IF NOT EXISTS storage;
-CREATE SCHEMA IF NOT EXISTS graphql;
-CREATE SCHEMA IF NOT EXISTS graphql_public;
-CREATE SCHEMA IF NOT EXISTS realtime;
-CREATE SCHEMA IF NOT EXISTS _realtime;
-CREATE SCHEMA IF NOT EXISTS vault;
-CREATE SCHEMA IF NOT EXISTS extensions;
-CREATE SCHEMA IF NOT EXISTS pgmq;
-CREATE SCHEMA IF NOT EXISTS _analytics;
-
-SELECT 'CREATE DATABASE _supabase'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '_supabase')\gexec
-
-\c _supabase
-CREATE SCHEMA IF NOT EXISTS _supavisor;
-ALTER SCHEMA _supavisor OWNER TO supabase_admin;
-\c postgres
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'anon') THEN
-    CREATE ROLE anon NOLOGIN NOINHERIT;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated') THEN
-    CREATE ROLE authenticated NOLOGIN NOINHERIT;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'service_role') THEN
-    CREATE ROLE service_role NOLOGIN NOINHERIT BYPASSRLS;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN
-    CREATE ROLE authenticator NOINHERIT LOGIN;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_auth_admin') THEN
-    CREATE ROLE supabase_auth_admin LOGIN;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_storage_admin') THEN
-    CREATE ROLE supabase_storage_admin LOGIN;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_admin') THEN
-    CREATE ROLE supabase_admin LOGIN;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_replication_admin') THEN
-    CREATE ROLE supabase_replication_admin LOGIN REPLICATION;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_read_only_user') THEN
-    CREATE ROLE supabase_read_only_user LOGIN BYPASSRLS;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dashboard_user') THEN
-    CREATE ROLE dashboard_user NOSUPERUSER CREATEDB CREATEROLE REPLICATION;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgbouncer') THEN
-    CREATE ROLE pgbouncer LOGIN;
-  END IF;
-END
-$$;
-
-ALTER ROLE authenticator WITH PASSWORD %s;
-ALTER ROLE supabase_auth_admin WITH PASSWORD %s;
-ALTER ROLE supabase_storage_admin WITH PASSWORD %s;
-ALTER ROLE supabase_admin WITH LOGIN SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS PASSWORD %s;
-ALTER ROLE supabase_replication_admin WITH PASSWORD %s;
-ALTER ROLE pgbouncer WITH PASSWORD %s;
-GRANT pg_read_all_data TO supabase_read_only_user;
-
-CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS pg_graphql WITH SCHEMA graphql;
-CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS pgmq WITH SCHEMA pgmq;
-CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
-    EXECUTE 'CREATE PUBLICATION supabase_realtime';
-  END IF;
-END
-$$;
-
-GRANT anon, authenticated, service_role TO authenticator;
-GRANT USAGE ON SCHEMA public, auth, storage, graphql_public, realtime, _realtime, extensions TO anon, authenticated, service_role;
-GRANT ALL PRIVILEGES ON SCHEMA auth TO supabase_auth_admin;
-GRANT ALL PRIVILEGES ON SCHEMA storage TO supabase_storage_admin;
-GRANT ALL PRIVILEGES ON SCHEMA public, graphql_public, realtime, _realtime, vault, extensions TO service_role;
-GRANT ALL PRIVILEGES ON SCHEMA _realtime TO supabase_admin;
-
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO authenticated, service_role;
-	`, passwordLiteral, passwordLiteral, passwordLiteral, passwordLiteral, passwordLiteral, passwordLiteral)
-	return os.WriteFile(path, []byte(body), bindMountFileMode)
+	body := dbbootstrap.RenderDatabaseInitSQL(dbbootstrap.SQLQuoteLiteral(postgresPassword))
+	return artifact.WriteFile(path, []byte(body), bindMountFileMode)
 }
 
 func writePostgresHBAFile(path string) error {
@@ -3443,14 +4007,16 @@ host replication supabase_replication_admin ::/0 scram-sha-256
 host all all 0.0.0.0/0 scram-sha-256
 host all all ::/0 scram-sha-256
 `
-	return os.WriteFile(path, []byte(body), bindMountFileMode)
+	return artifact.WriteFile(path, []byte(body), bindMountFileMode)
 }
 
 func writeReplicaManifest(path string, ref string, replicaID string, name string, opts control.ReplicaOpts) error {
 	body := fmt.Sprintf(`name: supadupa-%s-replica-%s
 services:
   db-replica-%s:
-    image: supabase/postgres:latest
+    image: supabase/postgres:${STACK_VERSION}
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - ../.env
       - %s.env
@@ -3463,7 +4029,7 @@ networks:
 volumes:
   db-replica-%s-data:
 `, ref, name, name, replicaID, name, name)
-	return os.WriteFile(path, []byte(body), 0o600)
+	return artifact.WriteFile(path, []byte(body), 0o600)
 }
 
 func writeReplicasComposeFile(path string, ref string, replicas []control.ProjectReplica) error {
@@ -3478,6 +4044,8 @@ func writeReplicasComposeFile(path string, ref string, replicas []control.Projec
 		volume := service + "-data"
 		fmt.Fprintf(&builder, `  %s:
     image: supabase/postgres:${STACK_VERSION}
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - .env
       - replicas/%s.env
@@ -3485,7 +4053,7 @@ func writeReplicasComposeFile(path string, ref string, replicas []control.Projec
       PGPASSWORD: ${POSTGRES_PASSWORD}
     networks:
       internal: {}
-      supadupa-ingress:
+      edge:
         aliases:
           - %s-%s
     depends_on:
@@ -3524,9 +4092,10 @@ func writeReplicasComposeFile(path string, ref string, replicas []control.Projec
 	builder.WriteString("networks:\n")
 	builder.WriteString("  internal:\n")
 	builder.WriteString("    internal: true\n")
-	builder.WriteString("  supadupa-ingress:\n")
+	builder.WriteString("  edge:\n")
 	builder.WriteString("    external: true\n")
-	return os.WriteFile(path, []byte(builder.String()), 0o600)
+	builder.WriteString(fmt.Sprintf("    name: %s-edge\n", ref))
+	return artifact.WriteFile(path, []byte(builder.String()), 0o600)
 }
 
 func replicaComposeServiceName(name string) string {
@@ -3591,7 +4160,7 @@ services:
     cpus: "0.25"
     memory: 512M
 `, ref, tier, selected.CPU, selected.Memory)
-	return os.WriteFile(path, []byte(body), 0o600)
+	return artifact.WriteFile(path, []byte(body), 0o600)
 }
 
 func writeReplicaEnv(path string, ref string, name string, opts control.ReplicaOpts) error {
@@ -3614,7 +4183,7 @@ func writeReplicaEnv(path string, ref string, name string, opts control.ReplicaO
 		builder.WriteString(value)
 		builder.WriteString("\n")
 	}
-	return os.WriteFile(path, []byte(builder.String()), 0o600)
+	return artifact.WriteFile(path, []byte(builder.String()), 0o600)
 }
 
 func writeBranchClonePlan(path string, opts control.BranchCloneOptions, sourceDir string, branchDir string) error {
@@ -3640,7 +4209,7 @@ BEGIN;
 -- no-op dry-run clone marker for %s from %s
 ROLLBACK;
 `, opts.SourceRef, opts.BranchRef, opts.BranchID, opts.Name, expiresAt, sourceDir, branchDir, opts.BranchRef, opts.SourceRef)
-	return os.WriteFile(path, []byte(body), 0o600)
+	return artifact.WriteFile(path, []byte(body), 0o600)
 }
 
 func renderBranchCloneCommand(template string, opts control.BranchCloneOptions, sourceDir string, branchDir string, clonePath string) string {
@@ -3693,16 +4262,4 @@ func composeStackReleaseManifest(version string) control.StackReleaseManifest {
 	manifest.Version = normalized
 	manifest.Postgres = normalized
 	return manifest
-}
-
-func sqlQuoteLiteral(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
-}
-
-func envOrDefault(key string, fallback string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback
-	}
-	return value
 }

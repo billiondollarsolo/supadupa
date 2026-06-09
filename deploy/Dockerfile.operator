@@ -1,0 +1,18 @@
+FROM golang:1.26.4-alpine@sha256:103c743516b0d9dd69c203ed64f730eb342cae4b85d3f6c5cb376d91abbc6bcb AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/supadupa-operator ./cmd/supadupa-operator
+
+FROM alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+
+RUN apk add --no-cache ca-certificates tzdata \
+  && addgroup -g 10001 -S supadupa \
+  && adduser -u 10001 -S -D -H -G supadupa supadupa
+COPY --from=build /out/supadupa-operator /usr/local/bin/supadupa-operator
+
+USER supadupa
+CMD ["supadupa-operator"]

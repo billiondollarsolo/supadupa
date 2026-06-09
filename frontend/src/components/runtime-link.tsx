@@ -1,16 +1,35 @@
 import { ExternalLink } from "lucide-react";
 import type { MouseEvent } from "react";
+import { useState } from "react";
 import { createProjectStudioSession } from "../api";
 
-export function RuntimeLink({ className = "button secondary h-8 min-h-8 justify-center", label, projectRef, url }: { label: string; url: string; className?: string; projectRef?: string }) {
+export function RuntimeLink({ className = "button secondary h-8 min-h-8 justify-self-start", label, projectRef, url }: { label: string; url: string; className?: string; projectRef?: string }) {
   const routingHint = localRoutingHint(url);
+  const [error, setError] = useState("");
   async function openRuntime(event: MouseEvent<HTMLAnchorElement>) {
     if (!projectRef || !isStudioURL(url)) {
       return;
     }
     event.preventDefault();
-    const session = await createProjectStudioSession(projectRef);
-    window.open(withStudioToken(url, session.token), "_blank", "noopener,noreferrer");
+    setError("");
+    const opened = window.open("about:blank", "_blank");
+    try {
+      if (opened) {
+        opened.opener = null;
+      }
+      const session = await createProjectStudioSession(projectRef);
+      const studioURL = withStudioCode(url, session.code);
+      if (opened) {
+        opened.location.replace(studioURL);
+        return;
+      }
+      window.open(studioURL, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      if (opened) {
+        opened.close();
+      }
+      setError(err instanceof Error ? err.message : "Could not open Studio");
+    }
   }
   return (
     <div className="grid gap-1">
@@ -19,6 +38,7 @@ export function RuntimeLink({ className = "button secondary h-8 min-h-8 justify-
         {label}
       </a>
       {routingHint ? <p className="truncate text-xs text-faint">{routingHint}</p> : null}
+      {error ? <p className="truncate text-xs text-danger">{error}</p> : null}
     </div>
   );
 }
@@ -31,9 +51,9 @@ function isStudioURL(url: string) {
   }
 }
 
-function withStudioToken(url: string, token: string) {
+function withStudioCode(url: string, code: string) {
   const next = new URL(url);
-  next.searchParams.set("supadupa_studio_token", token);
+  next.searchParams.set("supadupa_studio_code", code);
   return next.toString();
 }
 

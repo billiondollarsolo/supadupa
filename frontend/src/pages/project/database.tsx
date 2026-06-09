@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { useRouterState } from "@tanstack/react-router";
 import {
   AnalyticsBucketsPanel,
   BranchesPanel,
@@ -15,8 +15,14 @@ import {
   ReplicationPanel,
   VectorAIPanel,
 } from "./database-panels";
+import { Sparkles } from "lucide-react";
+import { AppPanel } from "../../components/app/app-panel";
+import { MetricCard } from "../../components/app/metric-card";
+import { EmptyState } from "../../components/ui/empty-state";
+import { StatusPill } from "../../components/ui/status-pill";
 import { useDashboardContext } from "../../lib/dashboard-context";
 import { databaseSections, type DatabaseSection } from "../../lib/project-config";
+import { projectSectionFromPathname } from "../../lib/routes";
 import { ProjectPage } from "./layout";
 
 export function ProjectDatabasePage() {
@@ -41,9 +47,8 @@ export function ProjectDatabasePage() {
     routeToProject,
     vectorBuckets,
   } = useDashboardContext();
-  const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const selectedSection = pathname.match(/^\/projects\/[^/]+\/database\/([^/]+)/)?.[1];
+  const selectedSection = projectSectionFromPathname(pathname, "database");
   const activeSection: DatabaseSection = databaseSections.some((section) => section.id === selectedSection) ? selectedSection as DatabaseSection : "overview";
   const stats = useMemo(() => ({
     branches: projectBranches.data?.length ?? 0,
@@ -73,28 +78,50 @@ export function ProjectDatabasePage() {
     vectorBuckets.data,
   ]);
 
+  // Truthful rollup: count the resource surfaces that actually have something configured.
+  const configuredSurfaces = useMemo(
+    () =>
+      [
+        stats.branches,
+        stats.replicas,
+        stats.replication,
+        stats.analytics,
+        stats.extensions,
+        stats.cron,
+        stats.queues,
+        stats.webhooks,
+        stats.schemas,
+        stats.roles,
+        stats.embeddingJobs + stats.vectorBuckets,
+      ].filter((count) => count > 0).length,
+    [stats],
+  );
+
   return (
     <ProjectPage>
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Database workspace</p>
-            <h2>{activeProject?.ref ?? "Project database"}</h2>
-            <p className="mt-1 text-xs text-faint">Use the project sidebar to drill into runtime, pooler, replicas, extensions, jobs, roles, and AI.</p>
+      {activeSection === "overview" ? (
+        <AppPanel
+          eyebrow="Database workspace"
+          title={activeProject?.ref ?? "Project database"}
+          description="Posture across configured database surfaces. Use the sidebar to drill into each area."
+          actions={<StatusPill tone={configuredSurfaces > 0 ? "info" : "neutral"} label={`${configuredSurfaces} / 11 surfaces configured`} />}
+        >
+          <div className="mt-4 grid grid-cols-4 gap-2 max-xl:grid-cols-3 max-sm:grid-cols-2">
+            <MetricCard label="Replicas" value={stats.replicas} detail="read scaling" />
+            <MetricCard label="Branches" value={stats.branches} detail="preview stacks" />
+            <MetricCard label="Replication" value={stats.replication} detail="pipelines" />
+            <MetricCard label="Analytics" value={stats.analytics} detail="Iceberg buckets" />
+            <MetricCard label="Extensions" value={stats.extensions} detail="enabled" />
+            <MetricCard label="Cron" value={stats.cron} detail="jobs" />
+            <MetricCard label="Queues" value={stats.queues} detail="pgmq" />
+            <MetricCard label="Webhooks" value={stats.webhooks} detail="db change hooks" />
+            <MetricCard label="Schemas" value={stats.schemas} detail="versions" />
+            <MetricCard label="Roles" value={stats.roles} detail="with grants" />
+            <MetricCard label="Vector buckets" value={stats.vectorBuckets} detail="similarity stores" />
+            <MetricCard label="Embedding jobs" value={stats.embeddingJobs} detail="scheduled" />
           </div>
-          <span className="pill healthy">{stats.extensions} extensions</span>
-        </div>
-        <div className="mt-4">
-          <DatabaseSectionSummary
-            activeSection={activeSection}
-            onSelect={(section) => {
-              if (!activeProject) return;
-              void navigate({ to: section === "overview" ? `/projects/${activeProject.ref}/database` : `/projects/${activeProject.ref}/database/${section}` });
-            }}
-            stats={stats}
-          />
-        </div>
-      </section>
+        </AppPanel>
+      ) : null}
 
       {activeSection === "config" ? <DatabaseConfigPanel project={activeProject} config={projectConfig.data} loading={projectConfig.isLoading} /> : null}
       {activeSection === "pooler" ? <DatabasePoolerPanel project={activeProject} config={databasePoolerConfig.data} loading={databasePoolerConfig.isLoading} /> : null}
@@ -108,48 +135,17 @@ export function ProjectDatabasePage() {
       {activeSection === "webhooks" ? <DatabaseWebhooksPanel project={activeProject} webhooks={databaseWebhooks.data ?? []} loading={databaseWebhooks.isLoading} /> : null}
       {activeSection === "schemas" ? <DatabaseSchemasPanel project={activeProject} schemas={databaseSchemas.data ?? []} loading={databaseSchemas.isLoading} /> : null}
       {activeSection === "roles" ? <DatabaseRolesPanel project={activeProject} roles={databaseRoles.data ?? []} loading={databaseRoles.isLoading} /> : null}
-      {activeSection === "ai" ? <VectorAIPanel project={activeProject} jobs={embeddingJobs.data ?? []} buckets={vectorBuckets.data ?? []} loading={embeddingJobs.isLoading || vectorBuckets.isLoading} /> : null}
+      {activeSection === "ai" ? (
+        activeFeatureFlags.ai_integrations ? (
+          <VectorAIPanel project={activeProject} jobs={embeddingJobs.data ?? []} buckets={vectorBuckets.data ?? []} loading={embeddingJobs.isLoading || vectorBuckets.isLoading} />
+        ) : (
+          <AppPanel eyebrow="Database" title="Vector / AI">
+            <div className="mt-4">
+              <EmptyState icon={Sparkles} title="AI integrations are off" description="Enable “AI integrations” in Settings → Features to use vector buckets and embedding jobs." />
+            </div>
+          </AppPanel>
+        )
+      ) : null}
     </ProjectPage>
-  );
-}
-
-function DatabaseSectionSummary({
-  activeSection,
-  onSelect,
-  stats,
-}: {
-  activeSection: DatabaseSection;
-  stats: Record<string, number>;
-  onSelect: (section: DatabaseSection) => void;
-}) {
-  if (activeSection !== "overview") {
-    const current = databaseSections.find((section) => section.id === activeSection);
-    return (
-      <div className="rounded-md border border-border bg-bg p-3">
-        <p className="label">{current?.label ?? "Section"}</p>
-        <p className="mt-1 text-sm text-muted">{current?.description}</p>
-      </div>
-    );
-  }
-
-  const cards: Array<{ section: DatabaseSection; label: string; value: string; detail: string }> = [
-    { section: "config", label: "Runtime", value: "Stack config", detail: "GraphQL, Vault, SSL, cron, queues" },
-    { section: "pooler", label: "Connectivity", value: `${stats.replicas} replicas`, detail: "Pooler, replicas, and read routing" },
-    { section: "replication", label: "Data movement", value: `${stats.replication} pipelines`, detail: `${stats.branches} branches · ${stats.analytics} analytics buckets` },
-    { section: "extensions", label: "Extensions & jobs", value: `${stats.extensions} extensions`, detail: `${stats.cron} cron · ${stats.queues} queues · ${stats.webhooks} webhooks` },
-    { section: "schemas", label: "Schema & access", value: `${stats.schemas} versions`, detail: `${stats.roles} database roles` },
-    { section: "ai", label: "Vector / AI", value: `${stats.vectorBuckets} buckets`, detail: `${stats.embeddingJobs} embedding jobs` },
-  ];
-
-  return (
-    <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
-      {cards.map((card) => (
-        <button className="rounded-md border border-border bg-bg p-3 text-left transition hover:border-border-strong hover:bg-surface-2" key={card.section} onClick={() => onSelect(card.section)} type="button">
-          <p className="label">{card.label}</p>
-          <p className="mt-2 truncate text-sm font-medium">{card.value}</p>
-          <p className="mt-1 truncate text-xs text-muted">{card.detail}</p>
-        </button>
-      ))}
-    </div>
   );
 }

@@ -10,3 +10,10 @@ tmp/
 .env
 .env.*
 !*.env.example
+__pycache__/
+*.py[cod]
+frontend/test-results/
+frontend/playwright-report/
+artifacts/
+scripts/compat/artifacts/
+scripts/compat/.artifacts/

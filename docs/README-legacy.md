@@ -8,7 +8,7 @@ This repository is being built from `docs/PRD.md` draft v0.2. The MVP target is 
 
 MVP control plane with selected Phase 2/3 surfaces:
 
-- Go Management API with orgs, users, org/team/project RBAC, hosts, CPU/RAM/disk/IOPS quotas, usage snapshots, billing invoices, platform defaults, projects, lifecycle, config, audit log, metrics, fleet advisor, and project logs.
+- Go Management API with orgs, users, org/team/project RBAC, hosts, CPU/RAM/disk quotas, usage snapshots, billing invoices, platform defaults, projects, lifecycle, config, audit log, metrics, fleet advisor, and project logs.
 - Provisioner abstraction with Docker Compose rendering and Kubernetes CRD rendering backends.
 - Admin UI for fleet dashboard, project creation, Connect, lifecycle, config, secrets, domains, network policy, backups, PITR, functions, log drains, branches, read replicas, metering, and billing invoices.
 - CLI as a thin client over the Management API.
@@ -321,8 +321,7 @@ go run ./cmd/supadupa-cli quotas set \
   --max-projects 10 \
   --max-cpu 32 \
   --max-ram-mb 131072 \
-  --max-disk-gb 2000 \
-  --max-disk-iops 48000
+  --max-disk-gb 2000
 go run ./cmd/supadupa-cli usage current --org-id <org-id>
 go run ./cmd/supadupa-cli usage snapshot --org-id <org-id>
 go run ./cmd/supadupa-cli usage snapshots --org-id <org-id> --limit 10
@@ -353,7 +352,6 @@ go run ./cmd/supadupa-cli hosts create \
   --cpu 16 \
   --ram-mb 65536 \
   --disk-gb 1000 \
-  --disk-iops 48000 \
   --projects 20
 go run ./cmd/supadupa-cli hosts list
 go run ./cmd/supadupa-cli hosts get --id <host-id>
@@ -780,7 +778,6 @@ resource "supadupa_host" "east_1a" {
   capacity_cpu         = 16
   capacity_ram_mb      = 65536
   capacity_disk_gb     = 1000
-  capacity_disk_iops   = 48000
   capacity_projects    = 20
 }
 
@@ -794,7 +791,6 @@ resource "supadupa_org_quota" "platform" {
   max_cpu       = 64
   max_ram_mb    = 131072
   max_disk_gb   = 4096
-  max_disk_iops = 24000
 }
 
 resource "supadupa_org_member" "developer" {
@@ -1038,7 +1034,7 @@ resource "supadupa_project_embedding_job" "alpha_docs_embeddings" {
   primary_key_column = "id"
   destination_table  = "document_embeddings"
   destination_column = "embedding"
-  provider           = "openai"
+  embedding_provider  = "openai"
   model              = "text-embedding-3-small"
   dimension          = 1536
   schedule           = "manual"
@@ -1167,13 +1163,13 @@ resource "supadupa_project_cdn_policy" "alpha_storage" {
 }
 
 resource "supadupa_project_network_connection" "alpha_privatelink" {
-  ref         = supadupa_project.alpha.ref
-  name        = "aws-prod"
-  type        = "privatelink"
-  provider    = "aws"
-  region      = "us-east-1"
-  cidrs       = ["10.0.0.0/16", "203.0.113.10"]
-  endpoint_id = "vpce-123"
+  ref              = supadupa_project.alpha.ref
+  name             = "aws-prod"
+  type             = "privatelink"
+  network_provider = "aws"
+  region           = "us-east-1"
+  cidrs            = ["10.0.0.0/16", "203.0.113.10"]
+  endpoint_id      = "vpce-123"
 
   config = {
     account_id = "123456789012"

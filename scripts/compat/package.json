@@ -2,7 +2,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@supabase/supabase-js": "^2.75.0",
-    "ws": "^8.18.3"
+    "@supabase/supabase-js": "^2.108.0",
+    "ws": "^8.21.0"
   }
 }

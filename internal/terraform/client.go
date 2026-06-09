@@ -15,6 +15,8 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+const defaultClientTimeout = 5 * time.Minute
+
 type Client struct {
 	baseURL string
 	token   string
@@ -83,11 +85,10 @@ type PlatformSSOConfigInput struct {
 }
 
 type HostCapacity struct {
-	CPU      int `json:"cpu"`
-	RAMMB    int `json:"ram_mb"`
-	DiskGB   int `json:"disk_gb"`
-	DiskIOPS int `json:"disk_iops"`
-	Project  int `json:"projects"`
+	CPU     int `json:"cpu"`
+	RAMMB   int `json:"ram_mb"`
+	DiskGB  int `json:"disk_gb"`
+	Project int `json:"projects"`
 }
 
 type Host struct {
@@ -111,7 +112,6 @@ type OrgQuota struct {
 	MaxCPU      int          `json:"max_cpu"`
 	MaxRAMMB    int          `json:"max_ram_mb"`
 	MaxDiskGB   int          `json:"max_disk_gb"`
-	MaxDiskIOPS int          `json:"max_disk_iops"`
 	Used        HostCapacity `json:"used"`
 	UpdatedAt   time.Time    `json:"updated_at"`
 }
@@ -121,7 +121,6 @@ type OrgQuotaInput struct {
 	MaxCPU      int `json:"max_cpu"`
 	MaxRAMMB    int `json:"max_ram_mb"`
 	MaxDiskGB   int `json:"max_disk_gb"`
-	MaxDiskIOPS int `json:"max_disk_iops"`
 }
 
 type OrgMember struct {
@@ -899,7 +898,7 @@ func NewClient(baseURL string, token string, httpClient *http.Client) (*Client, 
 		return nil, err
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{Timeout: defaultClientTimeout}
 	}
 	return &Client{baseURL: normalized, token: token, client: httpClient}, nil
 }
@@ -1609,6 +1608,15 @@ func (c *Client) CreateProjectLogDrain(ctx context.Context, ref string, input Pr
 	var drain ProjectLogDrain
 	path := "/v1/projects/" + url.PathEscape(ref) + "/log-drains"
 	if err := c.do(ctx, http.MethodPost, path, input, &drain); err != nil {
+		return ProjectLogDrain{}, err
+	}
+	return drain, nil
+}
+
+func (c *Client) UpdateProjectLogDrain(ctx context.Context, ref string, id string, input ProjectLogDrainInput) (ProjectLogDrain, error) {
+	var drain ProjectLogDrain
+	path := "/v1/projects/" + url.PathEscape(ref) + "/log-drains/" + url.PathEscape(id)
+	if err := c.do(ctx, http.MethodPut, path, input, &drain); err != nil {
 		return ProjectLogDrain{}, err
 	}
 	return drain, nil

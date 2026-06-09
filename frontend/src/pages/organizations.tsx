@@ -1,9 +1,12 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { CreditCard, Gauge, Shield, Users, UserPlus } from "lucide-react";
+import { CreditCard, Gauge, Shield, Users } from "lucide-react";
+import { AppPanel } from "../components/app/app-panel";
+import { Badge } from "../components/ui/badge";
+import { CardButton } from "../components/ui/card-button";
 import { useDashboardContext } from "../lib/dashboard-context";
 import { formatBytes } from "../lib/format";
 import { organizationSections, type OrganizationSection } from "../lib/project-config";
-import { BillingPanel, MembersPanel, OrgFeaturesPanel, OrgPanel, QuotaPanel, TeamsPanel, UsagePanel } from "./organizations/panels";
+import { BillingPanel, CreateOrgPanel, MembersPanel, OrgFeaturesPanel, OrgSwitcher, QuotaPanel, TeamsPanel, UsagePanel } from "./organizations/panels";
 
 export function OrganizationsPage() {
   const {
@@ -40,25 +43,23 @@ export function OrganizationsPage() {
   }
 
   if (section === "overview") {
+    const quotaData = quota.data;
+    const projectsOverQuota = Boolean(quotaData && quotaData.max_projects > 0 && quotaData.used.projects >= quotaData.max_projects);
+    const projectsNearQuota = Boolean(quotaData && quotaData.max_projects > 0 && !projectsOverQuota && quotaData.used.projects / quotaData.max_projects >= 0.8);
     return (
       <div className="grid gap-6">
-        <OrgPanel orgs={orgs.data ?? []} selectedOrgId={activeOrgId} onSelectOrg={setSelectedOrgId} onCreated={onOrgCreated} />
-        <section className="panel">
-          <div className="section-head">
-            <div>
-              <p className="label">Organizations</p>
-              <h2>Admin overview</h2>
-            </div>
-          </div>
+        <OrgSwitcher orgs={orgs.data ?? []} selectedOrgId={activeOrgId} onSelectOrg={setSelectedOrgId} />
+        <CreateOrgPanel onCreated={onOrgCreated} />
+        <AppPanel eyebrow="Organizations" title="Admin overview" description="Open any area to manage it. Counts reflect the selected org.">
           <div className="mt-4 grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
-            <OrgSummaryCard icon={Users} label="Members" value={`${members.data?.length ?? 0} org grants`} detail={`${users.data?.length ?? 0} platform users · global admin separate from project admin`} onClick={() => openSection("members")} />
-            <OrgSummaryCard icon={Shield} label="Teams" value={`${teams.data?.length ?? 0} teams`} detail="Project-scoped RBAC grants flow through teams and users." onClick={() => openSection("teams")} />
-            <OrgSummaryCard icon={Shield} label="Features" value={`${Object.values(orgFeatures.data?.effective ?? {}).filter(Boolean).length} enabled`} detail={`${Object.keys(orgFeatures.data?.overrides ?? {}).length} org overrides · inherited from platform defaults`} onClick={() => openSection("features")} />
-            <OrgSummaryCard icon={Gauge} label="Quotas" value={`${quota.data?.used.projects ?? 0}/${quota.data?.max_projects || "-"} projects`} detail={quota.data ? `${quota.data.used.cpu}/${quota.data.max_cpu || "-"} CPU · ${formatBytes(quota.data.used.ram_mb * 1024 * 1024)} RAM` : "Quota sample pending"} onClick={() => openSection("quotas")} />
-            <OrgSummaryCard icon={Gauge} label="Usage" value={`${usage.data?.resources.projects ?? 0} projects`} detail={usage.data ? `${formatBytes(usage.data.db_allocated_bytes)} DB allocation · ${usageMeteringEnabled ? `${usageSnapshots.data?.length ?? 0} snapshots` : "snapshots disabled"}` : "Metering sample pending"} onClick={() => openSection("usage")} />
-            <OrgSummaryCard icon={CreditCard} label="Billing" value={billingEnabled ? `${billingInvoices.data?.length ?? 0} invoices` : "disabled"} detail={billingEnabled ? "Draft invoices are generated from durable metering snapshots." : "Enable billing in org feature flags to generate invoices."} onClick={() => openSection("billing")} />
+            <OrgSummaryCard icon={Users} label="Members" value={`${members.data?.length ?? 0} org grants`} detail={`${users.data?.length ?? 0} platform users`} onClick={() => openSection("members")} />
+            <OrgSummaryCard icon={Shield} label="Teams" value={`${teams.data?.length ?? 0} teams`} onClick={() => openSection("teams")} />
+            <OrgSummaryCard icon={Shield} label="Features" value={`${Object.values(orgFeatures.data?.effective ?? {}).filter(Boolean).length} enabled`} detail={`${Object.keys(orgFeatures.data?.overrides ?? {}).length} org overrides`} onClick={() => openSection("features")} />
+            <OrgSummaryCard icon={Gauge} label="Quotas" value={`${quotaData?.used.projects ?? 0}/${quotaData?.max_projects || "—"} projects`} tone={projectsOverQuota ? "danger" : projectsNearQuota ? "warning" : "neutral"} detail={quotaData ? `${quotaData.used.cpu}/${quotaData.max_cpu || "—"} vCPU · ${formatBytes(quotaData.used.ram_mb * 1024 * 1024)} RAM` : "Quota sample pending"} onClick={() => openSection("quotas")} />
+            <OrgSummaryCard icon={Gauge} label="Usage" value={`${usage.data?.resources.projects ?? 0} projects`} detail={usage.data ? `${formatBytes(usage.data.db_allocated_bytes)} DB allocation` : "Metering sample pending"} badge={usageMeteringEnabled ? undefined : "metering off"} onClick={() => openSection("usage")} />
+            <OrgSummaryCard icon={CreditCard} label="Billing" value={billingEnabled ? `${billingInvoices.data?.length ?? 0} invoices` : "—"} detail={billingEnabled ? undefined : "metering snapshots required"} badge={billingEnabled ? undefined : "disabled"} onClick={() => openSection("billing")} />
           </div>
-        </section>
+        </AppPanel>
       </div>
     );
   }
@@ -85,41 +86,21 @@ export function OrganizationsPage() {
   );
 }
 
-function OrgSwitcher({ orgs, selectedOrgId, onSelectOrg }: { orgs: { id: string; name: string }[]; selectedOrgId: string; onSelectOrg: (id: string) => void }) {
+function OrgSummaryCard({ badge, detail, icon: Icon, label, onClick, tone = "neutral", value }: { icon: typeof Users; label: string; value: string; detail?: string; onClick: () => void; tone?: "neutral" | "warning" | "danger"; badge?: string }) {
+  const valueToneClass = tone === "danger" ? "text-danger" : tone === "warning" ? "text-warning" : "";
   return (
-    <section className="rounded-md border border-border bg-surface px-3 py-2">
-      <div className="flex min-h-9 flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <UserPlus size={14} className="text-faint" />
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">Org scope</p>
-            <p className="truncate text-xs text-faint">Global org access is separate from project-level administration.</p>
-          </div>
-        </div>
-        <select className="input max-w-[260px]" value={selectedOrgId} onChange={(event) => onSelectOrg(event.target.value)}>
-          {orgs.length === 0 ? <option value="">No orgs yet</option> : null}
-          {orgs.map((org) => (
-            <option key={org.id} value={org.id}>
-              {org.name}
-            </option>
-          ))}
-        </select>
-      </div>
-    </section>
-  );
-}
-
-function OrgSummaryCard({ detail, icon: Icon, label, onClick, value }: { icon: typeof Users; label: string; value: string; detail: string; onClick: () => void }) {
-  return (
-    <button className="grid min-h-32 content-between rounded-md border border-border bg-bg p-3 text-left transition hover:border-border-strong hover:bg-surface-2" onClick={onClick} type="button">
-      <span className="flex min-w-0 items-center gap-2">
-        <Icon size={14} className="text-faint" />
-        <span className="label">{label}</span>
+    <CardButton className="grid min-h-32 content-between" onClick={onClick}>
+      <span className="flex min-w-0 items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-2">
+          <Icon size={14} className="text-faint" />
+          <span className="label">{label}</span>
+        </span>
+        {badge ? <Badge variant="muted">{badge}</Badge> : null}
       </span>
       <span>
-        <span className="block truncate text-sm font-medium">{value}</span>
-        <span className="mt-1 block text-xs text-muted">{detail}</span>
+        <span className={`block truncate text-sm font-medium ${valueToneClass}`}>{value}</span>
+        {detail ? <span className="mt-1 block truncate text-xs text-muted">{detail}</span> : null}
       </span>
-    </button>
+    </CardButton>
   );
 }

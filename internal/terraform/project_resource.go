@@ -3,9 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -67,26 +65,31 @@ func (r *projectResource) Schema(ctx context.Context, req resource.SchemaRequest
 			},
 			"host_id": resourceschema.StringAttribute{
 				Optional:      true,
+				Computed:      true,
 				Description:   "Optional host placement ID. Platform defaults apply when omitted.",
 				PlanModifiers: replace,
 			},
 			"domain": resourceschema.StringAttribute{
 				Optional:      true,
+				Computed:      true,
 				Description:   "Base domain for the project endpoint. Platform defaults apply when omitted.",
 				PlanModifiers: replace,
 			},
 			"stack_version": resourceschema.StringAttribute{
 				Optional:      true,
+				Computed:      true,
 				Description:   "Supabase stack version. Platform defaults apply when omitted.",
 				PlanModifiers: replace,
 			},
 			"profile": resourceschema.StringAttribute{
 				Optional:      true,
+				Computed:      true,
 				Description:   "Stack profile, such as essential, full, or orioledb. Platform defaults apply when omitted.",
 				PlanModifiers: replace,
 			},
 			"resource_tier": resourceschema.StringAttribute{
 				Optional:      true,
+				Computed:      true,
 				Description:   "Resource tier, such as small, medium, or large. Platform defaults apply when omitted.",
 				PlanModifiers: replace,
 			},
@@ -102,12 +105,8 @@ func (r *projectResource) Schema(ctx context.Context, req resource.SchemaRequest
 }
 
 func (r *projectResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -173,7 +172,7 @@ func (r *projectResource) Delete(ctx context.Context, req resource.DeleteRequest
 }
 
 func (r *projectResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("ref"), req, resp)
+	setOnePartImportState(ctx, req.ID, resp, "ref", "Use project ref, for example alpha.")
 }
 
 func setProjectState(model *projectResourceModel, project Project) {

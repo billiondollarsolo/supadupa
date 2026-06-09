@@ -2,9 +2,8 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strings"
+	"sync"
 	"time"
 
 	"supadupa2026/internal/control"
@@ -13,13 +12,17 @@ import (
 const (
 	TelemetrySchedulerTickEnv     = "SUPADUPA_TELEMETRY_SCHEDULER_TICK"
 	DefaultTelemetrySchedulerTick = 15 * time.Second
+	DefaultTelemetryConcurrency   = 4
 )
 
 type TelemetryScheduler struct {
-	store     control.Store
-	collector control.TelemetryCollector
-	logger    *slog.Logger
-	tick      time.Duration
+	store          control.Store
+	collector      control.TelemetryCollector
+	nodeCollector  control.NodeTelemetryCollector
+	logger         *slog.Logger
+	runner         *PeriodicRunner
+	tick           time.Duration
+	maxConcurrency int
 }
 
 func NewTelemetryScheduler(store control.Store, collector control.TelemetryCollector, logger *slog.Logger) *TelemetryScheduler {
@@ -27,29 +30,17 @@ func NewTelemetryScheduler(store control.Store, collector control.TelemetryColle
 		logger = slog.Default()
 	}
 	return &TelemetryScheduler{
-		store:     store,
-		collector: collector,
-		logger:    logger,
-		tick:      DefaultTelemetrySchedulerTick,
+		store:          store,
+		collector:      collector,
+		logger:         logger,
+		runner:         NewPeriodicRunner("telemetry", logger),
+		tick:           DefaultTelemetrySchedulerTick,
+		maxConcurrency: DefaultTelemetryConcurrency,
 	}
 }
 
 func TelemetrySchedulerTickFromEnv(getenv func(string) string) (time.Duration, error) {
-	if getenv == nil {
-		return DefaultTelemetrySchedulerTick, nil
-	}
-	raw := strings.TrimSpace(getenv(TelemetrySchedulerTickEnv))
-	if raw == "" {
-		return DefaultTelemetrySchedulerTick, nil
-	}
-	tick, err := time.ParseDuration(raw)
-	if err != nil {
-		return DefaultTelemetrySchedulerTick, fmt.Errorf("%s must be a Go duration such as 15s or 1m: %w", TelemetrySchedulerTickEnv, err)
-	}
-	if tick <= 0 {
-		return DefaultTelemetrySchedulerTick, fmt.Errorf("%s must be positive", TelemetrySchedulerTickEnv)
-	}
-	return tick, nil
+	return durationFromEnv(getenv, TelemetrySchedulerTickEnv, DefaultTelemetrySchedulerTick, "15s or 1m")
 }
 
 func (s *TelemetryScheduler) WithTick(tick time.Duration) *TelemetryScheduler {
@@ -59,21 +50,33 @@ func (s *TelemetryScheduler) WithTick(tick time.Duration) *TelemetryScheduler {
 	return s
 }
 
-func (s *TelemetryScheduler) Run(ctx context.Context) {
-	ticker := time.NewTicker(s.tick)
-	defer ticker.Stop()
-	for {
-		s.runOnce(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+func (s *TelemetryScheduler) WithMaxConcurrency(maxConcurrency int) *TelemetryScheduler {
+	if maxConcurrency > 0 {
+		s.maxConcurrency = maxConcurrency
 	}
+	return s
+}
+
+func (s *TelemetryScheduler) WithNodeCollector(collector control.NodeTelemetryCollector) *TelemetryScheduler {
+	s.nodeCollector = collector
+	return s
+}
+
+func (s *TelemetryScheduler) Run(ctx context.Context) {
+	if s.runner == nil {
+		s.runner = NewPeriodicRunner("telemetry", s.logger)
+	}
+	s.runner.Run(ctx, s.tick, s.runOnce)
 }
 
 func (s *TelemetryScheduler) runOnce(ctx context.Context) {
-	if s.store == nil || s.collector == nil {
+	if s.store == nil {
+		return
+	}
+	if s.nodeCollector != nil {
+		s.collectLocalNode(ctx)
+	}
+	if s.collector == nil {
 		return
 	}
 	projects, err := s.store.ListProjects(ctx)
@@ -81,25 +84,92 @@ func (s *TelemetryScheduler) runOnce(ctx context.Context) {
 		s.logger.Warn("telemetry project list failed", "error", err)
 		return
 	}
-	collected := 0
+	eligible := make([]control.Project, 0, len(projects))
 	for _, project := range projects {
 		if !telemetryEligible(project.Status) {
 			continue
 		}
-		sample, err := s.collector.CollectProjectTelemetry(ctx, project.Ref)
-		if err != nil {
-			s.logger.Debug("project telemetry collection failed", "project_ref", project.Ref, "error", err)
-			continue
-		}
-		if _, err := s.store.RecordProjectTelemetry(ctx, project.Ref, sample); err != nil {
-			s.logger.Warn("project telemetry record failed", "project_ref", project.Ref, "error", err)
-			continue
-		}
-		collected++
+		eligible = append(eligible, project)
 	}
+	collected := s.collectEligibleProjects(ctx, eligible)
 	if collected > 0 {
 		s.logger.Debug("project telemetry collected", "count", collected)
 	}
+}
+
+func (s *TelemetryScheduler) collectLocalNode(ctx context.Context) {
+	hosts, err := s.store.ListHosts(ctx)
+	if err != nil {
+		s.logger.Warn("node telemetry host list failed", "error", err)
+		return
+	}
+	if len(hosts) == 0 {
+		return
+	}
+	host := hosts[0]
+	sample, err := s.nodeCollector.CollectNodeTelemetry(ctx, host)
+	if err != nil {
+		s.logger.Debug("node telemetry collection failed", "host_id", host.ID, "error", err)
+		return
+	}
+	if _, err := s.store.RecordNodeTelemetry(ctx, host.ID, sample); err != nil {
+		s.logger.Warn("node telemetry record failed", "host_id", host.ID, "error", err)
+	}
+}
+
+func (s *TelemetryScheduler) collectEligibleProjects(ctx context.Context, projects []control.Project) int {
+	if len(projects) == 0 {
+		return 0
+	}
+	workers := s.maxConcurrency
+	if workers <= 0 {
+		workers = DefaultTelemetryConcurrency
+	}
+	if workers > len(projects) {
+		workers = len(projects)
+	}
+	jobs := make(chan control.Project)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	collected := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for project := range jobs {
+				if s.collectProject(ctx, project) {
+					mu.Lock()
+					collected++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, project := range projects {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return collected
+		case jobs <- project:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return collected
+}
+
+func (s *TelemetryScheduler) collectProject(ctx context.Context, project control.Project) bool {
+	sample, err := s.collector.CollectProjectTelemetry(ctx, project.Ref)
+	if err != nil {
+		s.logger.Debug("project telemetry collection failed", "project_ref", project.Ref, "error", err)
+		return false
+	}
+	if _, err := s.store.RecordProjectTelemetry(ctx, project.Ref, sample); err != nil {
+		s.logger.Warn("project telemetry record failed", "project_ref", project.Ref, "error", err)
+		return false
+	}
+	return true
 }
 
 func telemetryEligible(status control.ProjectPhase) bool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,12 +12,15 @@ import (
 )
 
 type fakeTelemetryCollector struct {
+	mu      sync.Mutex
 	samples map[string]control.TelemetrySampleInput
 	refs    []string
 }
 
 func (f *fakeTelemetryCollector) CollectProjectTelemetry(ctx context.Context, ref string) (control.TelemetrySampleInput, error) {
+	f.mu.Lock()
 	f.refs = append(f.refs, ref)
+	f.mu.Unlock()
 	return f.samples[ref], nil
 }
 
@@ -109,4 +113,99 @@ func TestTelemetrySchedulerRecordsEligibleProjectSamples(t *testing.T) {
 	if pausedMetrics.Observed != nil {
 		t.Fatalf("paused project should not receive telemetry, got %#v", pausedMetrics.Observed)
 	}
+}
+
+func TestTelemetrySchedulerCollectsEligibleProjectsConcurrently(t *testing.T) {
+	ctx := context.Background()
+	store := control.NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := []string{"alpha-one", "alpha-two", "alpha-three", "alpha-four"}
+	for _, ref := range refs {
+		project, err := store.CreateProject(ctx, control.CreateProjectRequest{OrgID: org.ID, Ref: ref, Name: ref})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.UpdateProjectStatus(ctx, project.Ref, control.ProjectHealthy, "ready"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	collector := newBlockingTelemetryCollector(len(refs))
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	scheduler := NewTelemetryScheduler(store, collector, logger).WithMaxConcurrency(len(refs))
+
+	done := make(chan struct{})
+	go func() {
+		scheduler.runOnce(ctx)
+		close(done)
+	}()
+
+	for i := 0; i < len(refs); i++ {
+		select {
+		case <-collector.started:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for concurrent collector %d to start; max active=%d", i+1, collector.MaxActive())
+		}
+	}
+	if maxActive := collector.MaxActive(); maxActive < 2 {
+		t.Fatalf("expected telemetry collection to overlap, max active collectors=%d", maxActive)
+	}
+	close(collector.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for telemetry pass to finish")
+	}
+	for _, ref := range refs {
+		metrics, err := store.GetProjectMetrics(ctx, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if metrics.Observed == nil || metrics.Observed.Source != "blocking-test" {
+			t.Fatalf("expected observed telemetry for %s, got %#v", ref, metrics.Observed)
+		}
+	}
+}
+
+type blockingTelemetryCollector struct {
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	active  int
+	max     int
+}
+
+func newBlockingTelemetryCollector(expected int) *blockingTelemetryCollector {
+	return &blockingTelemetryCollector{
+		started: make(chan struct{}, expected),
+		release: make(chan struct{}),
+	}
+}
+
+func (c *blockingTelemetryCollector) CollectProjectTelemetry(ctx context.Context, ref string) (control.TelemetrySampleInput, error) {
+	c.mu.Lock()
+	c.active++
+	if c.active > c.max {
+		c.max = c.active
+	}
+	c.mu.Unlock()
+	c.started <- struct{}{}
+	select {
+	case <-ctx.Done():
+		return control.TelemetrySampleInput{}, ctx.Err()
+	case <-c.release:
+	}
+	c.mu.Lock()
+	c.active--
+	c.mu.Unlock()
+	return control.TelemetrySampleInput{Source: "blocking-test", SampledAt: time.Now().UTC()}, nil
+}
+
+func (c *blockingTelemetryCollector) MaxActive() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.max
 }

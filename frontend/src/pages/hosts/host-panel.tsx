@@ -1,24 +1,42 @@
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import type { ColumnDef } from "@tanstack/react-table";
 import { ArrowLeft, Plus, Save, Trash2 } from "lucide-react";
 import { createHost, deleteHost } from "../../api";
+import { AppPanel } from "../../components/app/app-panel";
 import { DataTable } from "../../components/data-table";
+import { Modal } from "../../components/modal";
+import { Button } from "../../components/ui/button";
+import { Field } from "../../components/ui/field";
+import { Input } from "../../components/ui/input";
+import { StatusPill } from "../../components/ui/status-pill";
 import { formatBytes, formatDateTime } from "../../lib/format";
-import type { Host, HostCapacity } from "../../types";
+import { type Tone } from "../../lib/status";
+import type { Host, HostCapacity, NodeTelemetrySample } from "../../types";
 
 type HostPanelProps = {
   hosts: Host[];
   item?: string;
   loading: boolean;
+  nodeObserved?: NodeTelemetrySample[];
+  provisioner?: string;
   scope?: "hosts" | "settings";
 };
 
-export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelProps) {
+export function HostPanel({ hosts, item, loading, nodeObserved = [], provisioner, scope = "hosts" }: HostPanelProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const isCompose = provisioner === "compose";
+  const [pendingDelete, setPendingDelete] = useState<Host | null>(null);
+  const observedByHost = useMemo(() => {
+    const map = new Map<string, NodeTelemetrySample>();
+    for (const sample of nodeObserved) {
+      map.set(sample.host_id, sample);
+    }
+    return map;
+  }, [nodeObserved]);
   const [form, setForm] = useState({
     name: "local",
     address: "localhost",
@@ -26,7 +44,6 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
     cpu: 8,
     ram_mb: 32768,
     disk_gb: 500,
-    disk_iops: 48000,
   });
   const mutation = useMutation({
     mutationFn: createHost,
@@ -40,6 +57,7 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
   const deleteMutation = useMutation({
     mutationFn: deleteHost,
     onSuccess: () => {
+      setPendingDelete(null);
       void queryClient.invalidateQueries({ queryKey: ["hosts"] });
       void queryClient.invalidateQueries({ queryKey: ["fleet-metrics"] });
       void queryClient.invalidateQueries({ queryKey: ["audit-events"] });
@@ -52,8 +70,7 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
     form.projects >= 0 &&
     form.cpu >= 0 &&
     form.ram_mb >= 0 &&
-    form.disk_gb >= 0 &&
-    form.disk_iops >= 0;
+    form.disk_gb >= 0;
   const hostColumns = useMemo<ColumnDef<Host>[]>(
     () => [
       {
@@ -71,32 +88,37 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
       {
         header: "Projects",
         id: "projects",
-        size: 110,
-        cell: ({ row }) => capacityValue(row.original.used.projects, row.original.capacity.projects),
+        size: 120,
+        cell: ({ row }) => <CapacityCell used={row.original.used.projects} capacity={row.original.capacity.projects} />,
       },
       {
-        header: "CPU",
+        header: "CPU (reserved · observed)",
         id: "cpu",
-        size: 110,
-        cell: ({ row }) => capacityValue(row.original.used.cpu, row.original.capacity.cpu),
+        size: 180,
+        cell: ({ row }) => {
+          const observed = observedByHost.get(row.original.id);
+          return <CapacityCell used={row.original.used.cpu} capacity={row.original.capacity.cpu} observed={observed ? `${observed.cpu_percent.toFixed(0)}% node CPU` : undefined} />;
+        },
       },
       {
-        header: "RAM",
+        header: "RAM (reserved · observed)",
         id: "ram",
-        size: 150,
-        cell: ({ row }) => byteCapacity(row.original.used.ram_mb, row.original.capacity.ram_mb),
+        size: 200,
+        cell: ({ row }) => {
+          const observed = observedByHost.get(row.original.id);
+          const observedLabel = observed && observed.memory_total_bytes > 0 ? `${formatBytes(observed.memory_used_bytes)} node used` : undefined;
+          return <CapacityCell used={formatBytes(row.original.used.ram_mb * 1024 * 1024)} usedRatio={ratio(row.original.used.ram_mb, row.original.capacity.ram_mb)} capacity={row.original.capacity.ram_mb} capacityLabel={row.original.capacity.ram_mb ? formatBytes(row.original.capacity.ram_mb * 1024 * 1024) : "-"} observed={observedLabel} />;
+        },
       },
       {
-        header: "Disk",
+        header: "Disk (reserved · observed)",
         id: "disk",
-        size: 140,
-        cell: ({ row }) => `${row.original.used.disk_gb}/${row.original.capacity.disk_gb || "-"} GB`,
-      },
-      {
-        header: "IOPS",
-        id: "iops",
-        size: 130,
-        cell: ({ row }) => capacityValue(row.original.used.disk_iops, row.original.capacity.disk_iops),
+        size: 190,
+        cell: ({ row }) => {
+          const observed = observedByHost.get(row.original.id);
+          const observedLabel = observed && observed.disk_total_bytes > 0 ? `${formatBytes(observed.disk_used_bytes)} node used` : undefined;
+          return <CapacityCell used={`${row.original.used.disk_gb} GB`} usedRatio={ratio(row.original.used.disk_gb, row.original.capacity.disk_gb)} capacity={row.original.capacity.disk_gb} capacityLabel={row.original.capacity.disk_gb ? `${row.original.capacity.disk_gb} GB` : "-"} observed={observedLabel} />;
+        },
       },
       {
         header: "Created",
@@ -109,13 +131,13 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
         id: "actions",
         size: 52,
         cell: ({ row }) => (
-          <button className="icon-button" disabled={deleteMutation.isPending} onClick={() => confirmDelete(row.original)} title="Delete host" type="button">
+          <Button variant="ghost" size="icon" disabled={deleteMutation.isPending} onClick={() => setPendingDelete(row.original)} title="Delete host" type="button">
             <Trash2 size={14} />
-          </button>
+          </Button>
         ),
       },
     ],
-    [deleteMutation.isPending],
+    [deleteMutation.isPending, observedByHost],
   );
 
   function submit(event: FormEvent) {
@@ -128,7 +150,6 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
         cpu: form.cpu,
         ram_mb: form.ram_mb,
         disk_gb: form.disk_gb,
-        disk_iops: form.disk_iops,
       },
     });
   }
@@ -149,48 +170,51 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
     void navigate({ to: "/hosts" });
   }
 
-  function confirmDelete(host: Host) {
-    const confirmation = window.prompt(`Delete host ${host.name}? Type ${host.name} to continue.`);
-    if (confirmation !== host.name) return;
-    deleteMutation.mutate(host.id);
-  }
-
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Hosts</p>
-          <h2>{creating ? "Register host" : "Fleet capacity"}</h2>
-          <p className="mt-1 text-sm text-muted">{creating ? "Add an operator-managed capacity source for future project placement." : "Runtime capacity available to project deployments."}</p>
-        </div>
-        {creating ? (
-          <button className="icon-button" onClick={closeCreate} title="Back to hosts" type="button">
+    <AppPanel
+      actions={
+        creating ? (
+          <Button variant="ghost" size="icon" onClick={closeCreate} title="Back to hosts" type="button">
             <ArrowLeft size={14} />
-          </button>
-        ) : (
-          <button className="icon-button" onClick={openCreate} title="Register host" type="button">
+          </Button>
+        ) : isCompose && hosts.length > 0 ? null : (
+          <Button variant="ghost" size="icon" onClick={openCreate} title="Register host" type="button">
             <Plus size={14} />
-          </button>
-        )}
-      </div>
-
+          </Button>
+        )
+      }
+      description={creating ? (isCompose ? "Compose deploys to one local Docker node. Capacity is the budget projects schedule against — not a second machine." : "Add an operator-managed capacity source for future project placement.") : isCompose ? "Single-node Compose runtime. Reserved is committed to projects; observed is live node load." : "Reserved is committed to project placement; observed is live node telemetry where sampled."}
+      eyebrow="Hosts"
+      title={creating ? "Register host" : isCompose ? "Local Docker capacity" : "Fleet capacity"}
+    >
       {creating ? (
         <form className="mt-4 grid gap-3" onSubmit={submit}>
           <div className="usage-row">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">Host identity</p>
-              <p className="truncate text-xs text-muted">Use a reachable address for future remote provisioners; local installs can use localhost.</p>
+              <p className="truncate text-xs text-muted">{isCompose ? "Local Compose installs use the local Docker node." : "Use a reachable address for future remote provisioners; local installs can use localhost."}</p>
             </div>
-            <span className="pill">{hosts.length} registered</span>
+            <StatusPill tone="neutral" label={`${hosts.length} registered`} />
           </div>
-          <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
-            <HostInput label="Name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-            <HostInput label="Address" value={form.address} onChange={(value) => setForm({ ...form, address: value })} mono />
-            <HostNumberInput label="Project capacity" value={form.projects} onChange={(value) => setForm({ ...form, projects: value })} />
-            <HostNumberInput label="CPU" value={form.cpu} onChange={(value) => setForm({ ...form, cpu: value })} />
-            <HostNumberInput label="RAM MB" value={form.ram_mb} onChange={(value) => setForm({ ...form, ram_mb: value })} />
-            <HostNumberInput label="Disk GB" value={form.disk_gb} onChange={(value) => setForm({ ...form, disk_gb: value })} />
-            <HostNumberInput label="Disk IOPS" value={form.disk_iops} onChange={(value) => setForm({ ...form, disk_iops: value })} />
+          <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+            <Field label="Name" hint="A short identifier for this capacity source.">
+              <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+            </Field>
+            <Field label="Address" hint="Hostname or IP; localhost for local installs.">
+              <Input className="font-mono" value={form.address} onChange={(event) => setForm({ ...form, address: event.target.value })} />
+            </Field>
+            <Field label="Project capacity" hint="Max concurrent projects scheduled here.">
+              <Input className="font-mono" min={0} type="number" value={form.projects} onChange={(event) => setForm({ ...form, projects: Number(event.target.value) })} />
+            </Field>
+            <Field label="CPU" hint="vCPU budget available to projects.">
+              <Input className="font-mono" min={0} type="number" value={form.cpu} onChange={(event) => setForm({ ...form, cpu: Number(event.target.value) })} />
+            </Field>
+            <Field label="RAM" hint="Megabytes (MB). 32768 = 32 GB.">
+              <Input className="font-mono" min={0} type="number" value={form.ram_mb} onChange={(event) => setForm({ ...form, ram_mb: Number(event.target.value) })} />
+            </Field>
+            <Field label="Disk" hint="Gigabytes (GB) of reservable storage.">
+              <Input className="font-mono" min={0} type="number" value={form.disk_gb} onChange={(event) => setForm({ ...form, disk_gb: Number(event.target.value) })} />
+            </Field>
           </div>
           <div className="usage-row">
             <div className="min-w-0">
@@ -198,13 +222,13 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
               <p className="truncate text-xs text-muted">{capacitySummary(form)}</p>
             </div>
             <div className="flex items-center gap-2">
-              <button className="button secondary justify-center" onClick={closeCreate} type="button">
+              <Button variant="secondary" onClick={closeCreate} type="button">
                 Cancel
-              </button>
-              <button className="button secondary justify-center" disabled={!canCreate || mutation.isPending} type="submit">
+              </Button>
+              <Button disabled={!canCreate || mutation.isPending} type="submit">
                 <Save size={14} />
                 Register
-              </button>
+              </Button>
             </div>
           </div>
           {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
@@ -212,40 +236,84 @@ export function HostPanel({ hosts, item, loading, scope = "hosts" }: HostPanelPr
       ) : (
         <div className="mt-4 grid gap-2">
           {loading ? <p className="text-sm text-muted">Loading hosts...</p> : null}
-          <DataTable columns={hostColumns} data={hosts} emptyText="No hosts registered yet. Projects can still use the default local runtime." minWidth={1040} />
+          <DataTable columns={hostColumns} data={hosts} emptyText="No hosts registered yet. Projects can still use the default local runtime." minWidth={1140} rowClassName={(host) => rowToneClass(host)} />
           {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
         </div>
       )}
-    </section>
+
+      <Modal
+        description={pendingDelete ? `Remove ${pendingDelete.name} from the fleet.` : undefined}
+        onClose={() => !deleteMutation.isPending && setPendingDelete(null)}
+        open={Boolean(pendingDelete)}
+        title="Delete host"
+        footer={(
+          <>
+            <Button variant="secondary" disabled={deleteMutation.isPending} onClick={() => setPendingDelete(null)} type="button">Cancel</Button>
+            <Button variant="danger" disabled={deleteMutation.isPending} onClick={() => pendingDelete && deleteMutation.mutate(pendingDelete.id)} type="button">
+              {deleteMutation.isPending ? "Deleting..." : "Delete host"}
+            </Button>
+          </>
+        )}
+      >
+        {pendingDelete ? (
+          <div className="grid gap-2 text-sm text-muted">
+            <p>This unregisters <span className="font-medium text-text">{pendingDelete.name}</span> ({pendingDelete.address}) and frees its reserved capacity:</p>
+            <p className="font-mono text-xs">{capacitySummary(pendingDelete.capacity)}</p>
+            {pendingDelete.used.projects > 0 ? <p className="text-warning">{pendingDelete.used.projects} project slot{pendingDelete.used.projects === 1 ? "" : "s"} are currently reserved here — confirm placements are migrated first.</p> : null}
+          </div>
+        ) : null}
+      </Modal>
+    </AppPanel>
   );
 }
 
-function capacityValue(used: number, capacity: number) {
-  return `${used}/${capacity || "-"}`;
+function ratio(used: number, capacity: number) {
+  return capacity > 0 ? (used / capacity) * 100 : 0;
 }
 
-function byteCapacity(usedMb: number, capacityMb: number) {
-  return `${formatBytes(usedMb * 1024 * 1024)}/${capacityMb ? formatBytes(capacityMb * 1024 * 1024) : "-"}`;
+function utilizationTone(percent: number, capacity: number): Tone {
+  if (capacity <= 0) return "neutral";
+  if (percent >= 100) return "danger";
+  if (percent >= 85) return "warning";
+  return "success";
+}
+
+function toneText(tone: Tone) {
+  switch (tone) {
+    case "danger":
+      return "text-danger";
+    case "warning":
+      return "text-warning";
+    default:
+      return "text-muted";
+  }
+}
+
+function CapacityCell({ capacity, capacityLabel, observed, used, usedRatio }: { used: ReactNode; usedRatio?: number; capacity: number; capacityLabel?: ReactNode; observed?: ReactNode }) {
+  const percent = usedRatio ?? (typeof used === "number" ? ratio(used, capacity) : 0);
+  const tone = utilizationTone(percent, capacity);
+  return (
+    <div className="min-w-0">
+      <p className="cell-main truncate">{used}/{capacityLabel ?? (capacity || "-")}</p>
+      <p className={`cell-sub truncate ${toneText(tone)}`}>{capacity > 0 ? `${percent.toFixed(0)}%${percent >= 100 ? " · over" : percent >= 85 ? " · near limit" : ""}` : "no limit"}</p>
+      {observed ? <p className="cell-sub truncate text-faint">{observed}</p> : null}
+    </div>
+  );
+}
+
+function rowToneClass(host: Host) {
+  const percents = [
+    ratio(host.used.cpu, host.capacity.cpu),
+    ratio(host.used.ram_mb, host.capacity.ram_mb),
+    ratio(host.used.disk_gb, host.capacity.disk_gb),
+    ratio(host.used.projects, host.capacity.projects),
+  ];
+  const peak = Math.max(...percents);
+  if (peak >= 100) return "table-row-error";
+  if (peak >= 85) return "table-row-warning";
+  return "";
 }
 
 function capacitySummary(capacity: HostCapacity) {
-  return `${capacity.projects} projects · ${capacity.cpu} CPU · ${formatBytes(capacity.ram_mb * 1024 * 1024)} RAM · ${capacity.disk_gb} GB disk · ${capacity.disk_iops} IOPS`;
-}
-
-function HostInput({ label, mono = false, onChange, value }: { label: string; value: string; onChange: (value: string) => void; mono?: boolean }) {
-  return (
-    <label className="grid gap-1">
-      <span className="label">{label}</span>
-      <input className={`input ${mono ? "font-mono" : ""}`} value={value} onChange={(event) => onChange(event.target.value)} />
-    </label>
-  );
-}
-
-function HostNumberInput({ label, onChange, value }: { label: string; value: number; onChange: (value: number) => void }) {
-  return (
-    <label className="grid gap-1">
-      <span className="label">{label}</span>
-      <input className="input font-mono" min={0} type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} />
-    </label>
-  );
+  return `${capacity.projects} projects · ${capacity.cpu} CPU · ${formatBytes(capacity.ram_mb * 1024 * 1024)} RAM · ${capacity.disk_gb} GB disk`;
 }

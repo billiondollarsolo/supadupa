@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"supadupa2026/internal/env"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,6 +33,10 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if err := validateRuntimeSecretsFromEnv(os.Getenv); err != nil {
+		logger.Error("runtime secret validation failed", "error", err)
+		os.Exit(1)
+	}
 	metaDB, err := openMetaDB(context.Background(), logger)
 	if err != nil {
 		logger.Error("meta database setup failed", "error", err)
@@ -69,7 +75,7 @@ func main() {
 	if err := registerLocalHostCapacity(context.Background(), store, logger); err != nil {
 		logger.Warn("local host capacity registration skipped", "error", err)
 	}
-	if err := reconcileExistingProjectRoutes(context.Background(), store, logger); err != nil {
+	if err := reconcileExistingProjectRoutes(context.Background(), store, provisioner, logger); err != nil {
 		logger.Error("project route reconciliation failed", "error", err)
 		os.Exit(1)
 	}
@@ -112,6 +118,9 @@ func main() {
 		telemetryCollector = collector
 	}
 	telemetryScheduler := scheduler.NewTelemetryScheduler(store, telemetryCollector, logger)
+	if collector, ok := provisioner.(control.NodeTelemetryCollector); ok {
+		telemetryScheduler.WithNodeCollector(collector)
+	}
 	if tick, err := scheduler.TelemetrySchedulerTickFromEnv(os.Getenv); err != nil {
 		logger.Warn("invalid telemetry scheduler tick; using default", "env", scheduler.TelemetrySchedulerTickEnv, "default", scheduler.DefaultTelemetrySchedulerTick.String(), "error", err)
 	} else {
@@ -385,7 +394,7 @@ func registerLocalHostCapacity(ctx context.Context, store control.Store, logger 
 	}
 	capacity := localHostCapacity()
 	host, err := store.CreateHost(ctx, control.CreateHostRequest{
-		Name:     envOrDefault("SUPADUPA_LOCAL_HOST_NAME", "local-docker"),
+		Name:     env.OrDefault("SUPADUPA_LOCAL_HOST_NAME", "local-docker"),
 		Address:  localHostAddress(),
 		Capacity: capacity,
 	})
@@ -396,12 +405,24 @@ func registerLocalHostCapacity(ctx context.Context, store control.Store, logger 
 	return nil
 }
 
-func reconcileExistingProjectRoutes(ctx context.Context, store control.Store, logger *slog.Logger) error {
+// edgeNetworker is implemented by provisioners that isolate each project on its
+// own ingress network and need the shared edge-router (re)attached on startup —
+// e.g. after a platform restart recreates the router container.
+type edgeNetworker interface {
+	EnsureEdgeNetworking(ctx context.Context, ref string) error
+}
+
+func reconcileExistingProjectRoutes(ctx context.Context, store control.Store, provisioner control.Provisioner, logger *slog.Logger) error {
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
 		return err
 	}
+	edge, _ := provisioner.(edgeNetworker)
 	routing := control.NewRoutingService("")
+	platformDefaults, err := store.GetPlatformDefaults(ctx)
+	if err != nil {
+		return err
+	}
 	for _, project := range projects {
 		domains, err := store.ListProjectDomains(ctx, project.Ref)
 		if err != nil {
@@ -423,12 +444,34 @@ func reconcileExistingProjectRoutes(ctx context.Context, store control.Store, lo
 		if err != nil {
 			return err
 		}
-		tcpRoutes := control.TCPRoutesForProjectWithNetworkAndReplicas(project, networkConfig, replicas)
+		networkConfig = control.ApplyDatabaseExternalAccessGate(networkConfig, platformDefaults)
+		tcpRoutes := control.TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(project, networkConfig, replicas, nil)
 		routePath, err := routing.RenderProjectWithTCPRoutes(project, routes, tcpRoutes)
 		if err != nil {
 			return err
 		}
 		logger.Info("project routes reconciled", "project_ref", project.Ref, "routes", len(routes), "path", routePath)
+	}
+	// Re-create each project's isolated edge network and reconnect the
+	// edge-router. These are independent per-project docker calls, so fan them
+	// out with bounded concurrency; best-effort, so a transient docker error
+	// warns rather than crashing boot.
+	if edge != nil {
+		const maxConcurrent = 8
+		sem := make(chan struct{}, maxConcurrent)
+		var wg sync.WaitGroup
+		for _, project := range projects {
+			wg.Add(1)
+			go func(ref string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				if err := edge.EnsureEdgeNetworking(ctx, ref); err != nil {
+					logger.Warn("edge network reconcile failed", "project_ref", ref, "error", err)
+				}
+			}(project.Ref)
+		}
+		wg.Wait()
 	}
 	return nil
 }
@@ -444,11 +487,10 @@ func shouldRegisterLocalHost() bool {
 
 func localHostCapacity() control.HostCapacity {
 	return control.HostCapacity{
-		CPU:      envInt("SUPADUPA_LOCAL_HOST_CPU", runtime.NumCPU()),
-		RAMMB:    envInt("SUPADUPA_LOCAL_HOST_RAM_MB", detectRAMMB()),
-		DiskGB:   envInt("SUPADUPA_LOCAL_HOST_DISK_GB", detectDiskGB()),
-		DiskIOPS: envInt("SUPADUPA_LOCAL_HOST_DISK_IOPS", 48000),
-		Project:  envInt("SUPADUPA_LOCAL_HOST_PROJECTS", 20),
+		CPU:     envInt("SUPADUPA_LOCAL_HOST_CPU", runtime.NumCPU()),
+		RAMMB:   envInt("SUPADUPA_LOCAL_HOST_RAM_MB", detectRAMMB()),
+		DiskGB:  envInt("SUPADUPA_LOCAL_HOST_DISK_GB", detectDiskGB()),
+		Project: envInt("SUPADUPA_LOCAL_HOST_PROJECTS", 20),
 	}
 }
 
@@ -502,14 +544,6 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
-}
-
-func envOrDefault(key string, fallback string) string {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	return value
 }
 
 func bootstrapInitialAdmin(ctx context.Context, store control.Store, logger *slog.Logger) error {
@@ -716,30 +750,33 @@ func backupStorageTargetMatchesInput(existing control.BackupStorageTarget, input
 }
 
 func backupStorageTargetEnvPresent() bool {
-	keys := []string{
+	requiredOrIdentityKeys := []string{
 		"SUPADUPA_BACKUP_TARGET_NAME",
 		"SUPADUPA_BACKUP_TARGET_TYPE",
 		"SUPADUPA_BACKUP_TARGET_ENDPOINT",
-		"SUPADUPA_BACKUP_TARGET_REGION",
 		"SUPADUPA_BACKUP_TARGET_BUCKET",
-		"SUPADUPA_BACKUP_TARGET_PREFIX",
 		"SUPADUPA_BACKUP_TARGET_ACCESS_KEY_ID",
 		"SUPADUPA_BACKUP_TARGET_SECRET_ACCESS_KEY",
-		"SUPADUPA_BACKUP_TARGET_FORCE_PATH_STYLE",
 		"SUPADUPA_BACKUP_S3_NAME",
 		"SUPADUPA_BACKUP_S3_TYPE",
 		"SUPADUPA_BACKUP_S3_ENDPOINT",
-		"SUPADUPA_BACKUP_S3_REGION",
 		"SUPADUPA_BACKUP_S3_BUCKET",
-		"SUPADUPA_BACKUP_S3_PREFIX",
 		"SUPADUPA_BACKUP_S3_ACCESS_KEY_ID",
 		"SUPADUPA_BACKUP_S3_SECRET_ACCESS_KEY",
-		"SUPADUPA_BACKUP_S3_FORCE_PATH_STYLE",
 	}
-	for _, key := range keys {
+	for _, key := range requiredOrIdentityKeys {
 		if strings.TrimSpace(os.Getenv(key)) != "" {
 			return true
 		}
+	}
+	if region := envFirst("SUPADUPA_BACKUP_TARGET_REGION", "SUPADUPA_BACKUP_S3_REGION"); region != "" && !strings.EqualFold(region, "auto") {
+		return true
+	}
+	if prefix := envFirst("SUPADUPA_BACKUP_TARGET_PREFIX", "SUPADUPA_BACKUP_S3_PREFIX"); prefix != "" && prefix != "supadupa" {
+		return true
+	}
+	if forcePathStyle := envFirst("SUPADUPA_BACKUP_TARGET_FORCE_PATH_STYLE", "SUPADUPA_BACKUP_S3_FORCE_PATH_STYLE"); forcePathStyle != "" && envBoolAny(false, "SUPADUPA_BACKUP_TARGET_FORCE_PATH_STYLE", "SUPADUPA_BACKUP_S3_FORCE_PATH_STYLE") {
+		return true
 	}
 	return false
 }
@@ -784,6 +821,48 @@ func envBoolAny(fallback bool, keys ...string) bool {
 		return fallback
 	}
 	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func validateRuntimeSecretsFromEnv(getenv func(string) string) error {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if env.BoolValue(getenv("SUPADUPA_ALLOW_DEV_SECRETS")) {
+		return nil
+	}
+	if err := validateRuntimeSecret(control.PlatformSecretKeyEnv, getenv(control.PlatformSecretKeyEnv)); err != nil {
+		return err
+	}
+	if err := validateRuntimeSecret(control.AuthSecretEnv, getenv(control.AuthSecretEnv)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRuntimeSecret(name string, value string) error {
+	secret := strings.TrimSpace(value)
+	if secret == "" {
+		return fmt.Errorf("%s is required; run scripts/setup-compose.sh or set a strong secret", name)
+	}
+	if isKnownDevelopmentSecret(secret) {
+		return fmt.Errorf("%s uses a known development placeholder", name)
+	}
+	if len(secret) < 32 {
+		return fmt.Errorf("%s must be at least 32 characters", name)
+	}
+	return nil
+}
+
+func isKnownDevelopmentSecret(secret string) bool {
+	switch strings.TrimSpace(secret) {
+	case "local-dev-secret-change-me",
+		"dev-only-change-me",
+		"supadupa-local-development-secret-key",
+		"change-me-generate-with-openssl-rand-hex-32":
+		return true
+	default:
+		return false
+	}
 }
 
 func openMetaDB(ctx context.Context, logger *slog.Logger) (*sql.DB, error) {

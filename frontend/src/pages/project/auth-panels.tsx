@@ -11,9 +11,34 @@ import {
   updateProjectConfig,
   upsertProjectAccess,
 } from "../../api";
+import { AppPanel } from "../../components/app/app-panel";
+import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
+import { CardButton } from "../../components/ui/card-button";
+import { Field, SubSection } from "../../components/ui/field";
+import { MetricCard } from "../../components/app/metric-card";
+import { Input } from "../../components/ui/input";
+import { NativeSelect } from "../../components/ui/native-select";
+import { StatusPill } from "../../components/ui/status-pill";
+import { Switch } from "../../components/ui/switch";
+import { Textarea } from "../../components/ui/textarea";
 import { formatDateTime } from "../../lib/format";
 import { parseKeyValueLines, parseLines } from "../../lib/parse";
+import { configSchemas, type ConfigArea } from "../../lib/project-config";
+import { projectPath } from "../../lib/routes";
 import type { Project, ProjectAccessGrant, ProjectAuthClient, ProjectAuthHook, ProjectConfig, Team } from "../../types";
+
+// Human label for a config key, sourced from project-config so the UI never
+// shows raw snake_case keys like `oauth_google_enabled` or `phone_enabled`.
+const authConfigLabels: Record<string, string> = Object.fromEntries(
+  (["auth", "auth_providers", "smtp", "email_templates"] as ConfigArea[]).flatMap((area) =>
+    configSchemas[area].map((field) => [field.key, field.label]),
+  ),
+);
+
+function configLabel(key: string, fallback?: string): string {
+  return authConfigLabels[key] ?? fallback ?? key;
+}
 
 const authFeatureFlags = [
   { key: "email_enabled", label: "Email login", detail: "email" },
@@ -125,58 +150,73 @@ export function AuthConfigPanel({ project, config, loading }: { project?: Projec
   };
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Auth</p>
-          <h2>Runtime settings</h2>
-        </div>
-        <SlidersHorizontal size={15} className="text-faint" />
-      </div>
-      <form className="mt-4 grid gap-3" onSubmit={submit}>
-        <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
-          {authFeatureFlags.map((flag) => {
-            const enabled = (draft[flag.key] ?? (flag.key === "mfa_phone_enabled" ? "false" : "true")) === "true";
-            return (
-              <label className="config-toggle" key={flag.key}>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{flag.label}</p>
-                  <p className="truncate font-mono text-xs text-muted">{flag.detail}</p>
-                </div>
-                <input checked={enabled} onChange={(event) => setFlag(flag.key, event.target.checked)} type="checkbox" />
-              </label>
-            );
-          })}
-        </div>
-        <div className="grid grid-cols-[130px_160px_minmax(0,1fr)_minmax(0,1fr)] gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
-          <input className="input font-mono" inputMode="numeric" min="4" max="10" value={draft.mfa_phone_otp_length ?? "6"} onChange={(event) => setValue("mfa_phone_otp_length", event.target.value)} type="number" />
-          <input className="input font-mono" value={draft.mfa_phone_max_frequency ?? "10s"} onChange={(event) => setValue("mfa_phone_max_frequency", event.target.value)} />
-          <select className="input" value={draft.captcha_provider ?? ""} onChange={(event) => setValue("captcha_provider", event.target.value)}>
-            <option value="">Captcha off</option>
-            <option value="hcaptcha">hCaptcha</option>
-            <option value="turnstile">Turnstile</option>
-          </select>
-          <select className="input" value={draft.jwt_key_mode ?? "shared-secret"} onChange={(event) => setValue("jwt_key_mode", event.target.value)}>
-            <option value="shared-secret">Shared secret</option>
-            <option value="asymmetric">Asymmetric</option>
-          </select>
-        </div>
-        <div className="grid grid-cols-2 gap-2 max-lg:grid-cols-1">
-          <input className="input font-mono" placeholder="https://app.example.com" value={draft.site_url ?? ""} onChange={(event) => setValue("site_url", event.target.value)} />
-          <input className="input font-mono" placeholder="secret://projects/ref/captcha-secret" value={draft.captcha_secret_handle ?? ""} onChange={(event) => setValue("captcha_secret_handle", event.target.value)} />
-          <input className="input font-mono" placeholder="captcha site key" value={draft.captcha_site_key ?? ""} onChange={(event) => setValue("captcha_site_key", event.target.value)} />
-          <textarea className="input min-h-[52px] font-mono" placeholder="https://app.example.com/auth/callback" value={draft.additional_redirects ?? ""} onChange={(event) => setValue("additional_redirects", event.target.value)} />
-        </div>
+    <AppPanel eyebrow="Auth" title="Runtime settings" actions={<SlidersHorizontal size={15} className="text-faint" />}>
+      <form className="mt-4 grid gap-4" onSubmit={submit}>
+        <SubSection title="Sign-in methods" description="Email, passwordless, and multi-factor login.">
+          <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+            {authFeatureFlags.map((flag) => {
+              const enabled = (draft[flag.key] ?? (flag.key === "mfa_phone_enabled" ? "false" : "true")) === "true";
+              return (
+                <label className="config-toggle" key={flag.key}>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{flag.label}</p>
+                    <p className="truncate font-mono text-xs text-muted">{flag.detail}</p>
+                  </div>
+                  <input checked={enabled} onChange={(event) => setFlag(flag.key, event.target.checked)} type="checkbox" />
+                </label>
+              );
+            })}
+          </div>
+        </SubSection>
+        <SubSection title="Phone MFA, captcha & signing" description="Codes, bot protection, and JWT signing mode.">
+          <div className="grid grid-cols-[130px_160px_minmax(0,1fr)_minmax(0,1fr)] gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
+            <Field hint="4-10 digits" label={configLabel("mfa_phone_otp_length")}>
+              <Input className="font-mono" inputMode="numeric" min="4" max="10" value={draft.mfa_phone_otp_length ?? "6"} onChange={(event) => setValue("mfa_phone_otp_length", event.target.value)} type="number" />
+            </Field>
+            <Field hint="e.g. 10s, 1m" label={configLabel("mfa_phone_max_frequency")}>
+              <Input className="font-mono" value={draft.mfa_phone_max_frequency ?? "10s"} onChange={(event) => setValue("mfa_phone_max_frequency", event.target.value)} />
+            </Field>
+            <Field hint="Bot protection on auth endpoints" label={configLabel("captcha_provider")}>
+              <NativeSelect value={draft.captcha_provider ?? ""} onChange={(event) => setValue("captcha_provider", event.target.value)}>
+                <option value="">Captcha off</option>
+                <option value="hcaptcha">hCaptcha</option>
+                <option value="turnstile">Turnstile</option>
+              </NativeSelect>
+            </Field>
+            <Field hint="Shared secret or asymmetric signing" label={configLabel("jwt_key_mode")}>
+              <NativeSelect value={draft.jwt_key_mode ?? "shared-secret"} onChange={(event) => setValue("jwt_key_mode", event.target.value)}>
+                <option value="shared-secret">Shared secret</option>
+                <option value="asymmetric">Asymmetric</option>
+              </NativeSelect>
+            </Field>
+          </div>
+        </SubSection>
+        <SubSection title="Site URLs & captcha keys" description="Redirect targets and captcha credentials.">
+          <div className="grid grid-cols-2 gap-2 max-lg:grid-cols-1">
+            <Field hint="Base URL for redirects and email links" label={configLabel("site_url")}>
+              <Input className="font-mono" placeholder="https://app.example.com" value={draft.site_url ?? ""} onChange={(event) => setValue("site_url", event.target.value)} />
+            </Field>
+            <Field hint="secret:// handle, not the raw secret" label={configLabel("captcha_secret_handle")}>
+              <Input className="font-mono" placeholder="secret://projects/ref/captcha-secret" value={draft.captcha_secret_handle ?? ""} onChange={(event) => setValue("captcha_secret_handle", event.target.value)} />
+            </Field>
+            <Field hint="Public captcha site key" label={configLabel("captcha_site_key")}>
+              <Input className="font-mono" placeholder="captcha site key" value={draft.captcha_site_key ?? ""} onChange={(event) => setValue("captcha_site_key", event.target.value)} />
+            </Field>
+            <Field hint="One redirect URL per line" label={configLabel("additional_redirects")}>
+              <Textarea className="min-h-[52px] font-mono" placeholder="https://app.example.com/auth/callback" value={draft.additional_redirects ?? ""} onChange={(event) => setValue("additional_redirects", event.target.value)} />
+            </Field>
+          </div>
+        </SubSection>
         <div className="usage-row">
           <p className="text-xs text-muted">{loading ? "Loading auth settings..." : config?.updated_at ? `Updated ${formatDateTime(config.updated_at)}` : "Auth settings not saved yet."}</p>
-          <button className="button secondary" disabled={!project || mutation.isPending} type="submit">
+          <Button variant="secondary" disabled={!project || mutation.isPending} type="submit">
             <Save size={14} />
             Save auth
-          </button>
+          </Button>
         </div>
         {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
       </form>
-    </section>
+    </AppPanel>
   );
 }
 
@@ -274,22 +314,15 @@ export function AuthEmailPanel({
   const setSMTPValue = (key: string, value: string) => setSMTPDraft((current) => ({ ...current, [key]: value }));
   const openEmailArea = (area: EmailAreaId) => {
     if (!project) return;
-    void navigate({ to: `/projects/${project.ref}/auth/email/${area}` });
+    void navigate({ to: projectPath(project.ref, "auth", "email", area) });
   };
   const closeEmailArea = () => {
     if (!project) return;
-    void navigate({ to: `/projects/${project.ref}/auth/email` });
+    void navigate({ to: projectPath(project.ref, "auth", "email") });
   };
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Auth</p>
-          <h2>Email delivery</h2>
-        </div>
-        <Mail size={15} className="text-faint" />
-      </div>
+    <AppPanel eyebrow="Auth" title="Email delivery" actions={<Mail size={15} className="text-faint" />}>
       {!activeArea ? (
         <div className="mt-4 grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
           <EmailAreaCard detail={smtpDraft.enabled === "true" ? `${smtpDraft.host || "host pending"}:${smtpDraft.port || "587"}` : "Default GoTrue mailer"} label="SMTP" status={smtpDraft.enabled === "true" ? "custom" : "default"} onClick={() => openEmailArea("smtp")} />
@@ -312,30 +345,44 @@ export function AuthEmailPanel({
             <label className="config-toggle">
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">Custom SMTP</p>
-                <p className="truncate font-mono text-xs text-muted">gotrue mailer</p>
+                <p className="truncate text-xs text-muted">Override the built-in GoTrue mailer.</p>
               </div>
               <input checked={(smtpDraft.enabled ?? "false") === "true"} onChange={(event) => setSMTPValue("enabled", event.target.checked ? "true" : "false")} type="checkbox" />
             </label>
-            <input className="input font-mono" placeholder="smtp.example.com" value={smtpDraft.host ?? ""} onChange={(event) => setSMTPValue("host", event.target.value)} />
-            <input className="input font-mono" inputMode="numeric" value={smtpDraft.port ?? "587"} onChange={(event) => setSMTPValue("port", event.target.value)} />
-            <select className="input" value={smtpDraft.tls_mode ?? "starttls"} onChange={(event) => setSMTPValue("tls_mode", event.target.value)}>
-              <option value="starttls">STARTTLS</option>
-              <option value="implicit">Implicit TLS</option>
-              <option value="none">No TLS</option>
-            </select>
+            <Field label={configLabel("host")}>
+              <Input className="font-mono" placeholder="smtp.example.com" value={smtpDraft.host ?? ""} onChange={(event) => setSMTPValue("host", event.target.value)} />
+            </Field>
+            <Field hint="465 implicit, 587 STARTTLS" label={configLabel("port")}>
+              <Input className="font-mono" inputMode="numeric" value={smtpDraft.port ?? "587"} onChange={(event) => setSMTPValue("port", event.target.value)} />
+            </Field>
+            <Field label={configLabel("tls_mode")}>
+              <NativeSelect value={smtpDraft.tls_mode ?? "starttls"} onChange={(event) => setSMTPValue("tls_mode", event.target.value)}>
+                <option value="starttls">STARTTLS</option>
+                <option value="implicit">Implicit TLS</option>
+                <option value="none">No TLS</option>
+              </NativeSelect>
+            </Field>
           </div>
           <div className="grid grid-cols-2 gap-2 max-lg:grid-cols-1">
-            <input className="input" placeholder="Supadupa Auth" value={smtpDraft.sender_name ?? ""} onChange={(event) => setSMTPValue("sender_name", event.target.value)} />
-            <input className="input font-mono" placeholder="auth@example.com" value={smtpDraft.sender_email ?? ""} onChange={(event) => setSMTPValue("sender_email", event.target.value)} />
-            <input className="input font-mono" placeholder="smtp username" value={smtpDraft.username ?? ""} onChange={(event) => setSMTPValue("username", event.target.value)} />
-            <input className="input font-mono" placeholder="secret://projects/ref/smtp-password" value={smtpDraft.password_handle ?? ""} onChange={(event) => setSMTPValue("password_handle", event.target.value)} />
+            <Field label={configLabel("sender_name")}>
+              <Input placeholder="Supadupa Auth" value={smtpDraft.sender_name ?? ""} onChange={(event) => setSMTPValue("sender_name", event.target.value)} />
+            </Field>
+            <Field label={configLabel("sender_email")}>
+              <Input className="font-mono" placeholder="auth@example.com" value={smtpDraft.sender_email ?? ""} onChange={(event) => setSMTPValue("sender_email", event.target.value)} />
+            </Field>
+            <Field label={configLabel("username")}>
+              <Input className="font-mono" placeholder="smtp username" value={smtpDraft.username ?? ""} onChange={(event) => setSMTPValue("username", event.target.value)} />
+            </Field>
+            <Field hint="secret:// handle, not the raw password" label={configLabel("password_handle")}>
+              <Input className="font-mono" placeholder="secret://projects/ref/smtp-password" value={smtpDraft.password_handle ?? ""} onChange={(event) => setSMTPValue("password_handle", event.target.value)} />
+            </Field>
           </div>
           <div className="usage-row">
             <p className="text-xs text-muted">{loading ? "Loading mail settings..." : smtpConfig?.updated_at ? `SMTP updated ${formatDateTime(smtpConfig.updated_at)}` : "SMTP not saved yet."}</p>
-            <button className="button secondary" disabled={!project || smtpMutation.isPending} type="submit">
+            <Button variant="secondary" disabled={!project || smtpMutation.isPending} type="submit">
               <Save size={14} />
               Save SMTP
-            </button>
+            </Button>
           </div>
           {smtpMutation.error ? <p className="text-sm text-danger">{smtpMutation.error.message}</p> : null}
         </form>
@@ -345,25 +392,25 @@ export function AuthEmailPanel({
           <EmailTemplateDetail activeArea={activeArea} templatesDraft={templatesDraft} setTemplateValue={setTemplateValue} onBack={closeEmailArea} />
           <div className="usage-row">
             <p className="text-xs text-muted">{loading ? "Loading templates..." : templatesConfig?.updated_at ? `Templates updated ${formatDateTime(templatesConfig.updated_at)}` : "Templates not saved yet."}</p>
-            <button className="button secondary" disabled={!project || templatesMutation.isPending} type="submit">
+            <Button variant="secondary" disabled={!project || templatesMutation.isPending} type="submit">
               <Save size={14} />
               Save template
-            </button>
+            </Button>
           </div>
           {templatesMutation.error ? <p className="text-sm text-danger">{templatesMutation.error.message}</p> : null}
         </form>
       ) : null}
-    </section>
+    </AppPanel>
   );
 }
 
 function DetailHeader({ detail, title, onBack }: { title: string; detail: string; onBack: () => void }) {
   return (
     <div className="rounded-md border border-border bg-bg p-3">
-      <button className="segmented mb-3 h-8" onClick={onBack} type="button">
+      <Button className="mb-3" variant="secondary" size="sm" onClick={onBack} type="button">
         <ArrowLeft size={14} />
-        Back
-      </button>
+        Back to list
+      </Button>
       <p className="label">{title}</p>
       <p className="mt-1 text-sm text-muted">{detail}</p>
     </div>
@@ -372,13 +419,13 @@ function DetailHeader({ detail, title, onBack }: { title: string; detail: string
 
 function EmailAreaCard({ detail, label, status, onClick }: { label: string; detail: string; status: string; onClick: () => void }) {
   return (
-    <button className="rounded-md border border-border bg-bg p-3 text-left transition hover:border-border-strong hover:bg-surface-2" onClick={onClick} type="button">
+    <CardButton onClick={onClick}>
       <div className="mb-3 flex items-center justify-between gap-2">
         <p className="truncate text-sm font-medium">{label}</p>
-        <span className={`pill ${status === "configured" || status === "custom" ? "healthy" : ""}`}>{status}</span>
+        <StatusPill status={status} />
       </div>
       <p className="truncate text-xs text-muted">{detail}</p>
-    </button>
+    </CardButton>
   );
 }
 
@@ -397,7 +444,9 @@ function EmailTemplateDetail({
     return (
       <>
         <DetailHeader detail="The SMS OTP message is used by phone login and phone MFA flows." title="SMS OTP message" onBack={onBack} />
-        <textarea className="input min-h-[120px] font-mono" placeholder="Your code is {{ .Code }}" value={templatesDraft.sms_otp_message ?? ""} onChange={(event) => setTemplateValue("sms_otp_message", event.target.value)} />
+        <Field hint="Use {{ .Code }} for the generated code" label={configLabel("sms_otp_message")}>
+          <Textarea className="min-h-[120px] font-mono" placeholder="Your code is {{ .Code }}" value={templatesDraft.sms_otp_message ?? ""} onChange={(event) => setTemplateValue("sms_otp_message", event.target.value)} />
+        </Field>
       </>
     );
   }
@@ -406,8 +455,12 @@ function EmailTemplateDetail({
   return (
     <>
       <DetailHeader detail={`${template?.label ?? activeArea} email subject and body/template path.`} title={`${template?.label ?? activeArea} template`} onBack={onBack} />
-      <input className="input" placeholder={`${template?.label ?? activeArea} subject`} value={templatesDraft[`${activeArea}_subject`] ?? ""} onChange={(event) => setTemplateValue(`${activeArea}_subject`, event.target.value)} />
-      <textarea className="input min-h-[160px] font-mono" placeholder={`${template?.label ?? activeArea} template path or body`} value={templatesDraft[`${activeArea}_body`] ?? ""} onChange={(event) => setTemplateValue(`${activeArea}_body`, event.target.value)} />
+      <Field label={configLabel(`${activeArea}_subject`, `${template?.label ?? activeArea} subject`)}>
+        <Input placeholder={`${template?.label ?? activeArea} subject`} value={templatesDraft[`${activeArea}_subject`] ?? ""} onChange={(event) => setTemplateValue(`${activeArea}_subject`, event.target.value)} />
+      </Field>
+      <Field hint="An absolute template path or inline HTML; {{ .ConfirmationURL }}, {{ .Token }} are available" label={configLabel(`${activeArea}_body`, `${template?.label ?? activeArea} body`)}>
+        <Textarea className="min-h-[160px] font-mono" placeholder={`${template?.label ?? activeArea} template path or body`} value={templatesDraft[`${activeArea}_body`] ?? ""} onChange={(event) => setTemplateValue(`${activeArea}_body`, event.target.value)} />
+      </Field>
     </>
   );
 }
@@ -489,22 +542,15 @@ export function AuthProvidersPanel({ project, config, loading }: { project?: Pro
   const setFlag = (key: string, enabled: boolean) => setValue(key, enabled ? "true" : "false");
   const openProvider = (provider: AuthProviderId) => {
     if (!project) return;
-    void navigate({ to: `/projects/${project.ref}/auth/providers/${provider}` });
+    void navigate({ to: projectPath(project.ref, "auth", "providers", provider) });
   };
   const closeProvider = () => {
     if (!project) return;
-    void navigate({ to: `/projects/${project.ref}/auth/providers` });
+    void navigate({ to: projectPath(project.ref, "auth", "providers") });
   };
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Auth</p>
-          <h2>Providers</h2>
-        </div>
-        <KeyRound size={15} className="text-faint" />
-      </div>
+    <AppPanel eyebrow="Auth" title="Providers" actions={<KeyRound size={15} className="text-faint" />}>
       {!activeProvider ? (
         <div className="mt-4 grid grid-cols-4 gap-3 max-2xl:grid-cols-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
           {authProviderCards.map((provider) => (
@@ -523,15 +569,15 @@ export function AuthProvidersPanel({ project, config, loading }: { project?: Pro
           <ProviderDetailFields activeProvider={activeProvider} draft={draft} loading={loading} mutationPending={mutation.isPending} projectReady={Boolean(project)} setFlag={setFlag} setValue={setValue} onBack={closeProvider} />
           <div className="usage-row">
             <p className="text-xs text-muted">{loading ? "Loading providers..." : config?.updated_at ? `Updated ${formatDateTime(config.updated_at)}` : "Providers not saved yet."}</p>
-            <button className="button secondary" disabled={!project || mutation.isPending} type="submit">
+            <Button variant="secondary" disabled={!project || mutation.isPending} type="submit">
               <Save size={14} />
               Save provider
-            </button>
+            </Button>
           </div>
           {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
         </form>
       )}
-    </section>
+    </AppPanel>
   );
 }
 
@@ -549,28 +595,47 @@ function ProviderCard({
   onClick: () => void;
 }) {
   return (
-    <button className="rounded-md border border-border bg-bg p-3 text-left transition hover:border-border-strong hover:bg-surface-2" onClick={onClick} type="button">
+    <CardButton onClick={onClick}>
       <div className="mb-3 flex items-center justify-between gap-2">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{label}</p>
           <p className="truncate font-mono text-xs text-faint">{type}</p>
         </div>
-        <span className={`pill ${status === "enabled" || status === "configured" ? "healthy" : ""}`}>{status}</span>
+        <StatusPill status={status} />
       </div>
       <p className="text-xs text-muted">{detail}</p>
-    </button>
+    </CardButton>
   );
+}
+
+// The phone provider reuses three shared inputs that fan out to several SMS
+// vendor fields at once. Relabel them to match whichever vendor is selected so
+// the form reads correctly instead of "twilio sid / messagebird originator".
+function smsVendorLabels(provider: string): { secret: string; account: string; sender: string } {
+  switch (provider) {
+    case "twilio":
+    case "twilio_verify":
+      return { secret: "Twilio auth token handle", account: "Twilio account SID", sender: "Twilio message service SID" };
+    case "messagebird":
+      return { secret: "MessageBird access key handle", account: "MessageBird originator", sender: "Sender ID (optional)" };
+    case "textlocal":
+      return { secret: "TextLocal API key handle", account: "TextLocal sender", sender: "Sender ID (optional)" };
+    case "vonage":
+      return { secret: "Vonage API secret handle", account: "Account identifier (optional)", sender: "Vonage from" };
+    default:
+      return { secret: "SMS secret handle", account: "Sender / originator", sender: "Message service / from" };
+  }
 }
 
 function providerEnabledStatus(provider: AuthProviderId, draft: Record<string, string>) {
   if (provider === "google" || provider === "github" || provider === "azure") {
-    return draft[`oauth_${provider}_enabled`] === "true" ? "enabled" : "off";
+    return draft[`oauth_${provider}_enabled`] === "true" ? "enabled" : "disabled";
   }
-  if (provider === "oidc") return draft.oauth_oidc_enabled === "true" ? "enabled" : "off";
-  if (provider === "phone") return draft.phone_enabled === "true" ? "enabled" : "off";
-  if (provider === "saml") return draft.saml_enabled === "true" ? "enabled" : "off";
-  if (provider === "web3") return draft.web3_ethereum_enabled === "true" || draft.web3_solana_enabled === "true" ? "enabled" : "off";
-  return draft.third_party_jwt_issuer || draft.third_party_jwt_audience ? "configured" : "off";
+  if (provider === "oidc") return draft.oauth_oidc_enabled === "true" ? "enabled" : "disabled";
+  if (provider === "phone") return draft.phone_enabled === "true" ? "enabled" : "disabled";
+  if (provider === "saml") return draft.saml_enabled === "true" ? "enabled" : "disabled";
+  if (provider === "web3") return draft.web3_ethereum_enabled === "true" || draft.web3_solana_enabled === "true" ? "enabled" : "disabled";
+  return draft.third_party_jwt_issuer || draft.third_party_jwt_audience ? "configured" : "disabled";
 }
 
 function ProviderDetailFields({
@@ -597,13 +662,17 @@ function ProviderDetailFields({
         <DetailHeader detail={provider?.detail ?? "OAuth provider credentials."} title={`${provider?.label ?? activeProvider} OAuth`} onBack={onBack} />
         <label className="config-toggle">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium">Enable provider</p>
-            <p className="truncate font-mono text-xs text-muted">{prefix}_enabled</p>
+            <p className="truncate text-sm font-medium">{configLabel(`${prefix}_enabled`, `Enable ${provider?.label ?? activeProvider}`)}</p>
+            <p className="truncate text-xs text-muted">Allow sign-in with {provider?.label ?? activeProvider}.</p>
           </div>
           <input checked={(draft[`${prefix}_enabled`] ?? "false") === "true"} onChange={(event) => setFlag(`${prefix}_enabled`, event.target.checked)} type="checkbox" />
         </label>
-        <input className="input font-mono" placeholder={`${activeProvider} client id`} value={draft[`${prefix}_client_id`] ?? ""} onChange={(event) => setValue(`${prefix}_client_id`, event.target.value)} />
-        <input className="input font-mono" placeholder={`secret://projects/ref/${activeProvider}`} value={draft[`${prefix}_client_secret_handle`] ?? ""} onChange={(event) => setValue(`${prefix}_client_secret_handle`, event.target.value)} />
+        <Field hint="From the provider's OAuth app" label={configLabel(`${prefix}_client_id`)}>
+          <Input className="font-mono" placeholder={`${activeProvider} client id`} value={draft[`${prefix}_client_id`] ?? ""} onChange={(event) => setValue(`${prefix}_client_id`, event.target.value)} />
+        </Field>
+        <Field hint="secret:// handle, not the raw secret" label={configLabel(`${prefix}_client_secret_handle`)}>
+          <Input className="font-mono" placeholder={`secret://projects/ref/${activeProvider}`} value={draft[`${prefix}_client_secret_handle`] ?? ""} onChange={(event) => setValue(`${prefix}_client_secret_handle`, event.target.value)} />
+        </Field>
       </>
     );
   }
@@ -614,16 +683,24 @@ function ProviderDetailFields({
         <DetailHeader detail="Custom OIDC trusts a project-specific issuer and client configuration." title="Custom OIDC" onBack={onBack} />
         <label className="config-toggle">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium">Enable OIDC</p>
-            <p className="truncate font-mono text-xs text-muted">oauth_oidc_enabled</p>
+            <p className="truncate text-sm font-medium">{configLabel("oauth_oidc_enabled", "Enable OIDC")}</p>
+            <p className="truncate text-xs text-muted">Trust a custom OpenID Connect provider.</p>
           </div>
           <input checked={(draft.oauth_oidc_enabled ?? "false") === "true"} onChange={(event) => setFlag("oauth_oidc_enabled", event.target.checked)} type="checkbox" />
         </label>
         <div className="grid grid-cols-2 gap-2 max-lg:grid-cols-1">
-          <input className="input font-mono" placeholder="https://issuer.example.com" value={draft.oauth_oidc_issuer_url ?? ""} onChange={(event) => setValue("oauth_oidc_issuer_url", event.target.value)} />
-          <input className="input font-mono" placeholder="openid email profile" value={draft.oauth_oidc_scopes ?? "openid email profile"} onChange={(event) => setValue("oauth_oidc_scopes", event.target.value)} />
-          <input className="input font-mono" placeholder="oidc client id" value={draft.oauth_oidc_client_id ?? ""} onChange={(event) => setValue("oauth_oidc_client_id", event.target.value)} />
-          <input className="input font-mono" placeholder="secret://projects/ref/oidc" value={draft.oauth_oidc_client_secret_handle ?? ""} onChange={(event) => setValue("oauth_oidc_client_secret_handle", event.target.value)} />
+          <Field hint="OIDC discovery base URL" label={configLabel("oauth_oidc_issuer_url")}>
+            <Input className="font-mono" placeholder="https://issuer.example.com" value={draft.oauth_oidc_issuer_url ?? ""} onChange={(event) => setValue("oauth_oidc_issuer_url", event.target.value)} />
+          </Field>
+          <Field hint="Space-separated scopes" label={configLabel("oauth_oidc_scopes")}>
+            <Input className="font-mono" placeholder="openid email profile" value={draft.oauth_oidc_scopes ?? "openid email profile"} onChange={(event) => setValue("oauth_oidc_scopes", event.target.value)} />
+          </Field>
+          <Field label={configLabel("oauth_oidc_client_id")}>
+            <Input className="font-mono" placeholder="oidc client id" value={draft.oauth_oidc_client_id ?? ""} onChange={(event) => setValue("oauth_oidc_client_id", event.target.value)} />
+          </Field>
+          <Field hint="secret:// handle" label={configLabel("oauth_oidc_client_secret_handle")}>
+            <Input className="font-mono" placeholder="secret://projects/ref/oidc" value={draft.oauth_oidc_client_secret_handle ?? ""} onChange={(event) => setValue("oauth_oidc_client_secret_handle", event.target.value)} />
+          </Field>
         </div>
       </>
     );
@@ -631,48 +708,71 @@ function ProviderDetailFields({
 
   if (activeProvider === "phone") {
     const sharedSecret = draft.sms_twilio_auth_token_handle || draft.sms_messagebird_access_key_handle || draft.sms_textlocal_api_key_handle || draft.sms_vonage_api_secret_handle || "";
+    const vendor = smsVendorLabels(draft.sms_provider ?? "");
     return (
       <>
         <DetailHeader detail="Phone login and phone MFA use this project-specific SMS provider." title="Phone login" onBack={onBack} />
         <label className="config-toggle">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium">Enable phone login</p>
-            <p className="truncate font-mono text-xs text-muted">phone_enabled</p>
+            <p className="truncate text-sm font-medium">{configLabel("phone_enabled", "Enable phone login")}</p>
+            <p className="truncate text-xs text-muted">Send one-time codes over SMS for login and MFA.</p>
           </div>
           <input checked={(draft.phone_enabled ?? "false") === "true"} onChange={(event) => setFlag("phone_enabled", event.target.checked)} type="checkbox" />
         </label>
         <div className="grid grid-cols-2 gap-2 max-lg:grid-cols-1">
-          <select className="input" value={draft.sms_provider ?? ""} onChange={(event) => setValue("sms_provider", event.target.value)}>
-            <option value="">SMS off</option>
-            <option value="twilio">Twilio</option>
-            <option value="twilio_verify">Twilio Verify</option>
-            <option value="messagebird">MessageBird</option>
-            <option value="textlocal">TextLocal</option>
-            <option value="vonage">Vonage</option>
-          </select>
-          <input className="input font-mono" placeholder="secret://projects/ref/sms" value={sharedSecret} onChange={(event) => {
-            setValue("sms_twilio_auth_token_handle", event.target.value);
-            setValue("sms_messagebird_access_key_handle", event.target.value);
-            setValue("sms_textlocal_api_key_handle", event.target.value);
-            setValue("sms_vonage_api_secret_handle", event.target.value);
-          }} />
-          <input className="input font-mono" placeholder="twilio account sid / messagebird originator" value={draft.sms_twilio_account_sid || draft.sms_messagebird_originator || ""} onChange={(event) => {
-            setValue("sms_twilio_account_sid", event.target.value);
-            setValue("sms_messagebird_originator", event.target.value);
-            setValue("sms_textlocal_sender", event.target.value);
-          }} />
-          <input className="input font-mono" placeholder="message service / vonage from" value={draft.sms_twilio_message_service_sid || draft.sms_vonage_from || ""} onChange={(event) => {
-            setValue("sms_twilio_message_service_sid", event.target.value);
-            setValue("sms_vonage_from", event.target.value);
-          }} />
-          <input className="input font-mono" placeholder="vonage api key" value={draft.sms_vonage_api_key ?? ""} onChange={(event) => setValue("sms_vonage_api_key", event.target.value)} />
-          <input className="input font-mono" inputMode="numeric" min="1" value={draft.sms_otp_exp ?? "60"} onChange={(event) => setValue("sms_otp_exp", event.target.value)} type="number" />
-          <input className="input font-mono" inputMode="numeric" min="4" max="10" value={draft.sms_otp_length ?? "6"} onChange={(event) => setValue("sms_otp_length", event.target.value)} type="number" />
-          <input className="input font-mono" placeholder="60s" value={draft.sms_max_frequency ?? "60s"} onChange={(event) => setValue("sms_max_frequency", event.target.value)} />
-          <input className="input font-mono" placeholder="secret://projects/ref/sms-test-otp" value={draft.sms_test_otp_handle ?? ""} onChange={(event) => setValue("sms_test_otp_handle", event.target.value)} />
-          <input className="input font-mono" placeholder="2026-12-31T23:59:59Z" value={draft.sms_test_otp_valid_until ?? ""} onChange={(event) => setValue("sms_test_otp_valid_until", event.target.value)} />
+          <Field hint="One credential set applies to the selected vendor" label={configLabel("sms_provider")}>
+            <NativeSelect value={draft.sms_provider ?? ""} onChange={(event) => setValue("sms_provider", event.target.value)}>
+              <option value="">SMS off</option>
+              <option value="twilio">Twilio</option>
+              <option value="twilio_verify">Twilio Verify</option>
+              <option value="messagebird">MessageBird</option>
+              <option value="textlocal">TextLocal</option>
+              <option value="vonage">Vonage</option>
+            </NativeSelect>
+          </Field>
+          <Field hint="secret:// handle for the selected vendor's key/token" label={vendor.secret}>
+            <Input className="font-mono" placeholder="secret://projects/ref/sms" value={sharedSecret} onChange={(event) => {
+              setValue("sms_twilio_auth_token_handle", event.target.value);
+              setValue("sms_messagebird_access_key_handle", event.target.value);
+              setValue("sms_textlocal_api_key_handle", event.target.value);
+              setValue("sms_vonage_api_secret_handle", event.target.value);
+            }} />
+          </Field>
+          <Field label={vendor.account}>
+            <Input className="font-mono" placeholder="twilio account sid / messagebird originator" value={draft.sms_twilio_account_sid || draft.sms_messagebird_originator || ""} onChange={(event) => {
+              setValue("sms_twilio_account_sid", event.target.value);
+              setValue("sms_messagebird_originator", event.target.value);
+              setValue("sms_textlocal_sender", event.target.value);
+            }} />
+          </Field>
+          <Field label={vendor.sender}>
+            <Input className="font-mono" placeholder="message service / vonage from" value={draft.sms_twilio_message_service_sid || draft.sms_vonage_from || ""} onChange={(event) => {
+              setValue("sms_twilio_message_service_sid", event.target.value);
+              setValue("sms_vonage_from", event.target.value);
+            }} />
+          </Field>
+          <Field label={configLabel("sms_vonage_api_key", "Vonage API key ID")}>
+            <Input className="font-mono" placeholder="vonage api key" value={draft.sms_vonage_api_key ?? ""} onChange={(event) => setValue("sms_vonage_api_key", event.target.value)} />
+          </Field>
+          <Field hint="Seconds" label={configLabel("sms_otp_exp")}>
+            <Input className="font-mono" inputMode="numeric" min="1" value={draft.sms_otp_exp ?? "60"} onChange={(event) => setValue("sms_otp_exp", event.target.value)} type="number" />
+          </Field>
+          <Field hint="4-10 digits" label={configLabel("sms_otp_length")}>
+            <Input className="font-mono" inputMode="numeric" min="4" max="10" value={draft.sms_otp_length ?? "6"} onChange={(event) => setValue("sms_otp_length", event.target.value)} type="number" />
+          </Field>
+          <Field hint="e.g. 60s, 1m" label={configLabel("sms_max_frequency")}>
+            <Input className="font-mono" placeholder="60s" value={draft.sms_max_frequency ?? "60s"} onChange={(event) => setValue("sms_max_frequency", event.target.value)} />
+          </Field>
+          <Field hint="secret:// handle for a fixed test code" label={configLabel("sms_test_otp_handle")}>
+            <Input className="font-mono" placeholder="secret://projects/ref/sms-test-otp" value={draft.sms_test_otp_handle ?? ""} onChange={(event) => setValue("sms_test_otp_handle", event.target.value)} />
+          </Field>
+          <Field hint="ISO 8601 timestamp" label={configLabel("sms_test_otp_valid_until")}>
+            <Input className="font-mono" placeholder="2026-12-31T23:59:59Z" value={draft.sms_test_otp_valid_until ?? ""} onChange={(event) => setValue("sms_test_otp_valid_until", event.target.value)} />
+          </Field>
         </div>
-        <textarea className="input mt-2 min-h-[96px] font-mono" placeholder="Your code is {{ .Code }}" value={draft.sms_template ?? ""} onChange={(event) => setValue("sms_template", event.target.value)} />
+        <Field hint="Use {{ .Code }} for the generated code" label={configLabel("sms_template")}>
+          <Textarea className="min-h-[96px] font-mono" placeholder="Your code is {{ .Code }}" value={draft.sms_template ?? ""} onChange={(event) => setValue("sms_template", event.target.value)} />
+        </Field>
       </>
     );
   }
@@ -683,13 +783,17 @@ function ProviderDetailFields({
         <DetailHeader detail="SAML here is for project end-users. Platform SSO remains a separate global admin setting." title="SAML SSO" onBack={onBack} />
         <label className="config-toggle">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium">Enable SAML</p>
-            <p className="truncate font-mono text-xs text-muted">saml_enabled</p>
+            <p className="truncate text-sm font-medium">{configLabel("saml_enabled", "Enable SAML")}</p>
+            <p className="truncate text-xs text-muted">Allow project end-users to sign in through a SAML IdP.</p>
           </div>
           <input checked={(draft.saml_enabled ?? "false") === "true"} onChange={(event) => setFlag("saml_enabled", event.target.checked)} type="checkbox" />
         </label>
-        <input className="input font-mono" placeholder="https://idp.example.com/metadata" value={draft.saml_metadata_url ?? ""} onChange={(event) => setValue("saml_metadata_url", event.target.value)} />
-        <input className="input font-mono" placeholder="saml entity id" value={draft.saml_entity_id ?? ""} onChange={(event) => setValue("saml_entity_id", event.target.value)} />
+        <Field hint="IdP metadata document URL" label={configLabel("saml_metadata_url")}>
+          <Input className="font-mono" placeholder="https://idp.example.com/metadata" value={draft.saml_metadata_url ?? ""} onChange={(event) => setValue("saml_metadata_url", event.target.value)} />
+        </Field>
+        <Field label={configLabel("saml_entity_id")}>
+          <Input className="font-mono" placeholder="saml entity id" value={draft.saml_entity_id ?? ""} onChange={(event) => setValue("saml_entity_id", event.target.value)} />
+        </Field>
       </>
     );
   }
@@ -701,15 +805,15 @@ function ProviderDetailFields({
         <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
           <label className="config-toggle">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">Ethereum</p>
-              <p className="truncate font-mono text-xs text-muted">web3_ethereum_enabled</p>
+              <p className="truncate text-sm font-medium">{configLabel("web3_ethereum_enabled", "Ethereum wallets")}</p>
+              <p className="truncate text-xs text-muted">Sign-in with Ethereum (EIP-4361).</p>
             </div>
             <input checked={(draft.web3_ethereum_enabled ?? "false") === "true"} onChange={(event) => setFlag("web3_ethereum_enabled", event.target.checked)} type="checkbox" />
           </label>
           <label className="config-toggle">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">Solana</p>
-              <p className="truncate font-mono text-xs text-muted">web3_solana_enabled</p>
+              <p className="truncate text-sm font-medium">{configLabel("web3_solana_enabled", "Solana wallets")}</p>
+              <p className="truncate text-xs text-muted">Sign-in with a Solana wallet.</p>
             </div>
             <input checked={(draft.web3_solana_enabled ?? "false") === "true"} onChange={(event) => setFlag("web3_solana_enabled", event.target.checked)} type="checkbox" />
           </label>
@@ -721,8 +825,12 @@ function ProviderDetailFields({
   return (
     <>
       <DetailHeader detail="Trust an external JWT issuer for project end-user authentication." title="External JWTs" onBack={onBack} />
-      <input className="input font-mono" placeholder="external jwt issuer" value={draft.third_party_jwt_issuer ?? ""} onChange={(event) => setValue("third_party_jwt_issuer", event.target.value)} />
-      <input className="input font-mono" placeholder="external jwt audience" value={draft.third_party_jwt_audience ?? ""} onChange={(event) => setValue("third_party_jwt_audience", event.target.value)} />
+      <Field hint="iss claim of the trusted token" label={configLabel("third_party_jwt_issuer")}>
+        <Input className="font-mono" placeholder="external jwt issuer" value={draft.third_party_jwt_issuer ?? ""} onChange={(event) => setValue("third_party_jwt_issuer", event.target.value)} />
+      </Field>
+      <Field hint="aud claim required on accepted tokens" label={configLabel("third_party_jwt_audience")}>
+        <Input className="font-mono" placeholder="external jwt audience" value={draft.third_party_jwt_audience ?? ""} onChange={(event) => setValue("third_party_jwt_audience", event.target.value)} />
+      </Field>
     </>
   );
 }
@@ -767,42 +875,34 @@ export function ProjectAccessPanel({ project, teams, grants, loading }: { projec
   }
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Access</p>
-          <h2>Project-scoped grants</h2>
-          <p className="mt-1 text-xs text-faint">These roles apply only to this project. Platform admins remain separate and can manage every project.</p>
-        </div>
-        <Shield size={15} className="text-faint" />
-      </div>
+    <AppPanel eyebrow="Access" title="Project-scoped grants" actions={<Shield size={15} className="text-faint" />}>
       <form className="mt-4 grid grid-cols-[110px_minmax(0,1fr)_120px_auto] gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1" onSubmit={submit}>
-        <select className="input" value={subjectType} onChange={(event) => {
+        <NativeSelect value={subjectType} onChange={(event) => {
           setSubjectType(event.target.value);
           setSubjectId(event.target.value === "team" ? teams[0]?.slug ?? "" : "");
         }}>
           <option value="team">Team</option>
           <option value="user">User</option>
-        </select>
+        </NativeSelect>
         {subjectType === "team" ? (
-          <select className="input" value={subjectId} onChange={(event) => setSubjectId(event.target.value)}>
+          <NativeSelect value={subjectId} onChange={(event) => setSubjectId(event.target.value)}>
             {teams.length === 0 ? <option value="">No teams</option> : null}
             {teams.map((team) => (
               <option key={team.id} value={team.slug}>{team.name}</option>
             ))}
-          </select>
+          </NativeSelect>
         ) : (
-          <input className="input" placeholder="user@example.com" value={subjectId} onChange={(event) => setSubjectId(event.target.value)} type="email" />
+          <Input placeholder="user@example.com" value={subjectId} onChange={(event) => setSubjectId(event.target.value)} type="email" />
         )}
-        <select className="input" value={role} onChange={(event) => setRole(event.target.value)}>
+        <NativeSelect value={role} onChange={(event) => setRole(event.target.value)}>
           {projectAccessRoles.map((item) => (
             <option key={item.value} value={item.value}>{item.label}</option>
           ))}
-        </select>
-        <button className="button secondary justify-center max-xl:col-span-2 max-sm:col-span-1" disabled={!project || !subjectId.trim() || grantMutation.isPending} type="submit">
+        </NativeSelect>
+        <Button className="justify-self-start max-xl:col-span-2 max-sm:col-span-1" variant="secondary" disabled={!project || !subjectId.trim() || grantMutation.isPending} type="submit">
           <Plus size={14} />
           Grant
-        </button>
+        </Button>
       </form>
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading grants...</p> : null}
@@ -814,18 +914,18 @@ export function ProjectAccessPanel({ project, teams, grants, loading }: { projec
               <p className="truncate font-mono text-xs text-muted">{grant.subject_type} - {grant.subject_id}</p>
             </div>
             <div className="flex items-center gap-2">
-              <span className="pill healthy">{projectAccessRoleLabel(grant.role)}</span>
-              <span className="pill">project only</span>
-              <button className="icon-button" disabled={revokeMutation.isPending} onClick={() => revokeMutation.mutate(grant)} type="button">
+              <StatusPill tone="success" label={projectAccessRoleLabel(grant.role)} />
+              <Badge variant="muted">project only</Badge>
+              <Button variant="ghost" size="icon" disabled={revokeMutation.isPending} onClick={() => revokeMutation.mutate(grant)} type="button">
                 <X size={14} />
-              </button>
+              </Button>
             </div>
           </div>
         ))}
       </div>
       {grantMutation.error ? <p className="mt-3 text-sm text-danger">{grantMutation.error.message}</p> : null}
       {revokeMutation.error ? <p className="mt-3 text-sm text-danger">{revokeMutation.error.message}</p> : null}
-    </section>
+    </AppPanel>
   );
 }
 
@@ -836,52 +936,21 @@ export function AccessScopePanel({ project, teams, grants }: { project?: Project
   const adminGrants = grants.filter((grant) => grant.role === "admin").length;
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Access model</p>
-          <h2>Global and project roles are separate</h2>
-          <p className="mt-1 text-xs text-faint">Global admins manage the control plane. Project roles below only scope access to {project?.ref ?? "this project"}.</p>
-        </div>
-        <Shield size={15} className="text-faint" />
+    <AppPanel
+      eyebrow="Access model"
+      title="Project-scoped roles"
+      description={`Global admins manage the control plane. The grants below only scope access to ${project?.ref ?? "this project"}.`}
+      actions={<Shield size={15} className="text-faint" />}
+    >
+      <div className="mt-4 grid grid-cols-3 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1 xl:grid-cols-6">
+        <MetricCard label="Project grants" value={grants.length} tone={grants.length > 0 ? "success" : "default"} />
+        <MetricCard label="Teams available" value={teams.length} />
+        <MetricCard label="Team grants" value={teamGrants} />
+        <MetricCard label="User grants" value={userGrants} />
+        <MetricCard label="Project owners" value={ownerGrants} />
+        <MetricCard label="Project admins" value={adminGrants} />
       </div>
-      <div className="mt-4 grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
-        <AccessScopeCard title="Global admin" detail="Can see and operate every org and project." metric="control plane" tone="healthy" />
-        <AccessScopeCard title="Org members" detail="Org owner/admin/developer/viewer roles govern inherited org access." metric="org scope" />
-        <AccessScopeCard title="Teams" detail="Teams group org members before project grants are applied." metric={`${teams.length} teams`} />
-        <AccessScopeCard title="Project grants" detail="Explicit owner/admin/developer/viewer grants apply only here." metric={`${grants.length} grants`} tone={grants.length > 0 ? "healthy" : ""} />
-      </div>
-      <div className="mt-3 grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
-        <div className="metric-cell">
-          <p className="label">Team grants</p>
-          <p className="truncate text-sm font-medium">{teamGrants}</p>
-        </div>
-        <div className="metric-cell">
-          <p className="label">User grants</p>
-          <p className="truncate text-sm font-medium">{userGrants}</p>
-        </div>
-        <div className="metric-cell">
-          <p className="label">Project owners</p>
-          <p className="truncate text-sm font-medium">{ownerGrants}</p>
-        </div>
-        <div className="metric-cell">
-          <p className="label">Project admins</p>
-          <p className="truncate text-sm font-medium">{adminGrants}</p>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function AccessScopeCard({ title, detail, metric, tone = "" }: { title: string; detail: string; metric: string; tone?: string }) {
-  return (
-    <div className="rounded-md border border-border bg-bg p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <p className="truncate text-sm font-medium">{title}</p>
-        <span className={`pill ${tone}`}>{metric}</span>
-      </div>
-      <p className="text-xs text-muted">{detail}</p>
-    </div>
+    </AppPanel>
   );
 }
 
@@ -941,33 +1010,38 @@ export function AuthClientsPanel({ project, clients, loading }: { project?: Proj
   }
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Auth</p>
-          <h2>OAuth clients</h2>
-        </div>
-        <KeyRound size={15} className="text-faint" />
-      </div>
+    <AppPanel eyebrow="Auth" title="OAuth clients" actions={<KeyRound size={15} className="text-faint" />}>
       <form className="mt-4 grid gap-2" onSubmit={submit}>
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 max-lg:grid-cols-1">
-          <input className="input" placeholder="Dashboard App" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
-          <input className="input font-mono" placeholder="dashboard_app" value={form.client_id} onChange={(event) => setForm({ ...form, client_id: event.target.value })} />
-          <label className="segmented justify-start gap-2 px-3">
-            <input checked={form.confidential} onChange={(event) => setForm({ ...form, confidential: event.target.checked })} type="checkbox" />
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2 max-lg:grid-cols-1">
+          <Field label="Client name">
+            <Input placeholder="Dashboard App" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+          </Field>
+          <Field label="Client ID">
+            <Input className="font-mono" placeholder="dashboard_app" value={form.client_id} onChange={(event) => setForm({ ...form, client_id: event.target.value })} />
+          </Field>
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={form.confidential} onCheckedChange={(next) => setForm({ ...form, confidential: next })} aria-label="Confidential" />
             Confidential
           </label>
         </div>
-        <input className="input font-mono" placeholder="secret://projects/ref/auth/client" value={form.client_secret_handle} onChange={(event) => setForm({ ...form, client_secret_handle: event.target.value })} />
+        <Field hint="secret:// handle for confidential clients" label="Client secret handle">
+          <Input className="font-mono" placeholder="secret://projects/ref/auth/client" value={form.client_secret_handle} onChange={(event) => setForm({ ...form, client_secret_handle: event.target.value })} />
+        </Field>
         <div className="grid grid-cols-3 gap-2 max-lg:grid-cols-1">
-          <textarea className="input min-h-[64px] font-mono" value={form.redirect_uris} onChange={(event) => setForm({ ...form, redirect_uris: event.target.value })} />
-          <textarea className="input min-h-[64px] font-mono" value={form.grant_types} onChange={(event) => setForm({ ...form, grant_types: event.target.value })} />
-          <textarea className="input min-h-[64px] font-mono" value={form.scopes} onChange={(event) => setForm({ ...form, scopes: event.target.value })} />
+          <Field hint="One URL per line" label="Redirect URIs">
+            <Textarea className="min-h-[64px] font-mono" value={form.redirect_uris} onChange={(event) => setForm({ ...form, redirect_uris: event.target.value })} />
+          </Field>
+          <Field hint="One grant type per line" label="Grant types">
+            <Textarea className="min-h-[64px] font-mono" value={form.grant_types} onChange={(event) => setForm({ ...form, grant_types: event.target.value })} />
+          </Field>
+          <Field hint="One scope per line" label="Scopes">
+            <Textarea className="min-h-[64px] font-mono" value={form.scopes} onChange={(event) => setForm({ ...form, scopes: event.target.value })} />
+          </Field>
         </div>
-        <button className="button secondary justify-center" disabled={!project || createMutation.isPending || form.name.trim().length === 0} type="submit">
+        <Button className="justify-self-start" variant="secondary" disabled={!project || createMutation.isPending || form.name.trim().length === 0} type="submit">
           <Save size={14} />
           Register client
-        </button>
+        </Button>
       </form>
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading auth clients...</p> : null}
@@ -980,18 +1054,18 @@ export function AuthClientsPanel({ project, clients, loading }: { project?: Proj
               <p className="truncate font-mono text-xs text-faint">{client.grant_types.join(", ")} - {client.scopes.join(", ")}</p>
             </div>
             <div className="flex items-center gap-2">
-              <span className={`pill ${client.status === "registered" ? "healthy" : "provisioning"}`}>{client.status}</span>
-              <span className={`pill ${client.confidential ? "healthy" : "provisioning"}`}>{client.confidential ? "confidential" : "public"}</span>
-              <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, clientId: client.client_id })} type="button">
+              <StatusPill tone={client.status === "registered" ? "success" : "info"} label={client.status} />
+              <StatusPill tone={client.confidential ? "success" : "neutral"} label={client.confidential ? "confidential" : "public"} />
+              <Button variant="ghost" size="icon" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, clientId: client.client_id })} type="button">
                 <X size={14} />
-              </button>
+              </Button>
             </div>
           </div>
         ))}
         {createMutation.error ? <p className="text-sm text-danger">{createMutation.error.message}</p> : null}
         {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
       </div>
-    </section>
+    </AppPanel>
   );
 }
 
@@ -1054,41 +1128,48 @@ export function AuthHooksPanel({ project, hooks, loading }: { project?: Project;
   }
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Auth</p>
-          <h2>Auth Hooks</h2>
-        </div>
-        <SlidersHorizontal size={15} className="text-faint" />
-      </div>
+    <AppPanel eyebrow="Auth" title="Auth Hooks" actions={<SlidersHorizontal size={15} className="text-faint" />}>
       <form className="mt-4 grid gap-2" onSubmit={submit}>
-        <div className="grid grid-cols-[minmax(0,1fr)_auto_100px_100px] gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
-          <select className="input" value={form.hook_type} onChange={(event) => setForm({ ...form, hook_type: event.target.value })}>
-            <option value="custom_access_token">custom_access_token</option>
-            <option value="before_user_created">before_user_created</option>
-            <option value="send_sms">send_sms</option>
-            <option value="send_email">send_email</option>
-            <option value="mfa_verification_attempt">mfa_verification_attempt</option>
-            <option value="password_verification_attempt">password_verification_attempt</option>
-          </select>
-          <label className="segmented justify-start gap-2 px-3">
-            <input checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} type="checkbox" />
+        <div className="grid grid-cols-[minmax(0,1fr)_auto_100px_100px] items-end gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
+          <Field label="Hook type">
+            <NativeSelect value={form.hook_type} onChange={(event) => setForm({ ...form, hook_type: event.target.value })}>
+              <option value="custom_access_token">custom_access_token</option>
+              <option value="before_user_created">before_user_created</option>
+              <option value="send_sms">send_sms</option>
+              <option value="send_email">send_email</option>
+              <option value="mfa_verification_attempt">mfa_verification_attempt</option>
+              <option value="password_verification_attempt">password_verification_attempt</option>
+            </NativeSelect>
+          </Field>
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={form.enabled} onCheckedChange={(next) => setForm({ ...form, enabled: next })} aria-label="Enabled" />
             Enabled
           </label>
-          <input className="input" min={100} type="number" value={form.timeout_ms} onChange={(event) => setForm({ ...form, timeout_ms: Number(event.target.value) })} />
-          <input className="input" min={0} max={5} type="number" value={form.retry_attempts} onChange={(event) => setForm({ ...form, retry_attempts: Number(event.target.value) })} />
+          <Field hint="ms" label="Timeout">
+            <Input min={100} type="number" value={form.timeout_ms} onChange={(event) => setForm({ ...form, timeout_ms: Number(event.target.value) })} />
+          </Field>
+          <Field hint="0-5" label="Retries">
+            <Input min={0} max={5} type="number" value={form.retry_attempts} onChange={(event) => setForm({ ...form, retry_attempts: Number(event.target.value) })} />
+          </Field>
         </div>
         <div className="grid grid-cols-2 gap-2 max-lg:grid-cols-1">
-          <input className="input font-mono" placeholder="https://hooks.example.com/auth/token" value={form.target_uri} onChange={(event) => setForm({ ...form, target_uri: event.target.value })} />
-          <input className="input font-mono" placeholder="edge-function-name" value={form.edge_function} onChange={(event) => setForm({ ...form, edge_function: event.target.value })} />
+          <Field hint="HTTPS endpoint that receives the hook" label="Target URI">
+            <Input className="font-mono" placeholder="https://hooks.example.com/auth/token" value={form.target_uri} onChange={(event) => setForm({ ...form, target_uri: event.target.value })} />
+          </Field>
+          <Field hint="Edge function name (used instead of a target URI)" label="Edge function">
+            <Input className="font-mono" placeholder="edge-function-name" value={form.edge_function} onChange={(event) => setForm({ ...form, edge_function: event.target.value })} />
+          </Field>
         </div>
-        <input className="input font-mono" placeholder="secret://projects/ref/auth/hook" value={form.secret_handle} onChange={(event) => setForm({ ...form, secret_handle: event.target.value })} />
-        <textarea className="input min-h-[64px] font-mono" value={form.headers} onChange={(event) => setForm({ ...form, headers: event.target.value })} />
-        <button className="button secondary justify-center" disabled={!project || setMutation.isPending || form.hook_type.trim().length === 0} type="submit">
+        <Field hint="secret:// handle used to sign hook requests" label="Secret handle">
+          <Input className="font-mono" placeholder="secret://projects/ref/auth/hook" value={form.secret_handle} onChange={(event) => setForm({ ...form, secret_handle: event.target.value })} />
+        </Field>
+        <Field hint="One header per line as key=value; values may be secret:// handles" label="Request headers">
+          <Textarea className="min-h-[64px] font-mono" placeholder="authorization=secret://projects/ref/auth/hook-header" value={form.headers} onChange={(event) => setForm({ ...form, headers: event.target.value })} />
+        </Field>
+        <Button className="justify-self-start" variant="secondary" disabled={!project || setMutation.isPending || form.hook_type.trim().length === 0} type="submit">
           <Save size={14} />
           Save hook
-        </button>
+        </Button>
       </form>
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading auth hooks...</p> : null}
@@ -1101,17 +1182,17 @@ export function AuthHooksPanel({ project, hooks, loading }: { project?: Project;
               <p className="truncate font-mono text-xs text-faint">{hook.timeout_ms}ms - {hook.retry_attempts} retries - {Object.keys(hook.headers).join(", ") || "no headers"}</p>
             </div>
             <div className="flex items-center gap-2">
-              <span className={`pill ${hook.enabled ? "healthy" : "provisioning"}`}>{hook.enabled ? "enabled" : "disabled"}</span>
-              <span className={`pill ${hook.status === "configured" ? "healthy" : "provisioning"}`}>{hook.status}</span>
-              <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, hookType: hook.hook_type })} type="button">
+              <StatusPill tone={hook.enabled ? "success" : "neutral"} label={hook.enabled ? "enabled" : "disabled"} />
+              <StatusPill tone={hook.status === "configured" ? "success" : "info"} label={hook.status} />
+              <Button variant="ghost" size="icon" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, hookType: hook.hook_type })} type="button">
                 <X size={14} />
-              </button>
+              </Button>
             </div>
           </div>
         ))}
         {setMutation.error ? <p className="text-sm text-danger">{setMutation.error.message}</p> : null}
         {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
       </div>
-    </section>
+    </AppPanel>
   );
 }

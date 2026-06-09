@@ -1,0 +1,139 @@
+{{- if .Values.projectIsolation.enabled }}
+{{/*
+Namespace-per-project isolation: the operator creates and tears down runtime
+namespaces and applies NetworkPolicies / ResourceQuotas / LimitRanges /
+ServiceAccounts cluster-wide, so it needs a ClusterRole rather than a namespaced
+Role. Set projectIsolation.enabled=false to fall back to the namespaced Role.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "supadupa.fullname" . }}
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["platform.supadupa.dev"]
+    resources:
+      - projects
+      - projectconfigs
+      - projectauthhooks
+      - projectbranchclones
+      - projectreplicas
+      - retainedprojectresources
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["platform.supadupa.dev"]
+    resources:
+      - projects/status
+      - projectconfigs/status
+      - projectauthhooks/status
+      - projectbranchclones/status
+      - projectreplicas/status
+      - retainedprojectresources/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - persistentvolumeclaims
+      - secrets
+      - services
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  {{- if .Values.operator.leaderElection.enabled }}
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "supadupa.fullname" . }}
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "supadupa.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "supadupa.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- else }}
+{{/*
+Legacy single-namespace mode: project workloads share the runtime namespace, so a
+namespaced Role/RoleBinding is sufficient (backward compatible).
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "supadupa.fullname" . }}
+  namespace: {{ include "supadupa.runtimeNamespace" . | quote }}
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["platform.supadupa.dev"]
+    resources:
+      - projects
+      - projectconfigs
+      - projectauthhooks
+      - projectbranchclones
+      - projectreplicas
+      - retainedprojectresources
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["platform.supadupa.dev"]
+    resources:
+      - projects/status
+      - projectconfigs/status
+      - projectauthhooks/status
+      - projectbranchclones/status
+      - projectreplicas/status
+      - retainedprojectresources/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - persistentvolumeclaims
+      - secrets
+      - services
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "supadupa.fullname" . }}
+  namespace: {{ include "supadupa.runtimeNamespace" . | quote }}
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "supadupa.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: Role
+  name: {{ include "supadupa.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

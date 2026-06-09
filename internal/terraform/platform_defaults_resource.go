@@ -2,9 +2,7 @@ package terraform
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -147,12 +145,8 @@ func (r *platformDefaultsResource) Schema(ctx context.Context, req resource.Sche
 }
 
 func (r *platformDefaultsResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -211,7 +205,7 @@ func (r *platformDefaultsResource) Delete(ctx context.Context, req resource.Dele
 }
 
 func (r *platformDefaultsResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	setOnePartImportState(ctx, req.ID, resp, "id", "Use platform-defaults.")
 }
 
 func platformDefaultsInputFromModel(model platformDefaultsResourceModel) PlatformDefaultsInput {

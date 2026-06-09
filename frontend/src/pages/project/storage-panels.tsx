@@ -11,15 +11,27 @@ import {
   updateProjectConfig,
   updateProjectCDNPolicy,
 } from "../../api";
+import { AppPanel } from "../../components/app/app-panel";
 import { DataTable } from "../../components/data-table";
+import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
+import { CollapsibleCard } from "../../components/ui/collapsible-card";
+import { EmptyState } from "../../components/ui/empty-state";
+import { Field, SubSection } from "../../components/ui/field";
+import { Input } from "../../components/ui/input";
+import { NativeSelect } from "../../components/ui/native-select";
+import { StatusPill } from "../../components/ui/status-pill";
+import { Textarea } from "../../components/ui/textarea";
 import { formatBytes, formatDateTime, formatTime } from "../../lib/format";
 import { parseKeyValueLines, parseLines } from "../../lib/parse";
 import type { CDNInvalidation, Project, ProjectCDNPolicy, ProjectConfig, ProjectStorageBucket } from "../../types";
 
+const MIB = 1024 * 1024;
+
 const storageCapabilities = [
-  { key: "image_transform_enabled", label: "Image transforms", detail: "imgproxy" },
-  { key: "resumable_upload_enabled", label: "Resumable uploads", detail: "TUS" },
-  { key: "s3_compat_enabled", label: "S3 compatibility", detail: "S3 API" },
+  { key: "image_transform_enabled", label: "Image transforms", consequence: "Serve on-the-fly resized/optimized images via imgproxy." },
+  { key: "resumable_upload_enabled", label: "Resumable uploads", consequence: "Accept large uploads that survive network drops (TUS)." },
+  { key: "s3_compat_enabled", label: "S3 compatibility", consequence: "Expose the S3-compatible endpoint for existing S3 clients." },
 ] as const;
 
 export function StorageConfigPanel({ project, config, loading }: { project?: Project; config?: ProjectConfig; loading: boolean }) {
@@ -60,53 +72,49 @@ export function StorageConfigPanel({ project, config, loading }: { project?: Pro
   const setFlag = (key: string, enabled: boolean) => setValue(key, enabled ? "true" : "false");
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Storage</p>
-          <h2>Runtime settings</h2>
-        </div>
-        <SlidersHorizontal size={15} className="text-faint" />
-      </div>
+    <CollapsibleCard
+      eyebrow="Storage"
+      title="Runtime defaults"
+      description="Project-wide upload limit and capability toggles."
+      actions={<SlidersHorizontal size={15} className="text-faint" />}
+    >
       <form className="mt-4 grid gap-3" onSubmit={submit}>
-        <div className="grid grid-cols-[minmax(0,1fr)_140px] items-end gap-2 max-sm:grid-cols-1">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">File storage limit</p>
-            <p className="truncate text-xs text-muted">Maximum object size per upload.</p>
-          </div>
-          <input
-            className="input font-mono"
+        <Field label="Default upload limit" hint="MB — per-bucket limits can override this">
+          <Input
+            className="font-mono"
             inputMode="numeric"
             min="1"
             value={draft.file_size_limit_mb ?? "50"}
             onChange={(event) => setValue("file_size_limit_mb", event.target.value)}
             type="number"
           />
-        </div>
-        <div className="grid gap-2">
-          {storageCapabilities.map((capability) => {
-            const enabled = (draft[capability.key] ?? "true") === "true";
-            return (
-              <label className="config-toggle" key={capability.key}>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{capability.label}</p>
-                  <p className="truncate font-mono text-xs text-muted">{capability.detail}</p>
-                </div>
-                <input checked={enabled} onChange={(event) => setFlag(capability.key, event.target.checked)} type="checkbox" />
-              </label>
-            );
-          })}
-        </div>
+        </Field>
+        <SubSection title="Capabilities">
+          <div className="grid gap-2">
+            {storageCapabilities.map((capability) => {
+              const enabled = (draft[capability.key] ?? "true") === "true";
+              return (
+                <label className="config-toggle" key={capability.key}>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{capability.label}</p>
+                    <p className="text-xs text-muted">{capability.consequence}</p>
+                  </div>
+                  <input checked={enabled} onChange={(event) => setFlag(capability.key, event.target.checked)} type="checkbox" />
+                </label>
+              );
+            })}
+          </div>
+        </SubSection>
         <div className="usage-row">
-          <p className="text-xs text-muted">{loading ? "Loading runtime settings..." : config?.updated_at ? `Updated ${formatDateTime(config.updated_at)}` : "Runtime settings not saved yet."}</p>
-          <button className="button secondary" disabled={!project || mutation.isPending} type="submit">
+          <p className="text-xs text-muted">{loading ? "Loading runtime defaults..." : config?.updated_at ? `Updated ${formatDateTime(config.updated_at)}` : "Runtime defaults not saved yet."}</p>
+          <Button variant="secondary" disabled={!project || mutation.isPending} type="submit">
             <Save size={14} />
-            Save storage
-          </button>
+            Save defaults
+          </Button>
         </div>
         {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
       </form>
-    </section>
+    </CollapsibleCard>
   );
 }
 
@@ -114,13 +122,13 @@ export function StorageBucketsPanel({ project, buckets, item, loading }: { proje
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [form, setForm] = useState({
-    name: "assets",
-    public: true,
-    file_size_limit: "52428800",
-    allowed_mime_types: "image/png,image/jpeg,image/webp",
+    name: "",
+    public: false,
+    file_size_limit_mb: "50",
+    allowed_mime_types: "",
     cache_control: "3600",
-    avif_autodetection: true,
-    metadata: "purpose=public-assets",
+    avif_autodetection: false,
+    metadata: "",
   });
   const invalidate = (ref: string) => {
     void queryClient.invalidateQueries({ queryKey: ["storage-buckets", ref] });
@@ -134,7 +142,7 @@ export function StorageBucketsPanel({ project, buckets, item, loading }: { proje
     mutationFn: ({ ref }: { ref: string }) => createProjectStorageBucket(ref, {
       name: form.name,
       public: form.public,
-      file_size_limit: Number(form.file_size_limit) || 0,
+      file_size_limit: (Number(form.file_size_limit_mb) || 0) * MIB,
       allowed_mime_types: parseLines(form.allowed_mime_types),
       cache_control: form.cache_control,
       avif_autodetection: form.avif_autodetection,
@@ -154,22 +162,22 @@ export function StorageBucketsPanel({ project, buckets, item, loading }: { proje
       {
         header: "Bucket",
         accessorKey: "name",
-        size: 190,
+        size: 200,
         cell: ({ row }) => (
           <>
             <p className="cell-main font-mono">{row.original.name}</p>
-            <p className="cell-sub">{row.original.public ? "public" : "private"}</p>
+            <Badge variant="muted">{row.original.public ? "public" : "private"}</Badge>
           </>
         ),
       },
       {
-        header: "Limits",
+        header: "Upload limit",
         accessorKey: "file_size_limit",
-        size: 210,
+        size: 200,
         cell: ({ row }) => (
           <>
             <p className="text-sm">{formatBytes(row.original.file_size_limit)}</p>
-            <p className="cell-sub">cache {row.original.cache_control}</p>
+            <p className="cell-sub">cache {row.original.cache_control}s</p>
           </>
         ),
       },
@@ -187,13 +195,13 @@ export function StorageBucketsPanel({ project, buckets, item, loading }: { proje
       {
         header: "Status",
         accessorKey: "status",
-        size: 130,
-        cell: ({ row }) => <span className={`pill ${row.original.status === "configured" ? "healthy" : "provisioning"}`}>{row.original.status}</span>,
+        size: 120,
+        cell: ({ row }) => <StatusPill status={row.original.status} />,
       },
       {
         header: "Created",
         accessorKey: "created_at",
-        size: 160,
+        size: 150,
         cell: ({ row }) => formatDateTime(row.original.created_at),
       },
       {
@@ -201,15 +209,16 @@ export function StorageBucketsPanel({ project, buckets, item, loading }: { proje
         id: "actions",
         size: 56,
         cell: ({ row }) => (
-          <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, name: row.original.name })} title="Delete bucket" type="button">
+          <Button variant="ghost" size="icon" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, name: row.original.name })} title="Delete bucket" type="button">
             <X size={14} />
-          </button>
+          </Button>
         ),
       },
     ],
     [deleteMutation.isPending, project],
   );
   const showingCreate = item === "new";
+  const limitBytes = (Number(form.file_size_limit_mb) || 0) * MIB;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -230,67 +239,90 @@ export function StorageBucketsPanel({ project, buckets, item, loading }: { proje
   }
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Storage</p>
-          <h2>{showingCreate ? "New bucket" : "Buckets"}</h2>
-          <p className="mt-1 text-sm text-muted">{showingCreate ? "Create one storage bucket for this project." : "Project object buckets exposed through Supabase Storage."}</p>
-        </div>
-        {showingCreate ? (
-          <button className="icon-button" onClick={closeCreate} title="Back to buckets" type="button">
+    <AppPanel
+      eyebrow="Storage"
+      title={showingCreate ? "New bucket" : "Buckets"}
+      actions={
+        showingCreate ? (
+          <Button variant="secondary" onClick={closeCreate} type="button">
             <ArrowLeft size={14} />
-          </button>
+            Back to buckets
+          </Button>
         ) : (
-          <button className="icon-button" disabled={!project} onClick={openCreate} title="Add storage bucket" type="button">
+          <Button variant="secondary" disabled={!project} onClick={openCreate} type="button">
             <Plus size={14} />
-          </button>
-        )}
-      </div>
+            Add bucket
+          </Button>
+        )
+      }
+    >
+      <p className="mt-1 text-sm text-muted">{showingCreate ? "Create one storage bucket for this project." : "Project object buckets exposed through Supabase Storage."}</p>
       {showingCreate ? (
-        <form className="grid gap-2" onSubmit={submit}>
-          <div className="usage-row">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{form.name || "Bucket name pending"}</p>
-              <p className="truncate text-xs text-muted">{form.public ? "Public objects can be served through the project API." : "Private bucket access requires authenticated storage requests."}</p>
+        <form className="mt-4 grid gap-3" onSubmit={submit}>
+          <SubSection title="Identity">
+            <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+              <Field label="Bucket name" required>
+                <Input className="font-mono" placeholder="assets" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+              </Field>
+              <label className="checkbox-row self-end">
+                <input type="checkbox" checked={form.public} onChange={(event) => setForm({ ...form, public: event.target.checked })} />
+                Public bucket
+              </label>
             </div>
-            <span className="pill">{buckets.length} existing</span>
-          </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_130px_130px] gap-2 max-sm:grid-cols-1">
-            <input className="input font-mono" placeholder="assets" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
-            <input className="input font-mono" inputMode="numeric" value={form.file_size_limit} onChange={(event) => setForm({ ...form, file_size_limit: event.target.value })} />
-            <input className="input font-mono" placeholder="3600" value={form.cache_control} onChange={(event) => setForm({ ...form, cache_control: event.target.value })} />
-          </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2 max-sm:grid-cols-1">
-            <input className="input font-mono" placeholder="image/png,image/jpeg" value={form.allowed_mime_types} onChange={(event) => setForm({ ...form, allowed_mime_types: event.target.value })} />
-            <input className="input font-mono" placeholder="purpose=public-assets" value={form.metadata} onChange={(event) => setForm({ ...form, metadata: event.target.value })} />
-          </div>
-          <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
-            <label className="checkbox-row">
-              <input type="checkbox" checked={form.public} onChange={(event) => setForm({ ...form, public: event.target.checked })} />
-              Public bucket
-            </label>
+          </SubSection>
+          <SubSection title="Limits">
+            <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+              <Field label="Upload limit" hint={`MB · = ${formatBytes(limitBytes)}`}>
+                <Input className="font-mono" inputMode="numeric" min="1" type="number" value={form.file_size_limit_mb} onChange={(event) => setForm({ ...form, file_size_limit_mb: event.target.value })} />
+              </Field>
+              <Field label="Cache control" hint="seconds">
+                <Input className="font-mono" inputMode="numeric" placeholder="3600" value={form.cache_control} onChange={(event) => setForm({ ...form, cache_control: event.target.value })} />
+              </Field>
+            </div>
+          </SubSection>
+          <SubSection title="Content policy">
+            <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+              <Field label="Allowed MIME types" hint="comma or newline separated · empty allows any">
+                <Input className="font-mono" placeholder="image/png, image/jpeg" value={form.allowed_mime_types} onChange={(event) => setForm({ ...form, allowed_mime_types: event.target.value })} />
+              </Field>
+              <Field label="Metadata" hint="key=value pairs">
+                <Input className="font-mono" placeholder="purpose=public-assets" value={form.metadata} onChange={(event) => setForm({ ...form, metadata: event.target.value })} />
+              </Field>
+            </div>
             <label className="checkbox-row">
               <input type="checkbox" checked={form.avif_autodetection} onChange={(event) => setForm({ ...form, avif_autodetection: event.target.checked })} />
               AVIF autodetection
             </label>
-          </div>
-          <button className="button secondary justify-center" disabled={!project || createMutation.isPending || form.name.trim().length === 0} type="submit">
+          </SubSection>
+          <Button variant="secondary" className="justify-self-start" disabled={!project || createMutation.isPending || form.name.trim().length === 0} type="submit">
             <Plus size={14} />
-            Add storage bucket
-          </button>
+            Add bucket
+          </Button>
         </form>
       ) : (
         <div className="mt-4 grid gap-2">
-          <DataTable columns={bucketColumns} data={buckets} emptyText={loading ? "Loading storage buckets..." : "No storage buckets configured."} minWidth={880} />
+          {buckets.length === 0 && !loading ? (
+            <EmptyState
+              icon={Boxes}
+              title="No storage buckets yet"
+              description="Buckets hold the project's uploaded objects. Create one to start storing files."
+              action={
+                <Button variant="secondary" disabled={!project} onClick={openCreate} type="button">
+                  <Plus size={14} />
+                  Add bucket
+                </Button>
+              }
+            />
+          ) : (
+            <DataTable columns={bucketColumns} data={buckets} emptyText={loading ? "Loading storage buckets..." : "No storage buckets configured."} minWidth={880} />
+          )}
         </div>
       )}
       <div className="mt-3 grid gap-2">
-        {loading ? <p className="text-sm text-muted">Loading storage buckets...</p> : null}
         {createMutation.error ? <p className="text-sm text-danger">{createMutation.error.message}</p> : null}
         {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
       </div>
-    </section>
+    </AppPanel>
   );
 }
 
@@ -307,8 +339,8 @@ export function CDNPanel({ project, policy, invalidations, loading }: { project?
     cache_control: "",
     invalidate_paths: "/storage/v1/object/public/*",
     event_id: "",
-    event_bucket: "assets",
-    event_object_path: "avatars/user.png",
+    event_bucket: "",
+    event_object_path: "",
     event_type: "object_updated",
   });
   const policyKey = `${policy?.project_ref ?? ""}:${policy?.updated_at ?? ""}`;
@@ -392,90 +424,133 @@ export function CDNPanel({ project, policy, invalidations, loading }: { project?
     objectEventMutation.mutate({ ref: project.ref });
   }
 
+  // Reflect the SAVED policy (not the draft) for the smart-revalidation dependency.
+  const savedSmart = Boolean(policy?.smart_revalidation);
+
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Storage</p>
-          <h2>CDN policy</h2>
-        </div>
-        <Globe2 size={15} className="text-faint" />
-      </div>
-      <form className="mt-4 grid gap-2" onSubmit={submit}>
+    <CollapsibleCard
+      eyebrow="Storage"
+      title="CDN policy"
+      description="Edge cache TTLs, path rules, and invalidation."
+      actions={<Globe2 size={15} className="text-faint" />}
+    >
+      <form className="mt-4 grid gap-4" onSubmit={submit}>
         <label className="config-toggle">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">Edge caching</p>
-            <p className="truncate font-mono text-xs text-muted">{policy?.cache_control ?? "public storage path cache policy"}</p>
+            <p className="text-xs text-muted">Serve cached storage responses from the edge using the policy below.</p>
           </div>
           <input checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} type="checkbox" />
         </label>
-        <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
-          <input className="input font-mono" inputMode="numeric" placeholder="browser ttl" value={form.browser_ttl_seconds} onChange={(event) => setForm({ ...form, browser_ttl_seconds: event.target.value })} />
-          <input className="input font-mono" inputMode="numeric" placeholder="edge ttl" value={form.edge_ttl_seconds} onChange={(event) => setForm({ ...form, edge_ttl_seconds: event.target.value })} />
-          <input className="input font-mono" inputMode="numeric" placeholder="swr ttl" value={form.stale_while_revalidate_seconds} onChange={(event) => setForm({ ...form, stale_while_revalidate_seconds: event.target.value })} />
-        </div>
-        <label className="config-toggle">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">Smart revalidation</p>
-            <p className="truncate text-xs text-muted">Record object-change invalidation intent for storage paths.</p>
+
+        <SubSection title="Cache policy" description="How long responses stay fresh at each layer.">
+          <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
+            <Field label="Browser TTL" hint="seconds">
+              <Input className="font-mono" inputMode="numeric" value={form.browser_ttl_seconds} onChange={(event) => setForm({ ...form, browser_ttl_seconds: event.target.value })} />
+            </Field>
+            <Field label="Edge TTL" hint="seconds">
+              <Input className="font-mono" inputMode="numeric" value={form.edge_ttl_seconds} onChange={(event) => setForm({ ...form, edge_ttl_seconds: event.target.value })} />
+            </Field>
+            <Field label="Stale-while-revalidate" hint="seconds">
+              <Input className="font-mono" inputMode="numeric" value={form.stale_while_revalidate_seconds} onChange={(event) => setForm({ ...form, stale_while_revalidate_seconds: event.target.value })} />
+            </Field>
           </div>
-          <input checked={form.smart_revalidation} onChange={(event) => setForm({ ...form, smart_revalidation: event.target.checked })} type="checkbox" />
-        </label>
-        <textarea className="input min-h-[64px] font-mono" value={form.included_paths} onChange={(event) => setForm({ ...form, included_paths: event.target.value })} />
-        <textarea className="input min-h-[52px] font-mono" placeholder="/storage/v1/object/private/*" value={form.excluded_paths} onChange={(event) => setForm({ ...form, excluded_paths: event.target.value })} />
-        <input className="input font-mono" value={form.cache_control} onChange={(event) => setForm({ ...form, cache_control: event.target.value })} />
-        <button className="button secondary justify-center" disabled={!project || updateMutation.isPending} type="submit">
-          <Save size={14} />
-          Save CDN
-        </button>
-      </form>
-      <div className="mt-4 grid gap-2">
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 max-sm:grid-cols-1">
-          <textarea className="input min-h-[52px] font-mono" value={form.invalidate_paths} onChange={(event) => setForm({ ...form, invalidate_paths: event.target.value })} />
-          <button className="button secondary justify-center" disabled={!project || invalidationMutation.isPending || parseLines(form.invalidate_paths).length === 0} onClick={invalidatePaths} type="button">
-            <RotateCcw size={14} />
-            Invalidate
-          </button>
-        </div>
-        <div className="grid gap-2 rounded-md border border-border p-3">
-          <div className="usage-row">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">Object-change revalidation</p>
-              <p className="truncate text-xs text-muted">Posts a storage event and records the generated Smart CDN invalidation.</p>
-            </div>
-            <span className={`pill ${form.smart_revalidation ? "healthy" : "paused"}`}>{form.smart_revalidation ? "smart" : "off"}</span>
-          </div>
+          <Field label="Cache-Control override" hint="optional raw header value — empty derives from TTLs">
+            <Input className="font-mono" placeholder="public, max-age=3600" value={form.cache_control} onChange={(event) => setForm({ ...form, cache_control: event.target.value })} />
+          </Field>
+        </SubSection>
+
+        <SubSection title="Path rules" description="Which storage paths the policy applies to.">
           <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
-            <input className="input font-mono" placeholder="event id" value={form.event_id} onChange={(event) => setForm({ ...form, event_id: event.target.value })} />
-            <input className="input font-mono" placeholder="bucket" value={form.event_bucket} onChange={(event) => setForm({ ...form, event_bucket: event.target.value })} />
-            <input className="input font-mono" placeholder="object path" value={form.event_object_path} onChange={(event) => setForm({ ...form, event_object_path: event.target.value })} />
-            <select className="input" value={form.event_type} onChange={(event) => setForm({ ...form, event_type: event.target.value })}>
-              <option value="object_changed">Changed</option>
-              <option value="object_created">Created</option>
-              <option value="object_updated">Updated</option>
-              <option value="object_deleted">Deleted</option>
-            </select>
+            <Field label="Included paths" hint="one glob per line">
+              <Textarea className="min-h-[64px] font-mono" value={form.included_paths} onChange={(event) => setForm({ ...form, included_paths: event.target.value })} />
+            </Field>
+            <Field label="Excluded paths" hint="one glob per line">
+              <Textarea className="min-h-[64px] font-mono" placeholder="/storage/v1/object/private/*" value={form.excluded_paths} onChange={(event) => setForm({ ...form, excluded_paths: event.target.value })} />
+            </Field>
           </div>
-          <button className="button secondary justify-center" disabled={!project || objectEventMutation.isPending || form.event_object_path.trim().length === 0} onClick={submitObjectEvent} type="button">
-            <RotateCcw size={14} />
-            Revalidate object
-          </button>
-        </div>
-        {loading ? <p className="text-sm text-muted">Loading CDN state...</p> : null}
-        {!loading && invalidations.length === 0 ? <p className="text-sm text-muted">No CDN invalidations recorded.</p> : null}
-        {invalidations.slice(0, 5).map((invalidation) => (
-          <div className="cdn-row" key={invalidation.id}>
+        </SubSection>
+
+        <SubSection title="Smart revalidation" description="Object changes auto-invalidate matching cached paths. Requires edge caching to be enabled.">
+          <label className="config-toggle">
             <div className="min-w-0">
-              <p className="truncate font-mono text-sm">{invalidation.paths.join(", ")}</p>
-              <p className="truncate text-xs text-muted">{formatTime(invalidation.created_at)} - {invalidation.source || "manual"}{invalidation.event_id ? ` - ${invalidation.event_id}` : ""} - {invalidation.message || invalidation.status}</p>
+              <p className="truncate text-sm font-medium">Auto-invalidate on object change</p>
+              <p className="text-xs text-muted">{form.enabled ? "Records invalidation intent when storage objects change." : "Enable edge caching first for this to take effect."}</p>
             </div>
-            <span className={`pill ${invalidation.status === "completed" ? "healthy" : "provisioning"}`}>{invalidation.status}</span>
-          </div>
-        ))}
+            <input checked={form.smart_revalidation} disabled={!form.enabled} onChange={(event) => setForm({ ...form, smart_revalidation: event.target.checked })} type="checkbox" />
+          </label>
+        </SubSection>
+
+        <Button variant="secondary" className="justify-self-start" disabled={!project || updateMutation.isPending} type="submit">
+          <Save size={14} />
+          Save CDN policy
+        </Button>
         {updateMutation.error ? <p className="text-sm text-danger">{updateMutation.error.message}</p> : null}
-        {invalidationMutation.error ? <p className="text-sm text-danger">{invalidationMutation.error.message}</p> : null}
-        {objectEventMutation.error ? <p className="text-sm text-danger">{objectEventMutation.error.message}</p> : null}
+      </form>
+
+      <div className="mt-4 grid gap-4">
+        <SubSection title="Invalidation" description="Purge cached paths on demand.">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 max-sm:grid-cols-1">
+            <Field label="Paths to invalidate" hint="one glob per line">
+              <Textarea className="min-h-[52px] font-mono" value={form.invalidate_paths} onChange={(event) => setForm({ ...form, invalidate_paths: event.target.value })} />
+            </Field>
+            <Button variant="secondary" className="self-end justify-self-start" disabled={!project || invalidationMutation.isPending || parseLines(form.invalidate_paths).length === 0} onClick={invalidatePaths} type="button">
+              <RotateCcw size={14} />
+              Invalidate
+            </Button>
+          </div>
+          {invalidationMutation.error ? <p className="text-sm text-danger">{invalidationMutation.error.message}</p> : null}
+        </SubSection>
+
+        <details className="rounded-md border border-border bg-bg p-3">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-faint">
+            <RotateCcw size={14} />
+            <p className="label">Object-change revalidation (debug)</p>
+            <StatusPill className="ml-auto" tone={savedSmart ? "success" : "neutral"} label={savedSmart ? "smart on (saved)" : "smart off (saved)"} />
+          </summary>
+          <div className="mt-3 grid gap-2">
+            <p className="text-xs text-muted">Posts a synthetic storage event and records the generated Smart CDN invalidation. Requires saved smart revalidation to actually purge.</p>
+            <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+              <Field label="Event ID" hint="optional idempotency key">
+                <Input className="font-mono" placeholder="evt_…" value={form.event_id} onChange={(event) => setForm({ ...form, event_id: event.target.value })} />
+              </Field>
+              <Field label="Bucket">
+                <Input className="font-mono" placeholder="assets" value={form.event_bucket} onChange={(event) => setForm({ ...form, event_bucket: event.target.value })} />
+              </Field>
+              <Field label="Object path">
+                <Input className="font-mono" placeholder="avatars/user.png" value={form.event_object_path} onChange={(event) => setForm({ ...form, event_object_path: event.target.value })} />
+              </Field>
+              <Field label="Event type">
+                <NativeSelect value={form.event_type} onChange={(event) => setForm({ ...form, event_type: event.target.value })}>
+                  <option value="object_changed">Changed</option>
+                  <option value="object_created">Created</option>
+                  <option value="object_updated">Updated</option>
+                  <option value="object_deleted">Deleted</option>
+                </NativeSelect>
+              </Field>
+            </div>
+            <Button variant="secondary" className="justify-self-start" disabled={!project || objectEventMutation.isPending || form.event_object_path.trim().length === 0} onClick={submitObjectEvent} type="button">
+              <RotateCcw size={14} />
+              Revalidate object
+            </Button>
+            {objectEventMutation.error ? <p className="text-sm text-danger">{objectEventMutation.error.message}</p> : null}
+          </div>
+        </details>
+
+        <SubSection title="Recent invalidations">
+          {loading ? <p className="text-sm text-muted">Loading CDN state...</p> : null}
+          {!loading && invalidations.length === 0 ? <p className="text-sm text-muted">No CDN invalidations recorded.</p> : null}
+          {invalidations.slice(0, 5).map((invalidation) => (
+            <div className="cdn-row" key={invalidation.id}>
+              <div className="min-w-0">
+                <p className="truncate font-mono text-sm">{invalidation.paths.join(", ")}</p>
+                <p className="truncate text-xs text-muted">{formatTime(invalidation.created_at)} · {invalidation.source || "manual"}{invalidation.event_id ? ` · ${invalidation.event_id}` : ""}{invalidation.message ? ` · ${invalidation.message}` : ""}</p>
+              </div>
+              <StatusPill status={invalidation.status} />
+            </div>
+          ))}
+        </SubSection>
       </div>
-    </section>
+    </CollapsibleCard>
   );
 }

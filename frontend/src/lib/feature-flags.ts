@@ -2,8 +2,7 @@ export const featureFlagGroups = [
   {
     label: "Org and access",
     flags: [
-      ["single_org_mode", "Default org mode"],
-      ["multi_org", "Multiple orgs"],
+      ["multi_org", "Organizations"],
       ["team_rbac", "Team RBAC"],
       ["project_access_grants", "Project grants"],
       ["project_self_service", "Project self-service"],
@@ -18,6 +17,7 @@ export const featureFlagGroups = [
       ["network_restrictions", "Network restrictions"],
       ["log_drains", "Log drains"],
       ["pitr", "PITR"],
+      ["production_posture", "Production posture"],
     ],
   },
   {

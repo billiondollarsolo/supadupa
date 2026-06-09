@@ -84,9 +84,79 @@ if [[ -z "$domain" ]]; then
   exit 2
 fi
 
+reject_control_chars() {
+  local name="$1"
+  local value="${2:-}"
+  if [[ "$value" == *[[:cntrl:]]* ]]; then
+    echo "$name must not contain control characters" >&2
+    exit 2
+  fi
+}
+
+validate_hostname() {
+  local name="$1"
+  local value="$2"
+  reject_control_chars "$name" "$value"
+  if [[ -z "$value" || ${#value} -gt 253 || "$value" != *.* ]]; then
+    echo "$name must be a fully qualified hostname" >&2
+    exit 2
+  fi
+  if [[ ! "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+    echo "$name must contain only DNS hostname characters" >&2
+    exit 2
+  fi
+}
+
+validate_address() {
+  local value="$1"
+  reject_control_chars "--address" "$value"
+  if [[ "$value" == "::1" ]]; then
+    return
+  fi
+  if [[ ! "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "--address must be an IPv4 address or ::1" >&2
+    exit 2
+  fi
+  IFS='.' read -r -a octets <<<"$value"
+  for octet in "${octets[@]}"; do
+    if (( octet > 255 )); then
+      echo "--address octets must be between 0 and 255" >&2
+      exit 2
+    fi
+  done
+}
+
+validate_ref() {
+  local ref="$1"
+  reject_control_chars "--refs" "$ref"
+  if [[ ! "$ref" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+    echo "--refs entries must be lowercase DNS labels" >&2
+    exit 2
+  fi
+}
+
 admin_host="${admin_host:-admin.$domain}"
 api_host="${api_host:-api.$domain}"
 apps_domain="${apps_domain:-apps.$domain}"
+
+validate_hostname "--domain" "$domain"
+validate_hostname "--admin-host" "$admin_host"
+validate_hostname "--api-host" "$api_host"
+validate_hostname "--apps-domain" "$apps_domain"
+validate_address "$address"
+reject_control_chars "--refs" "$refs"
+ref_array=()
+if [[ -n "$refs" ]]; then
+  IFS=',' read -r -a raw_ref_array <<<"$refs"
+  for ref in "${raw_ref_array[@]}"; do
+    ref="$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')"
+    if [[ -z "$ref" ]]; then
+      continue
+    fi
+    validate_ref "$ref"
+    ref_array+=("$ref")
+  done
+fi
 
 out_dir="runtime/local-dns"
 mkdir -p "$out_dir"
@@ -105,13 +175,8 @@ EOF
   echo "# Supadupa local hosts entries."
   echo "$address $admin_host"
   echo "$address $api_host"
-  if [[ -n "$refs" ]]; then
-    IFS=',' read -r -a ref_array <<<"$refs"
+  if [[ "${#ref_array[@]}" -gt 0 ]]; then
     for ref in "${ref_array[@]}"; do
-      ref="$(echo "$ref" | tr '[:upper:]' '[:lower:]' | xargs)"
-      if [[ -z "$ref" ]]; then
-        continue
-      fi
       echo "$address $ref.$apps_domain"
       echo "$address studio-$ref.$apps_domain"
       echo "$address storage-$ref.$apps_domain"

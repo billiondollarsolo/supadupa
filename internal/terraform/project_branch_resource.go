@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -117,12 +115,8 @@ func (r *projectBranchResource) Schema(ctx context.Context, req resource.SchemaR
 }
 
 func (r *projectBranchResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -197,16 +191,7 @@ func (r *projectBranchResource) Delete(ctx context.Context, req resource.DeleteR
 }
 
 func (r *projectBranchResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	sourceRef, ref, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		sourceRef, ref, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(sourceRef) == "" || strings.TrimSpace(ref) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use source_ref/ref, for example alpha/alpha-preview.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("source_ref"), strings.TrimSpace(sourceRef))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
+	setTwoPartImportState(ctx, req.ID, resp, "source_ref", "ref", "Use source_ref/ref, for example alpha/alpha-preview.")
 }
 
 func (r *projectBranchResource) findBranch(ctx context.Context, sourceRef string, ref string) (ProjectBranch, error) {
@@ -215,12 +200,7 @@ func (r *projectBranchResource) findBranch(ctx context.Context, sourceRef string
 		return ProjectBranch{}, err
 	}
 	normalized := strings.ToLower(strings.TrimSpace(ref))
-	for _, branch := range branches {
-		if branch.ProjectRef == normalized {
-			return branch, nil
-		}
-	}
-	return ProjectBranch{}, ErrNotFound
+	return findInList(branches, func(branch ProjectBranch) bool { return branch.ProjectRef == normalized })
 }
 
 func setProjectBranchState(model *projectBranchResourceModel, branch ProjectBranch, project Project) {

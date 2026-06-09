@@ -3,11 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -135,15 +132,15 @@ func (r *projectAuthClientResource) Schema(ctx context.Context, req resource.Sch
 }
 
 func (r *projectAuthClientResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectAuthClientResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "client_id")
 }
 
 func (r *projectAuthClientResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -191,32 +188,7 @@ func (r *projectAuthClientResource) Read(ctx context.Context, req resource.ReadR
 }
 
 func (r *projectAuthClientResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectAuthClientResourceModel
-	var state projectAuthClientResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := authClientInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectAuthClient(ctx, state.Ref.ValueString(), state.ClientID.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project auth client", err.Error())
-		return
-	}
-	client, err := r.client.CreateProjectAuthClient(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project auth client", err.Error())
-		return
-	}
-	setProjectAuthClientState(ctx, &plan, client, input.ClientSecretHandle, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project auth client")
 }
 
 func (r *projectAuthClientResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -233,16 +205,7 @@ func (r *projectAuthClientResource) Delete(ctx context.Context, req resource.Del
 }
 
 func (r *projectAuthClientResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, clientID, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, clientID, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(clientID) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/client_id, for example alpha/dashboard_app.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("client_id"), strings.TrimSpace(clientID))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "client_id", "Use ref/client_id, for example alpha/dashboard_app.")
 }
 
 func (r *projectAuthClientResource) findAuthClient(ctx context.Context, ref string, clientID string) (ProjectAuthClient, error) {
@@ -250,12 +213,7 @@ func (r *projectAuthClientResource) findAuthClient(ctx context.Context, ref stri
 	if err != nil {
 		return ProjectAuthClient{}, err
 	}
-	for _, client := range clients {
-		if client.ClientID == clientID {
-			return client, nil
-		}
-	}
-	return ProjectAuthClient{}, ErrNotFound
+	return findInList(clients, func(client ProjectAuthClient) bool { return client.ClientID == clientID })
 }
 
 func authClientInputFromModel(ctx context.Context, model projectAuthClientResourceModel, addError func(string, string)) (ProjectAuthClientInput, bool) {
@@ -294,21 +252,18 @@ func setProjectAuthClientState(ctx context.Context, model *projectAuthClientReso
 	model.CreatedAt = optionalTimeString(client.CreatedAt)
 	model.UpdatedAt = optionalTimeString(client.UpdatedAt)
 
-	redirectURIs, diags := types.ListValueFrom(ctx, types.StringType, client.RedirectURIs)
-	if diags.HasError() {
-		addError("Unable to encode redirect_uris list", diags.Errors()[0].Detail())
+	redirectURIs, ok := stringListStateValue(ctx, "redirect_uris", client.RedirectURIs, addError)
+	if !ok {
 		return
 	}
 	model.RedirectURIs = redirectURIs
-	grantTypes, diags := types.ListValueFrom(ctx, types.StringType, client.GrantTypes)
-	if diags.HasError() {
-		addError("Unable to encode grant_types list", diags.Errors()[0].Detail())
+	grantTypes, ok := stringListStateValue(ctx, "grant_types", client.GrantTypes, addError)
+	if !ok {
 		return
 	}
 	model.GrantTypes = grantTypes
-	scopes, diags := types.ListValueFrom(ctx, types.StringType, client.Scopes)
-	if diags.HasError() {
-		addError("Unable to encode scopes list", diags.Errors()[0].Detail())
+	scopes, ok := stringListStateValue(ctx, "scopes", client.Scopes, addError)
+	if !ok {
 		return
 	}
 	model.Scopes = scopes

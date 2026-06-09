@@ -1,8 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
-import { Activity, ArrowRight, Cpu, Database, Gauge, HardDrive, Network, Server, Shield, type LucideIcon } from "lucide-react";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { ArrowRight, Cpu, Database, Gauge, HardDrive, Network, Plus, Server, ShieldAlert, type LucideIcon } from "lucide-react";
+import { AppPanel } from "../components/app/app-panel";
+import { InfoRow } from "../components/app/info-row";
+import { MetricCard } from "../components/app/metric-card";
+import { ResourceMeter } from "../components/app/resource-meter";
+import { TelemetryLineChart } from "../components/charts/telemetry-line-chart";
+import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { CollapsibleCard } from "../components/ui/collapsible-card";
+import { EmptyState } from "../components/ui/empty-state";
+import { StatusPill } from "../components/ui/status-pill";
 import { useDashboardContext } from "../lib/dashboard-context";
 import { formatBytes, formatTime } from "../lib/format";
+import { type Tone } from "../lib/status";
 import type { FleetMetrics } from "../types";
 
 type FleetHistoryPoint = {
@@ -11,14 +22,21 @@ type FleetHistoryPoint = {
   memoryCapacityPercent: number;
   networkRxBytes: number;
   networkTxBytes: number;
+  nodeCpuPercent: number;
+  nodeMemoryPercent: number;
+  nodeNetworkSampled: boolean;
+  nodeNetworkRxBytes: number;
+  nodeNetworkTxBytes: number;
 };
 
 export function FleetDashboardPage() {
-  const { projectList, hosts, fleetMetrics, advisorFindings, complianceReport, auditEvents, auditIntegrity, projects, routeToProject } = useDashboardContext();
+  const { projectList, hosts, fleetMetrics, advisorFindings, complianceReport, projects, provisionerStatus, routeToProject } = useDashboardContext();
   const navigate = useNavigate();
   const metrics = fleetMetrics.data;
   const observed = metrics?.observed;
+  const nodeObserved = metrics?.node_observed?.[0];
   const host = hosts.data?.[0];
+  const isCompose = provisionerStatus.data?.provisioner === "compose";
   const healthy = projectList.filter((project) => project.status === "healthy").length;
   const degraded = projectList.filter((project) => project.status === "degraded").length;
   const errored = projectList.filter((project) => project.status === "error").length;
@@ -26,6 +44,21 @@ export function FleetDashboardPage() {
 
   const live = metrics ? liveUsageFromMetrics(metrics) : emptyLiveUsage();
   const networkRate = useMemo(() => networkRateFromHistory(history), [history]);
+  const nodeNetworkRate = useMemo(() => nodeNetworkRateFromHistory(history), [history]);
+  // Distinguish "no rate yet" (only one sample collected) from a real measured 0.
+  const networkRateReady = history.length >= 2;
+  const nodeNetworkRateReady = history.filter((point) => point.nodeNetworkSampled).length >= 2;
+  const findings = advisorFindings.data?.length ?? 0;
+  const controlsPassed = complianceReport.data?.summary.passed ?? 0;
+  const controlsTotal = complianceReport.data?.summary.total ?? 0;
+  const hasProjectTelemetry = projectList.length > 0 || (observed?.projects_sampled ?? 0) > 0 || (observed?.stale_projects ?? 0) > 0;
+  const hasDiskTelemetry = (observed?.disk_limit_bytes ?? 0) > 0;
+  const nodeMemoryPercent = nodeObserved && nodeObserved.memory_total_bytes > 0 ? (nodeObserved.memory_used_bytes / nodeObserved.memory_total_bytes) * 100 : 0;
+  const nodeDiskPercent = nodeObserved && nodeObserved.disk_total_bytes > 0 ? (nodeObserved.disk_used_bytes / nodeObserved.disk_total_bytes) * 100 : 0;
+  const reservationStatus = reservationStatusFromMetrics(metrics);
+  const databaseIngress = databaseIngressStatus(metrics);
+  const nodeLabel = isCompose ? "Local Docker node" : (host ? host.name : `${metrics?.hosts ?? 0} nodes`);
+  const nodeDetail = isCompose ? "single-node Compose runtime" : metrics ? `${metrics.host_capacity.cpu || "-"} vCPU / ${formatCapacityRAM(metrics.host_capacity.ram_mb)} RAM` : "Capacity pending";
 
   useEffect(() => {
     if (!metrics) {
@@ -42,104 +75,139 @@ export function FleetDashboardPage() {
 
   return (
     <div className="grid gap-6">
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Dashboard</p>
-            <h2>At a glance</h2>
-          </div>
-          {metrics ? <time className="text-xs text-faint">{formatTime(metrics.sampled_at)}</time> : null}
-        </div>
+      <AppPanel actions={metrics ? <time className="text-xs text-faint">{formatTime(metrics.sampled_at)}</time> : null} eyebrow="Dashboard" title="At a glance">
         {fleetMetrics.isLoading ? <p className="mt-4 text-sm text-muted">Loading dashboard...</p> : null}
         <div className="mt-4 metric-grid">
-          <Metric label="Projects" value={`${healthy}/${projectList.length} healthy`} detail={`${degraded} degraded / ${errored} errors`} tone={errored > 0 ? "error" : degraded > 0 ? "warning" : "healthy"} />
-          <Metric label="Server" value={host ? host.name : `${metrics?.hosts ?? 0} hosts`} detail={metrics ? `${metrics.host_capacity.cpu || "-"} vCPU / ${formatCapacityRAM(metrics.host_capacity.ram_mb)} RAM` : "Capacity pending"} />
-          <Metric label="Live CPU" value={`${formatDecimal(live.cpuVCpu)} / ${metrics?.host_capacity.cpu || "-"} vCPU`} detail={`${formatPercent(observed?.cpu_percent ?? 0)} reported`} tone={live.cpuCapacityPercent > 85 ? "warning" : undefined} />
-          <Metric label="Live memory" value={`${formatBytes(observed?.memory_bytes ?? 0)} / ${formatCapacityRAM(metrics?.host_capacity.ram_mb ?? 0)}`} detail={`${formatPercent(live.memoryCapacityPercent)} of server RAM`} tone={live.memoryCapacityPercent > 85 ? "warning" : undefined} />
-          <Metric label="Reserved CPU" value={`${metrics?.host_used.cpu ?? 0} / ${metrics?.host_capacity.cpu || "-"} vCPU`} detail={`${formatCapacityRAM(metrics?.host_used.ram_mb ?? 0)} RAM reserved`} />
-          <Metric label="Telemetry" value={`${observed?.projects_sampled ?? 0}/${projectList.length} fresh`} detail={`${observed?.stale_projects ?? 0} stale samples`} tone={(observed?.stale_projects ?? 0) > 0 ? "warning" : undefined} />
-          <Metric label="Security" value={`${advisorFindings.data?.length ?? 0} findings`} detail={`${complianceReport.data?.summary.passed ?? 0}/${complianceReport.data?.summary.total || "-"} controls pass`} tone={(advisorFindings.data?.length ?? 0) > 0 ? "warning" : "healthy"} />
-          <Metric label="Audit" value={auditIntegrity.data?.verified ?? metrics?.audit_verified ? "verified" : "pending"} detail={`${auditEvents.data?.length ?? 0} recent events`} tone={auditIntegrity.data?.verified ?? metrics?.audit_verified ? "healthy" : "warning"} />
+          <MetricCard label="Projects" value={`${projectList.length} ${projectList.length === 1 ? "project" : "projects"}`} detail={`${healthy} healthy / ${degraded} degraded / ${errored} errors`} tone={errored > 0 ? "danger" : degraded > 0 ? "warning" : "success"} />
+          <MetricCard label={isCompose ? "Runtime" : "Nodes"} value={nodeLabel} detail={nodeDetail} />
+          <Link className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent" to="/settings/$section" params={{ section: "db-ingress" }} title="Open database ingress settings">
+            <MetricCard label="DB ingress →" value={databaseIngress.value} detail={databaseIngress.detail} tone={databaseIngress.tone} />
+          </Link>
+          <Link className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent" to="/security" title="Open the Security page">
+            <MetricCard label="Security →" value={`${findings} ${findings === 1 ? "finding" : "findings"}`} detail={`${controlsPassed}/${controlsTotal || "-"} controls pass`} tone={findings > 0 ? "warning" : "success"} />
+          </Link>
         </div>
-      </section>
+      </AppPanel>
 
       <div className="grid grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)] gap-6 max-xl:grid-cols-1">
-        <section className="panel">
-          <div className="section-head">
-            <div>
-              <p className="label">Server</p>
-              <h2>Live usage</h2>
-            </div>
-            <button className="button secondary h-8 min-h-8" onClick={() => void navigate({ to: "/hosts" })} type="button">
+        <AppPanel
+          actions={
+            <Button onClick={() => void navigate({ to: "/hosts" })} size="sm" type="button" variant="secondary">
               <Server size={14} />
-              Hosts
-            </button>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-            <UsageMeter icon={Cpu} label="CPU now" value={`${formatDecimal(live.cpuVCpu)} / ${metrics?.host_capacity.cpu || "-"} vCPU`} detail={`${formatPercent(observed?.cpu_percent ?? 0)} collector CPU`} percent={live.cpuCapacityPercent} />
-            <UsageMeter icon={Gauge} label="Memory now" value={`${formatBytes(observed?.memory_bytes ?? 0)} / ${formatCapacityRAM(metrics?.host_capacity.ram_mb ?? 0)}`} detail={`${formatPercent(live.memoryCapacityPercent)} of server RAM`} percent={live.memoryCapacityPercent} />
-            <InfoRow icon={Network} title="Network rate" detail={`${formatBytes(networkRate.rxBytesPerSecond)}/s in / ${formatBytes(networkRate.txBytesPerSecond)}/s out`} value={`${formatBytes(networkRate.rxBytesPerSecond + networkRate.txBytesPerSecond)}/s`} />
-            <InfoRow icon={HardDrive} title="Disk telemetry" detail={observed && observed.disk_limit_bytes > 0 ? `${formatBytes(observed.disk_used_bytes)} of ${formatBytes(observed.disk_limit_bytes)}` : `${metrics?.host_used.disk_gb ?? 0} GB reserved / ${metrics?.host_capacity.disk_gb || "-"} GB capacity`} value={observed && observed.disk_limit_bytes > 0 ? formatPercent((observed.disk_used_bytes / observed.disk_limit_bytes) * 100) : "not sampled"} />
-          </div>
-          <UsageTrendChart points={history} />
-          <div className="mt-3 grid grid-cols-2 gap-3 max-sm:grid-cols-1">
-            <InfoRow title="Fresh samples" detail={`${observed?.projects_sampled ?? 0} active projects sampled`} value={observed?.latest_sampled_at ? formatTime(observed.latest_sampled_at) : "pending"} />
-            <InfoRow title="Stale samples" detail={`${observed?.stale_projects ?? 0} active projects older than ${observed?.stale_after_seconds ?? 0}s`} value={observed?.oldest_sampled_at ? formatTime(observed.oldest_sampled_at) : "none"} />
-          </div>
-        </section>
+              Node
+            </Button>
+          }
+          description="Live OS-level CPU, memory and disk measured on the node now — not what projects reserve."
+          eyebrow={isCompose ? "Compose" : "Infrastructure"}
+          title={isCompose ? "Local node usage" : "Node usage"}
+        >
+          {nodeObserved ? (
+            <>
+              <div className="mt-4 grid grid-cols-2 gap-3 max-lg:grid-cols-1">
+                <ResourceMeter icon={Cpu} label="Node CPU" value={formatPercent(nodeObserved.cpu_percent)} detail={`${formatDecimal(nodeObserved.cpu_used_cores)} / ${nodeObserved.cpu_capacity_cores || metrics?.host_capacity.cpu || "-"} vCPU`} footer={formatOptionalTime(nodeObserved.sampled_at, "sample pending")} percent={nodeObserved.cpu_percent} />
+                <ResourceMeter icon={Gauge} label="Node memory" value={formatPercent(nodeMemoryPercent)} detail={`${formatBytes(nodeObserved.memory_used_bytes)} / ${formatBytes(nodeObserved.memory_total_bytes)}`} footer="used" percent={nodeMemoryPercent} />
+                <ResourceMeter icon={HardDrive} label="Node disk" value={formatPercent(nodeDiskPercent)} detail={`${formatBytes(nodeObserved.disk_used_bytes)} / ${formatBytes(nodeObserved.disk_total_bytes)}`} footer={`${formatBytes(nodeObserved.disk_available_bytes)} free`} percent={nodeDiskPercent} />
+                {nodeObserved.network_sampled ? <NetworkRow icon={Network} ready={nodeNetworkRateReady} rate={nodeNetworkRate} title="Node network" /> : null}
+                <InfoRow icon={Server} title={isCompose ? "Local node" : "Observed node"} detail={isCompose ? "Single-node Docker Compose runtime" : host?.address ?? "node address unavailable"} value={isCompose ? "Docker Compose" : nodeObserved.source.replace(/-/g, " ")} />
+              </div>
+              <TelemetryLineChart ariaLabel="Recent node CPU and memory utilization" points={history.map((point) => ({ sampledAt: point.sampledAt, cpu: point.nodeCpuPercent, memory: point.nodeMemoryPercent }))} title="Recent node usage" />
+            </>
+          ) : (
+            <EmptyState
+              className="mt-4"
+              icon={Server}
+              title="Waiting for node sample"
+              description={host ? `No telemetry received from ${host.name} yet. The node agent reports usage once it starts sampling; this can take a minute after first boot.` : "No local node is registered yet, so there is nothing to sample. Register the local Docker node to start collecting live usage."}
+              action={host ? undefined : <Button onClick={() => void navigate({ to: "/hosts" })} size="sm" type="button"><Server size={14} />Register node</Button>}
+            />
+          )}
+        </AppPanel>
 
-        <section className="panel">
-          <div className="section-head">
-            <div>
-              <p className="label">Capacity</p>
-              <h2>Reservations</h2>
-            </div>
-          </div>
+        <AppPanel actions={<Badge variant={mcardTone(reservationStatus.tone) === "default" ? "muted" : mcardTone(reservationStatus.tone)}>{reservationStatus.label}</Badge>} description="Capacity committed to projects — a budget, not live load. Bars warn at 85% and turn red at 100%." eyebrow={isCompose ? "Local capacity" : "Capacity"} title="Reservations">
           <div className="mt-4 grid gap-3">
-            <ResourceRow icon={Cpu} label="CPU reserved" used={metrics?.host_used.cpu ?? 0} capacity={metrics?.host_capacity.cpu ?? 0} suffix="vCPU" />
-            <ResourceRow icon={Gauge} label="RAM reserved" used={metrics?.host_used.ram_mb ?? 0} capacity={metrics?.host_capacity.ram_mb ?? 0} formatter={(value) => formatBytes(value * 1024 * 1024)} />
-            <ResourceRow icon={HardDrive} label="Disk reserved" used={metrics?.host_used.disk_gb ?? 0} capacity={metrics?.host_capacity.disk_gb ?? 0} suffix="GB" />
-            <ResourceRow icon={Activity} label="IOPS reserved" used={metrics?.host_used.disk_iops ?? 0} capacity={metrics?.host_capacity.disk_iops ?? 0} />
-            <ResourceRow icon={Database} label="Project slots" used={metrics?.host_used.projects ?? projectList.length} capacity={metrics?.host_capacity.projects ?? 0} />
+            <ReservationMeter capacity={metrics?.host_capacity.cpu ?? 0} icon={Cpu} label="CPU reserved" render={(value) => `${value.toLocaleString()} vCPU`} used={metrics?.host_used.cpu ?? 0} />
+            <ReservationMeter capacity={metrics?.host_capacity.ram_mb ?? 0} icon={Gauge} label="RAM reserved" render={(value) => formatBytes(value * 1024 * 1024)} used={metrics?.host_used.ram_mb ?? 0} />
+            <ReservationMeter capacity={metrics?.host_capacity.disk_gb ?? 0} icon={HardDrive} label="Disk reserved" render={(value) => `${value.toLocaleString()} GB`} used={metrics?.host_used.disk_gb ?? 0} />
+            <ReservationMeter capacity={metrics?.host_capacity.projects ?? 0} icon={Database} label="Project slots" render={(value) => value.toLocaleString()} used={metrics?.host_used.projects ?? projectList.length} />
           </div>
-        </section>
+        </AppPanel>
       </div>
 
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Operations</p>
-            <h2>Signals</h2>
+      <CollapsibleCard
+        actions={
+          <div className="flex items-center gap-2">
+            <Badge variant={databaseIngress.tone}>{databaseIngress.value}</Badge>
+            <Link to="/settings/$section" params={{ section: "db-ingress" }}>
+              <Button size="sm" type="button" variant={databaseIngress.tone === "danger" ? "default" : "secondary"}>
+                <ShieldAlert size={14} />
+                {databaseIngress.tone === "danger" ? "Configure allowlist" : "Ingress settings"}
+              </Button>
+            </Link>
           </div>
-        </div>
+        }
+        defaultOpen={databaseIngress.tone === "danger"}
+        description={databaseIngress.tone === "danger" ? "Raw Postgres is reachable from any network with no CIDR allowlist — restrict access." : "Listener addresses for raw Postgres and the connection pooler."}
+        eyebrow="Network access"
+        title="Database ingress"
+      >
         <div className="mt-4 grid grid-cols-3 gap-3 max-xl:grid-cols-1">
-          <SignalButton icon={Database} label="Projects" value={`${projectList.length} stacks`} detail={`${healthy} healthy / ${degraded} degraded / ${errored} errors`} onClick={() => void navigate({ to: "/projects" })} />
-          <SignalButton icon={Shield} label="Security" value={`${advisorFindings.data?.length ?? 0} findings`} detail={`${complianceReport.data?.summary.passed ?? 0}/${complianceReport.data?.summary.total || "-"} controls pass`} onClick={() => void navigate({ to: "/security" })} />
-          <SignalButton icon={Activity} label="Audit" value={auditIntegrity.data?.verified ?? metrics?.audit_verified ? "verified" : "pending"} detail={`${auditEvents.data?.length ?? 0} recent events`} onClick={() => void navigate({ to: "/audit" })} />
+          <InfoRow icon={ShieldAlert} title="Raw database access" detail={databaseIngress.detail} value={databaseIngress.value} />
+          <InfoRow icon={Database} title="Postgres listener" detail={metrics?.database_ingress?.postgres_public ? "reachable outside loopback" : "loopback only"} value={metrics?.database_ingress?.postgres_addr ?? "127.0.0.1:5432"} />
+          <InfoRow icon={Network} title="Pooler listener" detail={metrics?.database_ingress?.pooler_public ? "reachable outside loopback" : "loopback only"} value={metrics?.database_ingress?.pooler_addr ?? "127.0.0.1:6543"} />
         </div>
-      </section>
+      </CollapsibleCard>
 
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Projects</p>
-            <h2>Active projects</h2>
-          </div>
-          <button className="button secondary h-8 min-h-8" onClick={() => void navigate({ to: "/projects" })} type="button">
+      <AppPanel description="Aggregated usage sampled from project containers — distinct from whole-node load and from reservations." eyebrow="Project telemetry" title="Project runtime usage">
+        {hasProjectTelemetry ? (
+          <>
+            <div className="mt-4 grid grid-cols-3 gap-3 max-xl:grid-cols-1">
+              <ResourceMeter icon={Cpu} label="Project CPU" value={formatPercent(live.cpuCapacityPercent)} detail={`${formatDecimal(live.cpuVCpu)} / ${metrics?.host_capacity.cpu || "-"} vCPU`} footer={`${observed?.projects_sampled ?? 0} sampled`} percent={live.cpuCapacityPercent} />
+              <ResourceMeter icon={Gauge} label="Project memory" value={formatPercent(live.memoryCapacityPercent)} detail={`${formatBytes(observed?.memory_bytes ?? 0)} / ${formatCapacityRAM(metrics?.host_capacity.ram_mb ?? 0)}`} footer="of node RAM" percent={live.memoryCapacityPercent} />
+              <NetworkRow icon={Network} ready={networkRateReady} rate={networkRate} title="Project network" />
+              {hasDiskTelemetry ? <InfoRow icon={HardDrive} title="Project disk" detail={`${formatBytes(observed?.disk_used_bytes ?? 0)} of ${formatBytes(observed?.disk_limit_bytes ?? 0)}`} value={formatPercent(((observed?.disk_used_bytes ?? 0) / (observed?.disk_limit_bytes ?? 1)) * 100)} /> : null}
+              <InfoRow title="Fresh samples" detail={`${observed?.projects_sampled ?? 0} active projects sampled`} value={formatOptionalTime(observed?.latest_sampled_at, "pending")} />
+              <InfoRow title="Stale samples" detail={`${observed?.stale_projects ?? 0} active projects older than ${observed?.stale_after_seconds ?? 0}s`} value={formatOptionalTime(observed?.oldest_sampled_at, "none")} />
+            </div>
+            {history.length > 1 ? <TelemetryLineChart ariaLabel="Recent project CPU and memory utilization" points={history.map((point) => ({ sampledAt: point.sampledAt, cpu: point.cpuCapacityPercent, memory: point.memoryCapacityPercent }))} title="Recent project usage" /> : null}
+          </>
+        ) : (
+          <EmptyState
+            className="mt-4"
+            icon={Database}
+            title="No project runtime samples yet"
+            description="No active projects are reporting container telemetry. Deploy a project to start seeing sampled CPU, memory and network usage here."
+            action={<Button onClick={() => void navigate({ to: "/projects/new" })} size="sm" type="button"><Plus size={14} />Create project</Button>}
+          />
+        )}
+      </AppPanel>
+
+      <AppPanel
+        actions={
+          <Button onClick={() => void navigate({ to: "/projects" })} size="sm" type="button" variant="secondary">
             <Database size={14} />
             All projects
-          </button>
-        </div>
+          </Button>
+        }
+        eyebrow="Projects"
+        title="Active projects"
+      >
         <div className="mt-4 grid gap-2">
           {projects.isLoading ? <p className="text-sm text-muted">Loading projects...</p> : null}
-          {!projects.isLoading && projectList.length === 0 ? <p className="text-sm text-muted">No projects deployed yet.</p> : null}
+          {!projects.isLoading && projectList.length === 0 ? (
+            <EmptyState
+              icon={Database}
+              title="No projects deployed"
+              description="No projects have been created on this control plane yet. Create your first project to deploy a Supabase stack."
+              action={<Button onClick={() => void navigate({ to: "/projects/new" })} size="sm" type="button"><Plus size={14} />Create project</Button>}
+            />
+          ) : null}
           {projectList.slice(0, 8).map((project) => (
             <button className="usage-row text-left transition hover:border-border-strong hover:bg-surface-2" key={project.ref} onClick={() => routeToProject(project.ref)} type="button">
               <span className="min-w-0">
                 <span className="flex min-w-0 items-center gap-2">
                   <span className={`status-dot ${project.status === "healthy" ? "bg-success" : project.status === "error" ? "bg-danger" : "bg-warning"}`} />
                   <span className="truncate text-sm font-medium">{project.name}</span>
-                  <span className={`pill ${project.status === "healthy" ? "healthy" : project.status === "error" ? "error" : "provisioning"}`}>{project.status}</span>
+                  <StatusPill status={project.status} />
                 </span>
                 <span className="mt-1 block truncate font-mono text-xs text-muted">{project.ref} / {project.spec.domain} / {project.spec.resource_tier}</span>
               </span>
@@ -149,113 +217,68 @@ export function FleetDashboardPage() {
               </span>
             </button>
           ))}
+          {projectList.length > 8 ? (
+            <button className="usage-row text-left text-sm font-medium text-accent transition hover:border-border-strong hover:bg-surface-2" onClick={() => void navigate({ to: "/projects" })} type="button">
+              <span>View all {projectList.length} projects</span>
+              <span className="flex items-center gap-2 text-xs text-muted">+{projectList.length - 8} more<ArrowRight size={14} /></span>
+            </button>
+          ) : null}
         </div>
-      </section>
+      </AppPanel>
     </div>
   );
 }
 
-function Metric({ detail, label, tone, value }: { label: string; value: string; detail?: string; tone?: "healthy" | "warning" | "error" }) {
-  const valueClass = tone === "healthy" ? "text-success" : tone === "warning" ? "text-warning" : tone === "error" ? "text-danger" : "";
+function ReservationMeter({ capacity, icon, label, render, used }: { icon: LucideIcon; label: string; used: number; capacity: number; render: (value: number) => string }) {
+  const percent = ratioPercent(used, capacity);
+  const tone = utilizationTone(percent, capacity);
   return (
-    <div className="metric-cell bg-bg">
-      <p className="label">{label}</p>
-      <p className={`truncate text-sm font-medium ${valueClass}`}>{value}</p>
-      {detail ? <p className="mt-1 truncate text-xs text-faint">{detail}</p> : null}
-    </div>
+    <ResourceMeter
+      detail={capacity > 0 ? `${formatPercent(percent)} of ${render(capacity)} reserved` : "capacity unset"}
+      footer={
+        capacity > 0 ? (
+          <span className={`font-medium ${meterToneText(tone)}`}>
+            {formatPercent(percent)}
+            {percent >= 100 ? " · over limit" : percent >= 85 ? " · near 85% limit" : ""}
+          </span>
+        ) : (
+          <span className="text-faint">no limit set</span>
+        )
+      }
+      icon={icon}
+      label={label}
+      percent={Math.max(clampPercent(percent), used > 0 ? 3 : 0)}
+      tone={tone}
+      value={render(used)}
+    />
   );
 }
 
-function UsageMeter({ detail, icon: Icon, label, percent, value }: { icon: LucideIcon; label: string; value: string; detail: string; percent: number }) {
-  const normalized = clampPercent(percent);
-  return (
-    <div className="usage-row">
-      <div className="min-w-0">
-        <p className="flex items-center gap-2 truncate text-sm font-medium"><Icon size={14} className="text-faint" />{label}</p>
-        <p className="mt-1 truncate text-xs text-muted">{detail}</p>
-        <div className="resource-bar mt-2"><span style={{ width: `${normalized || 2}%` }} /></div>
-      </div>
-      <div className="text-right text-xs text-muted">
-        <p className="text-sm font-medium text-text">{value}</p>
-        <p>{formatPercent(percent)}</p>
-      </div>
-    </div>
-  );
+// MetricCard only knows default/success/warning/danger; map info+neutral to default.
+function mcardTone(tone: Tone): "default" | "success" | "warning" | "danger" {
+  return tone === "success" || tone === "warning" || tone === "danger" ? tone : "default";
 }
 
-function ResourceRow({ capacity, formatter, icon: Icon, label, suffix = "", used }: { icon: LucideIcon; label: string; used: number; capacity: number; suffix?: string; formatter?: (value: number) => string }) {
-  const percent = capacity > 0 ? (used / capacity) * 100 : 0;
-  const render = formatter ?? ((value: number) => suffix ? `${value.toLocaleString()} ${suffix}` : value.toLocaleString());
-  return (
-    <div className="usage-row">
-      <div className="min-w-0">
-        <p className="flex items-center gap-2 truncate text-sm font-medium"><Icon size={14} className="text-faint" />{label}</p>
-        <div className="resource-bar mt-2"><span style={{ width: `${Math.max(clampPercent(percent), used > 0 ? 3 : 0)}%` }} /></div>
-      </div>
-      <div className="text-right text-xs text-muted">
-        <p className="text-sm font-medium text-text">{render(used)}</p>
-        <p>{capacity > 0 ? `${formatPercent(percent)} of ${render(capacity)}` : "capacity unset"}</p>
-      </div>
-    </div>
-  );
+function meterToneText(tone: Tone) {
+  switch (tone) {
+    case "danger":
+      return "text-danger";
+    case "warning":
+      return "text-warning";
+    case "success":
+      return "text-success";
+    default:
+      return "text-muted";
+  }
 }
 
-function InfoRow({ detail, icon: Icon, title, value }: { title: string; detail: string; value: string; icon?: LucideIcon }) {
-  return (
-    <div className="usage-row">
-      <div className="min-w-0">
-        <p className="flex items-center gap-2 truncate text-sm font-medium">{Icon ? <Icon size={14} className="text-faint" /> : null}{title}</p>
-        <p className="truncate text-xs text-muted">{detail}</p>
-      </div>
-      <p className="text-right text-xs text-muted">{value}</p>
-    </div>
-  );
-}
-
-function UsageTrendChart({ points }: { points: FleetHistoryPoint[] }) {
-  const cpuLine = trendPolyline(points.map((point) => point.cpuCapacityPercent));
-  const memoryLine = trendPolyline(points.map((point) => point.memoryCapacityPercent));
-  const latest = points[points.length - 1];
-  return (
-    <div className="usage-trend mt-4">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="label">Recent utilization</p>
-          <p className="mt-1 text-sm font-medium">{points.length > 1 ? `${points.length} samples` : "Waiting for samples"}</p>
-        </div>
-        <div className="flex flex-wrap justify-end gap-2 text-xs text-muted">
-          <span className="trend-legend cpu">CPU</span>
-          <span className="trend-legend memory">RAM</span>
-          {latest ? <span>{formatTime(latest.sampledAt)}</span> : null}
-        </div>
-      </div>
-      <svg aria-label="Recent CPU and memory utilization" className="trend-chart mt-3" preserveAspectRatio="none" viewBox="0 0 100 48">
-        <line className="trend-grid-line" x1="0" x2="100" y1="12" y2="12" />
-        <line className="trend-grid-line" x1="0" x2="100" y1="24" y2="24" />
-        <line className="trend-grid-line" x1="0" x2="100" y1="36" y2="36" />
-        {points.length > 1 ? <polyline className="trend-line cpu" points={cpuLine} /> : null}
-        {points.length > 1 ? <polyline className="trend-line memory" points={memoryLine} /> : null}
-      </svg>
-    </div>
-  );
-}
-
-function SignalButton({ detail, icon: Icon, label, onClick, value }: { icon: LucideIcon; label: string; value: string; detail: string; onClick: () => void }) {
-  return (
-    <button className="usage-row text-left transition hover:border-border-strong hover:bg-surface-2" onClick={onClick} type="button">
-      <span className="flex min-w-0 items-center gap-2">
-        <Icon size={14} className="text-faint" />
-        <span className="min-w-0">
-          <span className="block truncate text-sm font-medium">{label}</span>
-          <span className="block truncate text-xs text-muted">{detail}</span>
-        </span>
-      </span>
-      <span className="flex items-center gap-2 text-xs text-muted">
-        {value}
-        <ArrowRight size={14} />
-      </span>
-    </button>
-  );
+// Renders a network throughput value, or a neutral "collecting" pill while we
+// still only have a single sample (so idle 0 B/s isn't confused with no data).
+function NetworkRow({ icon, ready, rate, title }: { icon: LucideIcon; ready: boolean; rate: { rxBytesPerSecond: number; txBytesPerSecond: number }; title: string }) {
+  if (!ready) {
+    return <InfoRow icon={icon} title={title} detail="Collecting samples — needs a second reading" value="collecting…" />;
+  }
+  return <InfoRow icon={icon} title={title} detail={`${formatBytes(rate.rxBytesPerSecond)}/s in / ${formatBytes(rate.txBytesPerSecond)}/s out`} value={`${formatBytes(rate.rxBytesPerSecond + rate.txBytesPerSecond)}/s`} />;
 }
 
 function emptyLiveUsage() {
@@ -281,12 +304,19 @@ function liveUsageFromMetrics(metrics: FleetMetrics) {
 
 function historyPointFromMetrics(metrics: FleetMetrics): FleetHistoryPoint {
   const live = liveUsageFromMetrics(metrics);
+  const node = metrics.node_observed?.[0];
+  const nodeMemoryPercent = node && node.memory_total_bytes > 0 ? (node.memory_used_bytes / node.memory_total_bytes) * 100 : 0;
   return {
     sampledAt: metrics.sampled_at,
     cpuCapacityPercent: live.cpuCapacityPercent,
     memoryCapacityPercent: live.memoryCapacityPercent,
     networkRxBytes: metrics.observed?.network_rx_bytes ?? 0,
     networkTxBytes: metrics.observed?.network_tx_bytes ?? 0,
+    nodeCpuPercent: node?.cpu_percent ?? 0,
+    nodeMemoryPercent,
+    nodeNetworkSampled: node?.network_sampled ?? false,
+    nodeNetworkRxBytes: node?.network_rx_bytes ?? 0,
+    nodeNetworkTxBytes: node?.network_tx_bytes ?? 0,
   };
 }
 
@@ -303,16 +333,18 @@ function networkRateFromHistory(points: FleetHistoryPoint[]) {
   };
 }
 
-function trendPolyline(values: number[]) {
-  if (values.length <= 1) {
-    return "";
+function nodeNetworkRateFromHistory(points: FleetHistoryPoint[]) {
+  const sampled = points.filter((point) => point.nodeNetworkSampled);
+  const current = sampled[sampled.length - 1];
+  const previous = sampled[sampled.length - 2];
+  if (!current || !previous) {
+    return { rxBytesPerSecond: 0, txBytesPerSecond: 0 };
   }
-  const maxIndex = Math.max(1, values.length - 1);
-  return values.map((value, index) => {
-    const x = (index / maxIndex) * 100;
-    const y = 48 - (clampPercent(value) / 100) * 44 - 2;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
+  const seconds = Math.max(1, (new Date(current.sampledAt).getTime() - new Date(previous.sampledAt).getTime()) / 1000);
+  return {
+    rxBytesPerSecond: Math.max(0, (current.nodeNetworkRxBytes - previous.nodeNetworkRxBytes) / seconds),
+    txBytesPerSecond: Math.max(0, (current.nodeNetworkTxBytes - previous.nodeNetworkTxBytes) / seconds),
+  };
 }
 
 function clampPercent(value: number) {
@@ -329,4 +361,64 @@ function formatDecimal(value: number) {
 
 function formatCapacityRAM(ramMB: number) {
   return ramMB > 0 ? formatBytes(ramMB * 1024 * 1024) : "-";
+}
+
+function databaseIngressStatus(metrics: FleetMetrics | undefined): { value: string; detail: string; tone: "default" | "success" | "warning" | "danger" } {
+  const ingress = metrics?.database_ingress;
+  if (!ingress || !ingress.public) {
+    return {
+      value: "Loopback only",
+      detail: "DB/pooler ports aren't published; no project is reachable externally",
+      tone: "default",
+    };
+  }
+  // Host ports are published; per-project exposure (private by default) is the
+  // real gate — so this is informational, not an alarm.
+  return {
+    value: "Host ports published",
+    detail: "Each project stays private until opened (Config → Network)",
+    tone: "default",
+  };
+}
+
+// Per-resource utilization tone: >=100% overcommitted (danger), >=85% near
+// limit (warning), otherwise within capacity (success). "neutral" only when no
+// capacity is configured yet, so the bar isn't a misleading flat accent blue.
+function utilizationTone(percent: number, capacity: number): Tone {
+  if (capacity <= 0) return "neutral";
+  if (percent >= 100) return "danger";
+  if (percent >= 85) return "warning";
+  return "success";
+}
+
+function reservationStatusFromMetrics(metrics: FleetMetrics | undefined): { label: string; tone: Tone; worstResource: string; worstPercent: number } {
+  if (!metrics) {
+    return { label: "pending", tone: "neutral", worstResource: "Reservations", worstPercent: 0 };
+  }
+  const resources: Array<{ name: string; percent: number }> = [
+    { name: "CPU", percent: ratioPercent(metrics.host_used.cpu, metrics.host_capacity.cpu) },
+    { name: "RAM", percent: ratioPercent(metrics.host_used.ram_mb, metrics.host_capacity.ram_mb) },
+    { name: "Disk", percent: ratioPercent(metrics.host_used.disk_gb, metrics.host_capacity.disk_gb) },
+    { name: "Project slots", percent: ratioPercent(metrics.host_used.projects, metrics.host_capacity.projects) },
+  ];
+  const worst = resources.reduce((acc, item) => (item.percent > acc.percent ? item : acc), resources[0]);
+  const peak = worst.percent;
+  const label = peak >= 100 ? "overcommitted" : peak >= 85 ? "near limit" : "within capacity";
+  const tone: Tone = peak >= 100 ? "danger" : peak >= 85 ? "warning" : "success";
+  return { label, tone, worstResource: worst.name, worstPercent: peak };
+}
+
+function ratioPercent(used: number, capacity: number) {
+  return capacity > 0 ? (used / capacity) * 100 : 0;
+}
+
+function formatOptionalTime(value: string | undefined, fallback: string) {
+  if (!value) {
+    return fallback;
+  }
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return fallback;
+  }
+  return formatTime(value);
 }

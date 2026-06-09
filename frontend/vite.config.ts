@@ -24,6 +24,9 @@ export default defineConfig(({ mode }) => {
             if (id.includes("/lucide-react/")) {
               return "vendor-icons";
             }
+            if (id.includes("/recharts/") || id.includes("/d3-") || id.includes("/victory-vendor/")) {
+              return "vendor-charts";
+            }
             if (id.includes("/zustand/")) {
               return "vendor-state";
             }

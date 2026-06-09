@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
@@ -147,15 +145,15 @@ func (r *projectAnalyticsBucketResource) Schema(ctx context.Context, req resourc
 }
 
 func (r *projectAnalyticsBucketResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectAnalyticsBucketResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "name")
 }
 
 func (r *projectAnalyticsBucketResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -207,32 +205,7 @@ func (r *projectAnalyticsBucketResource) Read(ctx context.Context, req resource.
 }
 
 func (r *projectAnalyticsBucketResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectAnalyticsBucketResourceModel
-	var state projectAnalyticsBucketResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := analyticsBucketInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectAnalyticsBucket(ctx, state.Ref.ValueString(), state.Name.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project analytics bucket", err.Error())
-		return
-	}
-	bucket, err := r.client.CreateProjectAnalyticsBucket(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project analytics bucket", err.Error())
-		return
-	}
-	setProjectAnalyticsBucketState(ctx, &plan, bucket, input.CredentialHandle, input.Metadata, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project analytics bucket")
 }
 
 func (r *projectAnalyticsBucketResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -249,16 +222,7 @@ func (r *projectAnalyticsBucketResource) Delete(ctx context.Context, req resourc
 }
 
 func (r *projectAnalyticsBucketResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, name, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, name, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name, for example alpha/events.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(name))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "name", "Use ref/name, for example alpha/events.")
 }
 
 func (r *projectAnalyticsBucketResource) findAnalyticsBucket(ctx context.Context, ref string, name string) (ProjectAnalyticsBucket, error) {
@@ -267,12 +231,7 @@ func (r *projectAnalyticsBucketResource) findAnalyticsBucket(ctx context.Context
 		return ProjectAnalyticsBucket{}, err
 	}
 	normalized := strings.ToLower(strings.TrimSpace(name))
-	for _, bucket := range buckets {
-		if bucket.Name == normalized {
-			return bucket, nil
-		}
-	}
-	return ProjectAnalyticsBucket{}, ErrNotFound
+	return findInList(buckets, func(bucket ProjectAnalyticsBucket) bool { return bucket.Name == normalized })
 }
 
 func analyticsBucketInputFromModel(ctx context.Context, model projectAnalyticsBucketResourceModel, addError func(string, string)) (ProjectAnalyticsBucketInput, bool) {
@@ -311,31 +270,9 @@ func setProjectAnalyticsBucketState(ctx context.Context, model *projectAnalytics
 	model.CreatedAt = optionalTimeString(bucket.CreatedAt)
 	model.UpdatedAt = optionalTimeString(bucket.UpdatedAt)
 
-	metadata, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(bucket.Metadata, previousMetadata))
-	if diags.HasError() {
-		addError("Unable to encode metadata map", diags.Errors()[0].Detail())
+	metadata, ok := sensitiveStringMapStateValue(ctx, "metadata", bucket.Metadata, previousMetadata, addError)
+	if !ok {
 		return
 	}
 	model.Metadata = metadata
-}
-
-func previousSensitiveString(value types.String) string {
-	if value.IsNull() || value.IsUnknown() {
-		return ""
-	}
-	return value.ValueString()
-}
-
-func preserveMaskedSensitiveValue(remote string, previous string) string {
-	if remote == "********" && strings.TrimSpace(previous) != "" {
-		return previous
-	}
-	return remote
-}
-
-func sensitiveStringValue(value string) types.String {
-	if strings.TrimSpace(value) == "" {
-		return types.StringNull()
-	}
-	return types.StringValue(value)
 }

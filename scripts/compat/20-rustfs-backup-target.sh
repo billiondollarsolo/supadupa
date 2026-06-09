@@ -19,7 +19,7 @@ ensure_token
 
 token="$(read_secret_file "$ARTIFACT_DIR/token")"
 api_base="${SUPADUPA_API_URL%/}"
-image="${SUPADUPA_COMPAT_RUSTFS_IMAGE:-rustfs/rustfs:latest}"
+image="${SUPADUPA_COMPAT_RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.2}"
 access_key="${SUPADUPA_COMPAT_RUSTFS_ACCESS_KEY:-rustfsadmin}"
 secret_key="${SUPADUPA_COMPAT_RUSTFS_SECRET_KEY:-rustfsadmin-secret}"
 container_name="supadupa-compat-rustfs-${SUPADUPA_TEST_REF}-$$"

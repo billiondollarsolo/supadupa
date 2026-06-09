@@ -1,0 +1,46 @@
+Supadupa has been installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Components:
+  - control-plane (API)   : {{ include "supadupa.fullname" . }}-api (port {{ .Values.controlPlane.service.port }})
+  - admin (UI)            : {{ include "supadupa.fullname" . }}-admin (port {{ .Values.admin.service.port }})
+{{- if .Values.metaDb.enabled }}
+  - meta-db (Postgres)    : {{ include "supadupa.metaDbHost" . }}:5432
+{{- end }}
+{{- if .Values.operator.enabled }}
+  - operator              : {{ include "supadupa.fullname" . }}-operator{{ if .Values.operator.leaderElection.enabled }} (leader election ON, replicas={{ .Values.operator.replicaCount }}){{ else }} (single replica){{ end }}
+{{- end }}
+
+Reach the API / admin:
+{{- if .Values.ingress.enabled }}
+  API host   : https://{{ .Values.ingress.apiHost }}
+  Admin host : https://{{ .Values.ingress.adminHost }}
+{{- else }}
+  Ingress is disabled. Use port-forward:
+    kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "supadupa.fullname" . }}-api {{ .Values.controlPlane.service.port }}:{{ .Values.controlPlane.service.port }}
+    kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "supadupa.fullname" . }}-admin {{ .Values.admin.service.port }}:{{ .Values.admin.service.port }}
+{{- end }}
+
+Project isolation:
+{{- if .Values.projectIsolation.enabled }}
+  ENABLED — each project gets a dedicated namespace ("{{ .Values.projectIsolation.runtimeNamespacePrefix }}<ref>"),
+  a tokenless runtime ServiceAccount, ResourceQuota/LimitRange, and Pod Security
+  Admission labels (enforce={{ .Values.projectIsolation.podSecurity.enforce }}, audit={{ .Values.projectIsolation.podSecurity.audit }}, warn={{ .Values.projectIsolation.podSecurity.warn }}).
+{{- if .Values.projectIsolation.networkPolicy.enabled }}
+
+  ############################################################################
+  # WARNING: NetworkPolicy enforcement requires a policy-enforcing CNI        #
+  #          (Calico, Cilium, ...). Under kindnet and other flat CNIs the     #
+  #          per-project NetworkPolicies render and apply but DO NOT block    #
+  #          traffic — cross-tenant network isolation is NOT enforced there.  #
+  #          Treat a policy-enforcing CNI as a hard prerequisite for          #
+  #          multi-tenant production.                                         #
+  ############################################################################
+{{- else }}
+
+  NetworkPolicies are DISABLED (projectIsolation.networkPolicy.enabled=false):
+  isolation is namespace + RBAC + PSA + quota only; no network-level denial.
+{{- end }}
+{{- else }}
+  DISABLED — legacy single-namespace mode: all project workloads share the
+  runtime namespace. No per-project namespaces / NetworkPolicies / quotas.
+{{- end }}

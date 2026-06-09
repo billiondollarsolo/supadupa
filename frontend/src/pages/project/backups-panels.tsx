@@ -1,9 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import type { ColumnDef } from "@tanstack/react-table";
-import { AlertTriangle, CheckCircle2, Database, Play, RotateCcw } from "lucide-react";
+import { Database, HardDriveUpload, Play, RotateCcw } from "lucide-react";
 import { DataTable } from "../../components/data-table";
 import { Modal } from "../../components/modal";
+import { AppPanel } from "../../components/app/app-panel";
+import { Button, buttonVariants } from "../../components/ui/button";
+import { CollapsibleCard } from "../../components/ui/collapsible-card";
+import { EmptyState } from "../../components/ui/empty-state";
+import { Field, SubSection } from "../../components/ui/field";
+import { Input } from "../../components/ui/input";
+import { MetricCard } from "../../components/app/metric-card";
+import { NativeSelect } from "../../components/ui/native-select";
+import { StatusPill } from "../../components/ui/status-pill";
+import { Switch } from "../../components/ui/switch";
 import {
   archiveWAL,
   restoreBackup,
@@ -12,12 +23,23 @@ import {
   updateBackupPolicy,
   updatePITRPolicy,
 } from "../../api";
-import { formatBytes, formatDateTime, shortChecksum } from "../../lib/format";
+import { formatBytes, formatDateTime, formatRelativeTime, shortChecksum } from "../../lib/format";
+import { statusTone } from "../../lib/status";
 import type { Backup, BackupPolicy, BackupStorageTarget, PITRPolicy, Project, ProjectRecoverabilityStatus, WALArchive } from "../../types";
 import { useUIStore } from "../../lib/ui-store";
 
 type BackupConfirm = { kind: "trigger" } | { kind: "restore"; backup: Backup };
-type RecoverabilityGate = { label: string; detail: string; state: "ready" | "warning" | "missing" };
+type GateState = "ready" | "warning" | "missing";
+type RecoverabilityGate = { label: string; detail: string; state: GateState };
+type GateGroup = { title: string; description: string; gates: RecoverabilityGate[] };
+
+function gateTone(state: GateState) {
+  return state === "ready" ? ("success" as const) : state === "warning" ? ("warning" as const) : ("danger" as const);
+}
+
+function gateLabel(state: GateState) {
+  return state === "ready" ? "ready" : state === "warning" ? "pending" : "missing";
+}
 
 function recoverabilityTitle(status: ProjectRecoverabilityStatus) {
   if (status.restore_to_time_available) return "Restore-to-time ready";
@@ -40,54 +62,74 @@ function recoverabilityDetail(status: ProjectRecoverabilityStatus) {
   return status.recommendations[0] ?? status.warnings[0] ?? "Enable backups before relying on project recovery.";
 }
 
-function recoverabilityGates(status: ProjectRecoverabilityStatus): RecoverabilityGate[] {
+// The eight readiness checks grouped so they ladder up to the headline verdict:
+// can I recover locally, off-host, and to an arbitrary point in time?
+function recoverabilityGroups(status: ProjectRecoverabilityStatus): GateGroup[] {
   const walVerifiedAt = status.latest_wal_archive?.verified_at ?? status.latest_wal_archive?.created_at;
   return [
     {
-      label: "Backup policy",
-      detail: status.backup_policy_enabled ? "Scheduled project backups are enabled." : "Scheduled backups are disabled.",
-      state: status.backup_policy_enabled ? "ready" : "missing",
+      title: "Local protection",
+      description: "Scheduled backups exist and have been verified on this host.",
+      gates: [
+        {
+          label: "Backup policy",
+          detail: status.backup_policy_enabled ? "Scheduled project backups are enabled." : "Scheduled backups are disabled.",
+          state: status.backup_policy_enabled ? "ready" : "missing",
+        },
+        {
+          label: "Verified backup",
+          detail: status.latest_verified_backup
+            ? `${status.latest_verified_backup.kind} backup verified ${formatDateTime(status.latest_verified_backup.verified_at ?? status.latest_verified_backup.created_at)}.`
+            : "No completed verified backup is available.",
+          state: status.latest_verified_backup ? "ready" : status.latest_backup ? "warning" : "missing",
+        },
+      ],
     },
     {
-      label: "Verified backup",
-      detail: status.latest_verified_backup
-        ? `${status.latest_verified_backup.kind} backup verified ${formatDateTime(status.latest_verified_backup.verified_at ?? status.latest_verified_backup.created_at)}.`
-        : "No completed verified backup is available.",
-      state: status.latest_verified_backup ? "ready" : status.latest_backup ? "warning" : "missing",
+      title: "Off-host durability",
+      description: "Backups survive loss of this host by living on a remote target.",
+      gates: [
+        {
+          label: "Off-host target",
+          detail: status.off_host_backup_configured ? "A default or project S3-compatible target has passed validation." : "No validated default or project S3-compatible target is configured.",
+          state: status.off_host_backup_configured ? "ready" : "missing",
+        },
+        {
+          label: "Off-host artifact",
+          detail: status.off_host_backup_verified ? "Latest verified backup has a remote artifact." : "Run a backup after configuring the target.",
+          state: status.off_host_backup_verified ? "ready" : status.off_host_backup_configured ? "warning" : "missing",
+        },
+      ],
     },
     {
-      label: "Off-host target",
-      detail: status.off_host_backup_configured ? "A default or project S3-compatible target has passed validation." : "No validated default or project S3-compatible target is configured.",
-      state: status.off_host_backup_configured ? "ready" : "missing",
-    },
-    {
-      label: "Off-host artifact",
-      detail: status.off_host_backup_verified ? "Latest verified backup has a remote artifact." : "Run a backup after configuring the target.",
-      state: status.off_host_backup_verified ? "ready" : status.off_host_backup_configured ? "warning" : "missing",
-    },
-    {
-      label: "Physical base backup",
-      detail: status.physical_backup_available ? "Verified physical backup is available for PITR." : "No verified physical base backup is available.",
-      state: status.physical_backup_available ? "ready" : "missing",
-    },
-    {
-      label: "PITR policy",
-      detail: status.pitr_enabled ? "WAL archive policy is enabled." : "PITR is disabled.",
-      state: status.pitr_enabled ? "ready" : "missing",
-    },
-    {
-      label: "WAL archive",
-      detail: status.wal_archive_off_host_verified
-        ? `Remote WAL archive verified ${walVerifiedAt ? formatDateTime(walVerifiedAt) : "recently"}.`
-        : status.latest_wal_archive
-          ? "WAL archive exists only locally."
-          : "No verified WAL archive is available.",
-      state: status.wal_archive_off_host_verified ? "ready" : status.latest_wal_archive ? "warning" : "missing",
-    },
-    {
-      label: "Restore command",
-      detail: status.restore_to_time_configured ? "Restore-to-time command is configured." : "SUPADUPA_PITR_RESTORE_COMMAND is not configured.",
-      state: status.restore_to_time_configured ? "ready" : "missing",
+      title: "Point-in-time recovery",
+      description: "WAL archiving and a base backup let you restore to any moment in the window.",
+      gates: [
+        {
+          label: "Physical base backup",
+          detail: status.physical_backup_available ? "Verified physical backup is available for PITR." : "No verified physical base backup is available.",
+          state: status.physical_backup_available ? "ready" : "missing",
+        },
+        {
+          label: "PITR policy",
+          detail: status.pitr_enabled ? "WAL archive policy is enabled." : "PITR is disabled.",
+          state: status.pitr_enabled ? "ready" : "missing",
+        },
+        {
+          label: "WAL archive",
+          detail: status.wal_archive_off_host_verified
+            ? `Remote WAL archive verified ${walVerifiedAt ? formatDateTime(walVerifiedAt) : "recently"}.`
+            : status.latest_wal_archive
+              ? "WAL archive exists only locally."
+              : "No verified WAL archive is available.",
+          state: status.wal_archive_off_host_verified ? "ready" : status.latest_wal_archive ? "warning" : "missing",
+        },
+        {
+          label: "Restore command",
+          detail: status.restore_to_time_configured ? "Restore-to-time command is configured." : "SUPADUPA_PITR_RESTORE_COMMAND is not configured.",
+          state: status.restore_to_time_configured ? "ready" : "missing",
+        },
+      ],
     },
   ];
 }
@@ -95,11 +137,14 @@ function recoverabilityGates(status: ProjectRecoverabilityStatus): Recoverabilit
 export function BackupPanel({ project, backups, policy, recoverability, storageTargets, loading }: { project?: Project; backups: Backup[]; policy?: BackupPolicy; recoverability?: ProjectRecoverabilityStatus; storageTargets: BackupStorageTarget[]; loading: boolean }) {
   const queryClient = useQueryClient();
   const addToast = useUIStore((state) => state.addToast);
+  const dismissedHints = useUIStore((state) => state.dismissedHints);
+  const dismissHint = useUIStore((state) => state.dismissHint);
   const [enabled, setEnabled] = useState(true);
   const [schedule, setSchedule] = useState("daily");
   const [kind, setKind] = useState("logical");
   const [storageTargetID, setStorageTargetID] = useState("");
   const [confirmAction, setConfirmAction] = useState<BackupConfirm | null>(null);
+  const [showAll, setShowAll] = useState(false);
   const policyKey = `${project?.ref ?? ""}:${policy?.enabled ?? ""}:${policy?.schedule ?? ""}:${policy?.kind ?? ""}:${policy?.storage_target_id ?? ""}`;
   useEffect(() => {
     if (policy) {
@@ -172,19 +217,19 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
         header: "Status",
         accessorKey: "status",
         size: 120,
-        cell: ({ row }) => <span className={`pill ${row.original.status === "completed" ? "healthy" : "provisioning"}`}>{row.original.status}</span>,
+        cell: ({ row }) => <StatusPill tone={statusTone(row.original.status)} label={row.original.status} />,
       },
       {
         header: "Started",
         accessorKey: "started_at",
         size: 150,
-        cell: ({ row }) => formatDateTime(row.original.started_at ?? row.original.created_at),
+        cell: ({ row }) => formatRelativeTime(row.original.started_at ?? row.original.created_at),
       },
       {
         header: "Finished",
         accessorKey: "finished_at",
         size: 150,
-        cell: ({ row }) => row.original.finished_at || row.original.verified_at ? formatDateTime(row.original.finished_at ?? row.original.verified_at ?? "") : "pending",
+        cell: ({ row }) => row.original.finished_at || row.original.verified_at ? formatRelativeTime(row.original.finished_at ?? row.original.verified_at ?? "") : "pending",
       },
       {
         header: "Artifact",
@@ -207,96 +252,182 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
         header: "",
         id: "actions",
         size: 52,
-        cell: ({ row }) => (
-          <button className="icon-button" disabled={!project || restoreMutation.isPending || row.original.status !== "completed" || row.original.kind !== "logical"} onClick={() => setConfirmAction({ kind: "restore", backup: row.original })} title="Restore backup" type="button">
-            <Play size={14} />
-          </button>
-        ),
+        cell: ({ row }) => {
+          // Restore here only handles completed logical backups; physical
+          // backups recover via PITR, so explain rather than silently disable.
+          const restorable = row.original.status === "completed" && row.original.kind === "logical";
+          const reason = row.original.kind !== "logical" ? "Physical backups restore via PITR (use Restore to time)" : row.original.status !== "completed" ? "Backup is not completed yet" : "Restore from this backup";
+          return (
+            <Button variant="ghost" size="icon" disabled={!project || restoreMutation.isPending || !restorable} onClick={() => setConfirmAction({ kind: "restore", backup: row.original })} title={reason} type="button">
+              <Play size={14} />
+            </Button>
+          );
+        },
       },
     ],
     [project, restoreMutation.isPending],
   );
 
+  const lastVerified = recoverability?.latest_verified_backup;
+  const verdict = recoverability ? (recoverability.restore_to_time_available || recoverability.off_host_backup_verified ? "success" : recoverability.latest_verified_backup ? "warning" : "danger") : "default";
+  const visibleBackups = showAll ? backups : backups.slice(0, 5);
+  // No platform backup storage target means scheduled/triggered backups fall
+  // back to local artifacts on the host (not offsite/durable). Guide the user to
+  // configure one, but let them dismiss it if local-only is acceptable.
+  const guidanceKey = `backup-guidance:${project?.ref ?? ""}`;
+  const showBackupGuidance = !loading && storageTargets.length === 0 && !dismissedHints[guidanceKey];
+
   return (
     <>
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Backups</p>
-            <h2>Backup artifacts</h2>
-          </div>
-          <button className="icon-button" disabled={!project || mutation.isPending} onClick={() => setConfirmAction({ kind: "trigger" })} type="button">
-            <RotateCcw size={15} />
-          </button>
-        </div>
-        <div className="mt-4 grid gap-2">
+      <AppPanel
+        eyebrow="Backups"
+        title="Recoverability"
+        actions={
+          <Button variant="secondary" disabled={!project || mutation.isPending} onClick={() => setConfirmAction({ kind: "trigger" })} type="button">
+            <RotateCcw size={14} />
+            Back up now
+          </Button>
+        }
+      >
+        <div className="mt-4 grid gap-3">
           {loading ? <p className="text-sm text-muted">Loading backups...</p> : null}
-          {recoverability ? (
-            <div className="grid gap-2">
-              <div className="backup-row">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    {recoverability.restore_to_time_available || recoverability.off_host_backup_verified ? <CheckCircle2 className="text-success" size={16} /> : <AlertTriangle className="text-warning" size={16} />}
-                    <p className="truncate text-sm font-medium">{recoverabilityTitle(recoverability)}</p>
+
+          {showBackupGuidance ? (
+            <div className="rounded-md border border-warning/40 bg-warning/5 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-md border border-warning/40 text-warning">
+                    <HardDriveUpload size={16} />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">No backup destination configured</p>
+                    <p className="mt-1 text-xs leading-5 text-muted">
+                      This platform has no backup storage target, so backups would be written as local artifacts on the host — lost if the host is. Set up durable, offsite backups:
+                    </p>
+                    <ol className="mt-2 grid list-decimal gap-1 pl-4 text-xs leading-5 text-muted">
+                      <li>Add an S3-compatible backup storage target in <span className="font-medium text-text">Settings → Backups</span> (bucket, region, endpoint, credentials).</li>
+                      <li>Choose it as this project's <span className="font-medium text-text">Storage target</span> in the backup policy below and enable a schedule.</li>
+                      <li>Or click <span className="font-medium text-text">Back up now</span> any time for a one-off snapshot.</li>
+                    </ol>
                   </div>
-                  <p className="mt-1 truncate text-xs text-muted">{recoverabilityDetail(recoverability)}</p>
-                </div>
-                <div className="min-w-[180px] text-right">
-                  <span className={`pill ${recoverability.restore_to_time_available || recoverability.off_host_backup_verified ? "healthy" : recoverability.latest_verified_backup ? "provisioning" : "warning"}`}>{recoverability.status}</span>
-                  <p className="mt-1 truncate text-xs text-faint">{recoverability.latest_verified_backup ? `Verified ${formatDateTime(recoverability.latest_verified_backup.verified_at ?? recoverability.latest_verified_backup.created_at)}` : "No verified backup"}</p>
                 </div>
               </div>
-              <div className="recoverability-grid">
-                {recoverabilityGates(recoverability).map((gate) => (
-                  <div className="readiness-row" key={gate.label}>
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{gate.label}</p>
-                      <p className="mt-1 text-xs text-muted">{gate.detail}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Link className={buttonVariants({ variant: "secondary", size: "sm" })} to="/settings">
+                  Configure backup targets
+                </Link>
+                <Button variant="ghost" size="sm" onClick={() => dismissHint(guidanceKey)} type="button">
+                  Dismiss — I don't need backups here
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
+          {recoverability ? (
+            <>
+              {/* RPO/RTO headline — answer "how recoverable am I?" before the gates. */}
+              <div className="grid grid-cols-4 gap-2 max-lg:grid-cols-2">
+                <MetricCard
+                  label="Recovery readiness"
+                  value={recoverabilityTitle(recoverability)}
+                  detail={recoverabilityDetail(recoverability)}
+                  tone={verdict === "default" ? undefined : verdict}
+                />
+                <MetricCard
+                  label="Last successful backup"
+                  value={lastVerified ? formatRelativeTime(lastVerified.verified_at ?? lastVerified.created_at) : "none"}
+                  detail={lastVerified ? `${lastVerified.kind} · ${formatBytes(lastVerified.size_bytes)}` : "No verified backup yet"}
+                  tone={lastVerified ? "success" : "danger"}
+                />
+                <MetricCard
+                  label="Recovery point (RPO)"
+                  value={recoverability.restore_to_time_available ? "continuous (PITR)" : recoverability.backup_policy_enabled ? `~${policy?.schedule ?? schedule}` : "unprotected"}
+                  detail={recoverability.restore_to_time_available ? "Restore to any point in the window" : recoverability.backup_policy_enabled ? "Data since last scheduled backup is at risk" : "Enable a backup policy to bound data loss"}
+                  tone={recoverability.restore_to_time_available ? "success" : recoverability.backup_policy_enabled ? "warning" : "danger"}
+                />
+                <MetricCard
+                  label="PITR window"
+                  value={recoverability.recovery_window_start && recoverability.recovery_window_end ? `${formatDateTime(recoverability.recovery_window_start)} →` : "unavailable"}
+                  detail={recoverability.recovery_window_start && recoverability.recovery_window_end ? formatDateTime(recoverability.recovery_window_end) : recoverability.restore_to_time_unavailable ?? "Restore-to-time is not configured"}
+                  tone={recoverability.restore_to_time_available ? "success" : undefined}
+                />
+              </div>
+
+              {/* Gates grouped by what they protect, laddering up to the verdict. */}
+              <div className="grid gap-3 rounded-md border border-border bg-bg p-3">
+                {recoverabilityGroups(recoverability).map((group) => (
+                  <SubSection key={group.title} title={group.title} description={group.description}>
+                    <div className="recoverability-grid">
+                      {group.gates.map((gate) => (
+                        <div className="readiness-row" key={gate.label}>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{gate.label}</p>
+                            <p className="mt-1 text-xs text-muted">{gate.detail}</p>
+                          </div>
+                          <StatusPill tone={gateTone(gate.state)} label={gateLabel(gate.state)} />
+                        </div>
+                      ))}
                     </div>
-                    <span className={`pill ${gate.state === "ready" ? "healthy" : gate.state === "warning" ? "warning" : "paused"}`}>
-                      {gate.state === "ready" ? "ready" : gate.state === "warning" ? "pending" : "missing"}
-                    </span>
-                  </div>
+                  </SubSection>
                 ))}
               </div>
-            </div>
+            </>
           ) : null}
+
           {project && policy ? (
-            <div className="backup-row">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">Scheduled {policy.kind} backups</p>
-                <p className="truncate text-xs text-muted">
-                  {policy.enabled ? `Next run ${policy.next_run_at ? formatDateTime(policy.next_run_at) : "pending"}` : "Disabled"} · {policy.storage_target_id ? storageTargets.find((target) => target.id === policy.storage_target_id)?.name ?? "target pending" : storageTargets.some((target) => target.default) ? "platform default target" : "local artifact"}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <label className="flex items-center gap-2 text-sm text-muted">
-                  <input checked={enabled} onChange={(event) => setEnabled(event.target.checked)} type="checkbox" />
-                  Enabled
-                </label>
-                <select className="input w-[104px]" value={schedule} onChange={(event) => setSchedule(event.target.value)}>
-                  <option value="daily">Daily</option>
-                  <option value="hourly">Hourly</option>
-                </select>
-                <select className="input w-[112px]" value={kind} onChange={(event) => setKind(event.target.value)}>
-                  <option value="logical">Logical</option>
-                  <option value="physical">Physical</option>
-                </select>
-                <select className="input min-w-[160px]" value={storageTargetID} onChange={(event) => setStorageTargetID(event.target.value)}>
-                  <option value="">Platform default</option>
-                  {storageTargets.map((target) => (
-                    <option key={target.id} value={target.id}>{target.default ? `${target.name} (default)` : target.name}</option>
-                  ))}
-                </select>
-                <button className="button secondary justify-center" disabled={policyMutation.isPending} onClick={() => policyMutation.mutate({ ref: project.ref, nextEnabled: enabled, nextSchedule: schedule, nextKind: kind, nextStorageTargetID: storageTargetID })} type="button">
+            <CollapsibleCard
+              eyebrow="Schedule"
+              title="Backup policy"
+              description={`${policy.enabled ? `Next run ${policy.next_run_at ? formatRelativeTime(policy.next_run_at) : "pending"}` : "Disabled"} · ${policy.storage_target_id ? storageTargets.find((target) => target.id === policy.storage_target_id)?.name ?? "target pending" : storageTargets.some((target) => target.default) ? "platform default target" : "local artifact"}`}
+            >
+              <div className="grid grid-cols-[auto_120px_120px_minmax(0,1fr)_auto] items-end gap-2 max-md:grid-cols-1">
+                <Field label="Enabled" hint="Run scheduled backups">
+                  <label className="flex h-9 items-center gap-2 text-sm">
+                    <Switch checked={enabled} onCheckedChange={(next) => setEnabled(next)} aria-label="Scheduled backups enabled" />
+                    On
+                  </label>
+                </Field>
+                <Field label="Schedule" hint="Backup cadence">
+                  <NativeSelect value={schedule} onChange={(event) => setSchedule(event.target.value)}>
+                    <option value="daily">Daily</option>
+                    <option value="hourly">Hourly</option>
+                  </NativeSelect>
+                </Field>
+                <Field label="Kind" hint="Backup type">
+                  <NativeSelect value={kind} onChange={(event) => setKind(event.target.value)}>
+                    <option value="logical">Logical</option>
+                    <option value="physical">Physical</option>
+                  </NativeSelect>
+                </Field>
+                <Field label="Storage target" hint="Where artifacts are written">
+                  <NativeSelect value={storageTargetID} onChange={(event) => setStorageTargetID(event.target.value)}>
+                    <option value="">Platform default</option>
+                    {storageTargets.map((target) => (
+                      <option key={target.id} value={target.id}>{target.default ? `${target.name} (default)` : target.name}</option>
+                    ))}
+                  </NativeSelect>
+                </Field>
+                <Button variant="secondary" disabled={policyMutation.isPending} onClick={() => policyMutation.mutate({ ref: project.ref, nextEnabled: enabled, nextSchedule: schedule, nextKind: kind, nextStorageTargetID: storageTargetID })} type="button">
                   Save
-                </button>
+                </Button>
               </div>
-            </div>
+              {policyMutation.error ? <p className="mt-2 text-sm text-danger">{policyMutation.error.message}</p> : null}
+            </CollapsibleCard>
           ) : null}
-          <DataTable columns={backupColumns} data={backups.slice(0, 5)} emptyText="No backups have been recorded." />
+
+          <SubSection
+            title="Backup artifacts"
+            description="Logical backups restore here; physical backups recover via PITR."
+            actions={backups.length > 5 ? <Button variant="secondary" size="sm" onClick={() => setShowAll((value) => !value)} type="button">{showAll ? "Show recent" : `View all (${backups.length})`}</Button> : <span className="text-xs text-faint">{backups.length} total</span>}
+          >
+            {backups.length === 0 ? (
+              <EmptyState icon={RotateCcw} title="No backups recorded" description="Trigger a backup or enable a schedule to start protecting this project." action={<Button variant="secondary" disabled={!project || mutation.isPending} onClick={() => setConfirmAction({ kind: "trigger" })} type="button">Back up now</Button>} />
+            ) : (
+              <DataTable columns={backupColumns} data={visibleBackups} emptyText="" />
+            )}
+          </SubSection>
+
           {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
-          {policyMutation.error ? <p className="text-sm text-danger">{policyMutation.error.message}</p> : null}
           {restoreMutation.error ? <p className="text-sm text-danger">{restoreMutation.error.message}</p> : null}
           {restoreMutation.data ? (
             <p className="truncate font-mono text-xs text-muted">
@@ -304,7 +435,7 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
             </p>
           ) : null}
         </div>
-      </section>
+      </AppPanel>
       <Modal
         description={confirmAction?.kind === "trigger" ? `This creates a ${policy?.kind ?? kind} backup artifact for the selected project.` : "This starts a restore workflow from the selected logical backup."}
         onClose={() => !confirmPending && setConfirmAction(null)}
@@ -312,10 +443,10 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
         title={activeBackupTitle}
         footer={(
           <>
-            <button className="button secondary" disabled={confirmPending} onClick={() => setConfirmAction(null)} type="button">Cancel</button>
-            <button className={confirmAction?.kind === "restore" ? "button danger" : "button"} disabled={confirmPending || !project} onClick={runConfirmedBackupAction} type="button">
+            <Button variant="secondary" disabled={confirmPending} onClick={() => setConfirmAction(null)} type="button">Cancel</Button>
+            <Button variant={confirmAction?.kind === "restore" ? "danger" : "default"} disabled={confirmPending || !project} onClick={runConfirmedBackupAction} type="button">
               {confirmPending ? "Working..." : confirmAction?.kind === "restore" ? "Restore backup" : "Trigger backup"}
-            </button>
+            </Button>
           </>
         )}
       >
@@ -339,6 +470,7 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
   const [retentionDays, setRetentionDays] = useState(7);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [restoreTarget, setRestoreTarget] = useState("");
+  const [showAll, setShowAll] = useState(false);
   const policyKey = `${project?.ref ?? ""}:${policy?.enabled ?? ""}:${policy?.archive_bucket ?? ""}:${policy?.retention_days ?? ""}`;
   useEffect(() => {
     if (policy) {
@@ -395,19 +527,19 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
         header: "Status",
         accessorKey: "status",
         size: 120,
-        cell: ({ row }) => <span className={`pill ${row.original.status === "archived" ? "healthy" : "provisioning"}`}>{row.original.status}</span>,
+        cell: ({ row }) => <StatusPill tone={statusTone(row.original.status)} label={row.original.status} />,
       },
       {
         header: "Created",
         accessorKey: "created_at",
         size: 150,
-        cell: ({ row }) => formatDateTime(row.original.created_at),
+        cell: ({ row }) => formatRelativeTime(row.original.created_at),
       },
       {
         header: "Verified",
         accessorKey: "verified_at",
         size: 150,
-        cell: ({ row }) => row.original.verified_at ? formatDateTime(row.original.verified_at) : "pending",
+        cell: ({ row }) => row.original.verified_at ? formatRelativeTime(row.original.verified_at) : "pending",
       },
       {
         header: "Artifact",
@@ -424,20 +556,22 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
     ],
     [],
   );
+  const visibleArchives = showAll ? archives : archives.slice(0, 5);
 
   return (
     <>
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">PITR</p>
-            <h2>WAL archive</h2>
-          </div>
-          <button className="icon-button" disabled={!featureEnabled || !project || archiveMutation.isPending || !policy?.enabled} onClick={() => setConfirmArchive(true)} type="button">
-            <Database size={15} />
-          </button>
-        </div>
-        <div className="mt-4 grid gap-2">
+      <AppPanel
+        eyebrow="PITR"
+        title="Restore to time"
+        description="Point-in-time recovery via continuous WAL archiving — roll back to any moment in the window."
+        actions={
+          <Button variant="secondary" disabled={!featureEnabled || !project || archiveMutation.isPending || !policy?.enabled} onClick={() => setConfirmArchive(true)} title="Archive a WAL segment now" type="button">
+            <Database size={14} />
+            Archive WAL
+          </Button>
+        }
+      >
+        <div className="mt-4 grid gap-3">
           {!featureEnabled ? (
             <div className="rounded-md border border-border bg-bg p-3">
               <p className="text-sm font-medium">PITR disabled</p>
@@ -445,54 +579,61 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
             </div>
           ) : null}
           {loading ? <p className="text-sm text-muted">Loading PITR...</p> : null}
-          {project && policy ? (
-            <div className="backup-row">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">Point-in-time recovery</p>
-                <p className="truncate text-xs text-muted">
-                  {policy.enabled ? `Scheduled · Last archive ${policy.last_archive_at ? formatDateTime(policy.last_archive_at) : "pending"}` : "Disabled"}
-                </p>
-              </div>
-              <div className="grid min-w-[220px] gap-2">
-                <label className="flex items-center gap-2 text-sm text-muted">
-                  <input checked={pitrEnabled} disabled={!featureEnabled} onChange={(event) => setPITREnabled(event.target.checked)} type="checkbox" />
-                  Enabled
-                </label>
-                <input className="input" disabled={!featureEnabled} onChange={(event) => setArchiveBucket(event.target.value)} placeholder="Use backup target automatically" value={archiveBucket} />
-                <div className="flex items-center gap-2">
-                  <input className="input w-[88px]" disabled={!featureEnabled} min={1} max={35} onChange={(event) => setRetentionDays(Number(event.target.value))} type="number" value={retentionDays} />
-                  <button className="button secondary justify-center" disabled={!featureEnabled || !project || policyMutation.isPending} onClick={() => policyMutation.mutate({ ref: project.ref, input: { enabled: pitrEnabled, archive_bucket: archiveBucket, retention_days: retentionDays } })} type="button">
-                    Save
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : null}
+
+          {/* Restore-to-time is the primary recovery path for physical backups. */}
           {project ? (
-            <div className="backup-row">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">Restore to time</p>
-                <p className="truncate text-xs text-muted">
-                  {recoverability?.restore_to_time_available && recoverability.recovery_window_start && recoverability.recovery_window_end
-                    ? `${formatDateTime(recoverability.recovery_window_start)} to ${formatDateTime(recoverability.recovery_window_end)}`
-                    : recoverability?.restore_to_time_unavailable ?? "Restore-to-time is not configured."}
-                </p>
+            <SubSection title="Restore to point in time" description={recoverability?.restore_to_time_available && recoverability.recovery_window_start && recoverability.recovery_window_end ? `Recoverable window: ${formatDateTime(recoverability.recovery_window_start)} to ${formatDateTime(recoverability.recovery_window_end)}` : recoverability?.restore_to_time_unavailable ?? "Restore-to-time is not configured."}>
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 max-sm:grid-cols-1">
+                <Field label="Target time" hint="Database is recovered to this moment">
+                  <Input disabled={!featureEnabled || !recoverability?.restore_to_time_available} onChange={(event) => setRestoreTarget(event.target.value)} type="datetime-local" value={restoreTarget} />
+                </Field>
+                <Button variant="danger" disabled={restoreToTimeDisabled} onClick={() => project && restoreToTimeMutation.mutate({ ref: project.ref, targetUnix: restoreTargetUnix })} type="button">
+                  {restoreToTimeMutation.isPending ? "Restoring..." : "Restore to time"}
+                </Button>
               </div>
-              <div className="grid min-w-[220px] gap-2">
-                <input className="input" disabled={!featureEnabled || !recoverability?.restore_to_time_available} onChange={(event) => setRestoreTarget(event.target.value)} type="datetime-local" value={restoreTarget} />
-                <button className="button secondary justify-center" disabled={restoreToTimeDisabled} onClick={() => project && restoreToTimeMutation.mutate({ ref: project.ref, targetUnix: restoreTargetUnix })} type="button">
-                  {restoreToTimeMutation.isPending ? "Restoring..." : "Restore"}
-                </button>
-              </div>
-            </div>
+              {restoreToTimeMutation.error ? <p className="text-sm text-danger">{restoreToTimeMutation.error.message}</p> : null}
+              {restoreToTimeMutation.data ? <p className="text-sm text-muted">PITR restore {restoreToTimeMutation.data.restore_state}: {restoreToTimeMutation.data.restore_path}</p> : null}
+            </SubSection>
           ) : null}
-          <DataTable columns={archiveColumns} data={archives.slice(0, 5)} emptyText="No WAL archives have been recorded." />
-          {policyMutation.error ? <p className="text-sm text-danger">{policyMutation.error.message}</p> : null}
+
+          {project && policy ? (
+            <CollapsibleCard eyebrow="Policy" title="WAL archive policy" description={policy.enabled ? `Archiving · last archive ${policy.last_archive_at ? formatRelativeTime(policy.last_archive_at) : "pending"}` : "Disabled"}>
+              <div className="grid grid-cols-[auto_minmax(0,1fr)_120px_auto] items-end gap-2 max-md:grid-cols-1">
+                <Field label="Enabled" hint="Continuously archive WAL">
+                  <label className="flex items-center gap-2 text-sm">
+                    <Switch checked={pitrEnabled} disabled={!featureEnabled} onCheckedChange={(next) => setPITREnabled(next)} aria-label="On" />
+                    On
+                  </label>
+                </Field>
+                <Field label="Archive bucket" hint="Blank uses the backup storage target">
+                  <Input disabled={!featureEnabled} onChange={(event) => setArchiveBucket(event.target.value)} placeholder="Use backup target automatically" value={archiveBucket} />
+                </Field>
+                <Field label="Retention" hint="Days of WAL to keep">
+                  <Input disabled={!featureEnabled} min={1} max={35} onChange={(event) => setRetentionDays(Number(event.target.value))} type="number" value={retentionDays} />
+                </Field>
+                <Button variant="secondary" disabled={!featureEnabled || !project || policyMutation.isPending} onClick={() => policyMutation.mutate({ ref: project.ref, input: { enabled: pitrEnabled, archive_bucket: archiveBucket, retention_days: retentionDays } })} type="button">
+                  Save
+                </Button>
+              </div>
+              {policyMutation.error ? <p className="mt-2 text-sm text-danger">{policyMutation.error.message}</p> : null}
+            </CollapsibleCard>
+          ) : null}
+
+          <SubSection
+            title="WAL archive segments"
+            description="Archived write-ahead log segments backing the recovery window."
+            actions={archives.length > 5 ? <Button variant="secondary" size="sm" onClick={() => setShowAll((value) => !value)} type="button">{showAll ? "Show recent" : `View all (${archives.length})`}</Button> : <span className="text-xs text-faint">{archives.length} total</span>}
+          >
+            {archives.length === 0 ? (
+              <EmptyState icon={Database} title="No WAL archives" description="Enable the WAL archive policy to begin continuous archiving for point-in-time recovery." />
+            ) : (
+              <DataTable columns={archiveColumns} data={visibleArchives} emptyText="" />
+            )}
+          </SubSection>
+
           {archiveMutation.error ? <p className="text-sm text-danger">{archiveMutation.error.message}</p> : null}
-          {restoreToTimeMutation.error ? <p className="text-sm text-danger">{restoreToTimeMutation.error.message}</p> : null}
-          {restoreToTimeMutation.data ? <p className="text-sm text-muted">PITR restore {restoreToTimeMutation.data.restore_state}: {restoreToTimeMutation.data.restore_path}</p> : null}
         </div>
-      </section>
+      </AppPanel>
       <Modal
         description="This records a WAL archive segment for point-in-time recovery."
         onClose={() => !archiveMutation.isPending && setConfirmArchive(false)}
@@ -500,10 +641,10 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
         title="Archive WAL segment?"
         footer={(
           <>
-            <button className="button secondary" disabled={archiveMutation.isPending} onClick={() => setConfirmArchive(false)} type="button">Cancel</button>
-            <button className="button" disabled={!featureEnabled || !project || archiveMutation.isPending || !policy?.enabled} onClick={() => project && archiveMutation.mutate(project.ref)} type="button">
+            <Button variant="secondary" disabled={archiveMutation.isPending} onClick={() => setConfirmArchive(false)} type="button">Cancel</Button>
+            <Button disabled={!featureEnabled || !project || archiveMutation.isPending || !policy?.enabled} onClick={() => project && archiveMutation.mutate(project.ref)} type="button">
               {archiveMutation.isPending ? "Archiving..." : "Archive WAL"}
-            </button>
+            </Button>
           </>
         )}
       >

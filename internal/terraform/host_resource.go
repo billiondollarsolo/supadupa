@@ -3,9 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
@@ -25,12 +23,10 @@ type hostResourceModel struct {
 	CapacityCPU      types.Int64  `tfsdk:"capacity_cpu"`
 	CapacityRAMMB    types.Int64  `tfsdk:"capacity_ram_mb"`
 	CapacityDiskGB   types.Int64  `tfsdk:"capacity_disk_gb"`
-	CapacityDiskIOPS types.Int64  `tfsdk:"capacity_disk_iops"`
 	CapacityProjects types.Int64  `tfsdk:"capacity_projects"`
 	UsedCPU          types.Int64  `tfsdk:"used_cpu"`
 	UsedRAMMB        types.Int64  `tfsdk:"used_ram_mb"`
 	UsedDiskGB       types.Int64  `tfsdk:"used_disk_gb"`
-	UsedDiskIOPS     types.Int64  `tfsdk:"used_disk_iops"`
 	UsedProjects     types.Int64  `tfsdk:"used_projects"`
 	CreatedAt        types.String `tfsdk:"created_at"`
 }
@@ -81,11 +77,6 @@ func (r *hostResource) Schema(ctx context.Context, req resource.SchemaRequest, r
 				Description:   "Disk capacity in GiB.",
 				PlanModifiers: replaceInt,
 			},
-			"capacity_disk_iops": resourceschema.Int64Attribute{
-				Required:      true,
-				Description:   "Disk IOPS capacity.",
-				PlanModifiers: replaceInt,
-			},
 			"capacity_projects": resourceschema.Int64Attribute{
 				Required:      true,
 				Description:   "Number of project or replica slots available on the host.",
@@ -103,10 +94,6 @@ func (r *hostResource) Schema(ctx context.Context, req resource.SchemaRequest, r
 				Computed:    true,
 				Description: "Disk currently reserved on the host in GiB.",
 			},
-			"used_disk_iops": resourceschema.Int64Attribute{
-				Computed:    true,
-				Description: "Disk IOPS currently reserved on the host.",
-			},
 			"used_projects": resourceschema.Int64Attribute{
 				Computed:    true,
 				Description: "Project or replica slots currently reserved on the host.",
@@ -123,12 +110,8 @@ func (r *hostResource) Schema(ctx context.Context, req resource.SchemaRequest, r
 }
 
 func (r *hostResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -185,7 +168,7 @@ func (r *hostResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 }
 
 func (r *hostResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	setOnePartImportState(ctx, req.ID, resp, "id", "Use host ID.")
 }
 
 func hostInputFromModel(model hostResourceModel) HostInput {
@@ -193,11 +176,10 @@ func hostInputFromModel(model hostResourceModel) HostInput {
 		Name:    model.Name.ValueString(),
 		Address: model.Address.ValueString(),
 		Capacity: HostCapacity{
-			CPU:      int(model.CapacityCPU.ValueInt64()),
-			RAMMB:    int(model.CapacityRAMMB.ValueInt64()),
-			DiskGB:   int(model.CapacityDiskGB.ValueInt64()),
-			DiskIOPS: int(model.CapacityDiskIOPS.ValueInt64()),
-			Project:  int(model.CapacityProjects.ValueInt64()),
+			CPU:     int(model.CapacityCPU.ValueInt64()),
+			RAMMB:   int(model.CapacityRAMMB.ValueInt64()),
+			DiskGB:  int(model.CapacityDiskGB.ValueInt64()),
+			Project: int(model.CapacityProjects.ValueInt64()),
 		},
 	}
 }
@@ -209,12 +191,10 @@ func setHostState(model *hostResourceModel, host Host) {
 	model.CapacityCPU = types.Int64Value(int64(host.Capacity.CPU))
 	model.CapacityRAMMB = types.Int64Value(int64(host.Capacity.RAMMB))
 	model.CapacityDiskGB = types.Int64Value(int64(host.Capacity.DiskGB))
-	model.CapacityDiskIOPS = types.Int64Value(int64(host.Capacity.DiskIOPS))
 	model.CapacityProjects = types.Int64Value(int64(host.Capacity.Project))
 	model.UsedCPU = types.Int64Value(int64(host.Used.CPU))
 	model.UsedRAMMB = types.Int64Value(int64(host.Used.RAMMB))
 	model.UsedDiskGB = types.Int64Value(int64(host.Used.DiskGB))
-	model.UsedDiskIOPS = types.Int64Value(int64(host.Used.DiskIOPS))
 	model.UsedProjects = types.Int64Value(int64(host.Used.Project))
 	model.CreatedAt = optionalTimeString(host.CreatedAt)
 }

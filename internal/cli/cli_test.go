@@ -179,7 +179,7 @@ func TestHostLifecycleCommandsUseHostEndpoints(t *testing.T) {
 	defer server.Close()
 
 	for _, args := range [][]string{
-		{"hosts", "create", "--name", "east-1a", "--address", "10.0.0.12", "--cpu", "8", "--ram-mb", "32768", "--disk-gb", "500", "--disk-iops", "24000", "--projects", "10"},
+		{"hosts", "create", "--name", "east-1a", "--address", "10.0.0.12", "--cpu", "8", "--ram-mb", "32768", "--disk-gb", "500", "--projects", "10"},
 		{"hosts", "get", "--id", "host_1"},
 		{"hosts", "delete", "--id", "host_1", "--yes"},
 	} {
@@ -1326,14 +1326,13 @@ func TestHostsCreatePostsCapacityPayload(t *testing.T) {
 				CPU      int `json:"cpu"`
 				RAMMB    int `json:"ram_mb"`
 				DiskGB   int `json:"disk_gb"`
-				DiskIOPS int `json:"disk_iops"`
 				Projects int `json:"projects"`
 			} `json:"capacity"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got.Name != "box-one" || got.Address != "10.0.0.10" || got.Capacity.CPU != 8 || got.Capacity.RAMMB != 32768 || got.Capacity.DiskGB != 500 || got.Capacity.DiskIOPS != 24000 || got.Capacity.Projects != 12 {
+		if got.Name != "box-one" || got.Address != "10.0.0.10" || got.Capacity.CPU != 8 || got.Capacity.RAMMB != 32768 || got.Capacity.DiskGB != 500 || got.Capacity.Projects != 12 {
 			t.Fatalf("unexpected host payload %#v", got)
 		}
 		_, _ = w.Write([]byte(`{"name":"box-one","address":"10.0.0.10"}`))
@@ -1345,7 +1344,7 @@ func TestHostsCreatePostsCapacityPayload(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
-	}.Run(context.Background(), []string{"hosts", "create", "--name", "box-one", "--address", "10.0.0.10", "--cpu", "8", "--ram-mb", "32768", "--disk-gb", "500", "--disk-iops", "24000", "--projects", "12"})
+	}.Run(context.Background(), []string{"hosts", "create", "--name", "box-one", "--address", "10.0.0.10", "--cpu", "8", "--ram-mb", "32768", "--disk-gb", "500", "--projects", "12"})
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
@@ -1361,7 +1360,7 @@ func TestQuotasSetPostsQuotaPayload(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got["max_projects"] != 4 || got["max_cpu"] != 16 || got["max_ram_mb"] != 65536 || got["max_disk_gb"] != 1000 || got["max_disk_iops"] != 24000 {
+		if got["max_projects"] != 4 || got["max_cpu"] != 16 || got["max_ram_mb"] != 65536 || got["max_disk_gb"] != 1000 {
 			t.Fatalf("unexpected quota payload %#v", got)
 		}
 		_, _ = w.Write([]byte(`{"org_id":"org_1","max_projects":4}`))
@@ -1373,7 +1372,7 @@ func TestQuotasSetPostsQuotaPayload(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
-	}.Run(context.Background(), []string{"quotas", "set", "--org-id", "org_1", "--max-projects", "4", "--max-cpu", "16", "--max-ram-mb", "65536", "--max-disk-gb", "1000", "--max-disk-iops", "24000"})
+	}.Run(context.Background(), []string{"quotas", "set", "--org-id", "org_1", "--max-projects", "4", "--max-cpu", "16", "--max-ram-mb", "65536", "--max-disk-gb", "1000"})
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())

@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "supadupa.fullname" . }}-api
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  type: {{ .Values.controlPlane.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.controlPlane.service.port }}
+      targetPort: http
+  selector:
+    {{- include "supadupa.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "supadupa.fullname" . }}-control-plane
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: {{ .Values.controlPlane.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "supadupa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: control-plane
+  template:
+    metadata:
+      labels:
+        {{- include "supadupa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: control-plane
+    spec:
+      serviceAccountName: {{ include "supadupa.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.controlPlane.podSecurityContext | nindent 8 }}
+      containers:
+        - name: control-plane
+          image: "{{ .Values.controlPlane.image.repository }}:{{ .Values.controlPlane.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SUPADUPA_ADDR
+              value: ":8080"
+            {{- if .Values.metaDb.enabled }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "supadupa.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            - name: SUPADUPA_META_DSN
+              value: "postgres://{{ .Values.metaDb.username }}:$(POSTGRES_PASSWORD)@{{ include "supadupa.metaDbHost" . }}:5432/{{ .Values.metaDb.database }}?sslmode=disable"
+            {{- else }}
+            - name: SUPADUPA_META_DSN
+              value: {{ required "Set controlPlane.metaDsn when metaDb.enabled=false" .Values.controlPlane.metaDsn | quote }}
+            {{- end }}
+            - name: SUPADUPA_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "supadupa.secretName" . }}
+                  key: SUPADUPA_SECRET_KEY
+            - name: SUPADUPA_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "supadupa.secretName" . }}
+                  key: SUPADUPA_AUTH_SECRET
+            - name: SUPADUPA_ALLOW_DEV_SECRETS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "supadupa.secretName" . }}
+                  key: SUPADUPA_ALLOW_DEV_SECRETS
+                  optional: true
+            - name: SUPADUPA_K8S_NAMESPACE
+              {{- if or .Values.operator.runtimeNamespaceOverride .Values.controlPlane.kubernetesNamespaceOverride }}
+              value: {{ include "supadupa.runtimeNamespace" . | quote }}
+              {{- else }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+              {{- end }}
+            {{- /* Isolation env is driven by projectIsolation.* so the control
+                   plane and operator never disagree; override any static value
+                   set under controlPlane.env. */}}
+            - name: SUPADUPA_K8S_ISOLATION
+              value: {{ .Values.projectIsolation.enabled | quote }}
+            - name: SUPADUPA_K8S_RUNTIME_NAMESPACE_PREFIX
+              value: {{ .Values.projectIsolation.runtimeNamespacePrefix | quote }}
+            {{- range $name, $value := .Values.controlPlane.env }}
+            {{- if not (or (eq $name "SUPADUPA_K8S_NAMESPACE") (eq $name "SUPADUPA_K8S_ISOLATION") (eq $name "SUPADUPA_K8S_RUNTIME_NAMESPACE_PREFIX")) }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.controlPlane.securityContext | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if .Values.controlPlane.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "supadupa.fullname" . }}-control-plane
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  minAvailable: {{ .Values.controlPlane.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "supadupa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: control-plane
+{{- end }}

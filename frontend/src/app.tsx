@@ -1,12 +1,13 @@
-import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Activity, ArrowLeft, Boxes, CheckCircle2, Command, Database, KeyRound, LogOut, Moon, Pause, Play, Plus, RadioTower, RotateCcw, Search, Server, Shield, SlidersHorizontal, Sun, UserCircle, UserPlus, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, Command, Database, KeyRound, LogOut, Moon, Pause, Play, Plus, RadioTower, RotateCcw, Search, Server, Shield, SlidersHorizontal, Sun, UserCircle, UserPlus, XCircle, type LucideIcon } from "lucide-react";
 import {
   createPlatformUser,
   getAuditIntegrity,
   getAccountMFA,
   getApiHealth,
+  getAuthState,
   getAdvisorFindings,
   getComplianceReport,
   getConnect,
@@ -69,7 +70,6 @@ import {
   listProjectActivity,
   listProjectLogs,
   listProjects,
-  listProjectSecrets,
   listSCIMGroups,
   listSCIMUsers,
   listTeamMembers,
@@ -84,10 +84,15 @@ import { BrandLogo } from "./components/brand-logo";
 import { BrandWordmark } from "./components/brand-wordmark";
 import { useAuthSession } from "./lib/auth-session";
 import { DashboardContext, useDashboardContext, type DashboardContextValue } from "./lib/dashboard-context";
+import { focusableElements, makeBackgroundInert } from "./lib/focus";
 import { organizationSections, platformSettingsSections, projectSubnav, projectTabs, securitySections, type ConfigArea, type ProjectTab } from "./lib/project-config";
+import { projectPath, projectRefFromPathname, projectRouteByTab, projectSectionFromPathname, projectTabFromPathname } from "./lib/routes";
 import { useUIStore } from "./lib/ui-store";
-import type { AdvisorFinding, AuditEvent, AuditIntegrity, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, FleetMetrics, Host, LogDrain, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformDefaults, PlatformSSOConfig, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectSecret, ProjectServices, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "./types";
+import type { AdvisorFinding, AuditEvent, AuditIntegrity, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, FleetMetrics, Host, LogDrain, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformDefaults, PlatformSSOConfig, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectServices, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "./types";
 import { Modal } from "./components/modal";
+import { StatusPill } from "./components/ui/status-pill";
+import { Button } from "./components/ui/button";
+import { Badge } from "./components/ui/badge";
 
 type PaletteAction = {
   id: string;
@@ -104,23 +109,6 @@ type ProjectCommandConfirm = {
   action: "pause" | "resume" | "restart" | "backup";
   ref: string;
 };
-
-function projectRefFromPathname(pathname: string) {
-  const match = pathname.match(/^\/projects\/([^/]+)/);
-  if (!match || match[1] === "new") {
-    return "";
-  }
-  return decodeURIComponent(match[1]);
-}
-
-function projectTabFromPathname(pathname: string): ProjectTab {
-  const suffix = pathname.match(/^\/projects\/[^/]+\/([^/]+)/)?.[1] ?? "";
-  return projectTabs.find((tab) => tab.suffix === suffix)?.id ?? "overview";
-}
-
-function projectSectionFromPathname(pathname: string) {
-  return pathname.match(/^\/projects\/[^/]+\/[^/]+\/([^/]+)/)?.[1] ?? "overview";
-}
 
 function panelIdForPathname(pathname: string) {
   if (pathname === "/organizations" || pathname.startsWith("/organizations/")) return "organizations";
@@ -150,25 +138,51 @@ function pageTitleForPathname(pathname: string, activeProject: Project | undefin
 }
 
 export function App() {
-  const token = useAuthSession((state) => state.token);
+  const user = useAuthSession((state) => state.user);
+  const setAuthenticated = useAuthSession((state) => state.setAuthenticated);
+  const setUnauthenticated = useAuthSession((state) => state.setUnauthenticated);
   const logout = useAuthSession((state) => state.logout);
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const authState = useQuery({ queryKey: ["auth-state"], queryFn: ({ signal }) => getAuthState({ signal }), retry: 1, refetchInterval: 30_000 });
 
   useEffect(() => {
     document.title = "SUPADUPA";
   }, [pathname]);
 
   useEffect(() => {
-    if (!token && pathname !== "/login") {
+    if (!authState.data) {
+      return;
+    }
+    if (authState.data.authenticated && authState.data.user) {
+      setAuthenticated(authState.data.user);
+      return;
+    }
+    setUnauthenticated();
+  }, [authState.data, setAuthenticated, setUnauthenticated]);
+
+  useEffect(() => {
+    // Drive redirects off the resolved auth-state response, NOT the derived
+    // `user` store. The store is populated by a separate effect, so on a hard
+    // refresh there is a render where auth-state has resolved authenticated but
+    // `user` is still null — keying on `user` there would bounce a deep page to
+    // /login and then to / (home). Keying on authState.data avoids that race.
+    if (authState.isLoading || !authState.data) {
+      return;
+    }
+    if (!authState.data.authenticated && pathname !== "/login") {
       void navigate({ to: "/login" });
     }
-    if (token && pathname === "/login") {
+    if (authState.data.authenticated && pathname === "/login") {
       void navigate({ to: "/" });
     }
-  }, [navigate, pathname, token]);
+  }, [authState.isLoading, authState.data, navigate, pathname]);
 
-  if (!token) {
+  if (authState.isLoading) {
+    return <main className="min-h-screen bg-bg text-text" />;
+  }
+
+  if (!user) {
     if (pathname === "/login") {
       return <Outlet />;
     }
@@ -183,11 +197,12 @@ export function App() {
 }
 
 function Dashboard({ onLogout }: { onLogout: () => void }) {
-  const token = useAuthSession((state) => state.token);
+  const user = useAuthSession((state) => state.user);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const openPalette = useUIStore((state) => state.openPalette);
+  const paletteOpen = useUIStore((state) => state.paletteOpen);
   const addToast = useUIStore((state) => state.addToast);
   const theme = useUIStore((state) => state.theme);
   const setTheme = useUIStore((state) => state.setTheme);
@@ -201,82 +216,111 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
+  const routeRef = useMemo(() => projectRefFromPathname(pathname), [pathname]);
+  const activeProjectTab = useMemo(() => projectTabFromPathname(pathname), [pathname]);
+  const isFleetRoute = pathname === "/";
+  const isOrganizationsRoute = pathname === "/organizations" || pathname.startsWith("/organizations/");
+  const isProjectsRoute = pathname === "/projects" || pathname === "/projects/new";
+  const isHostsRoute = pathname === "/hosts" || pathname.startsWith("/hosts/");
+  const isSettingsRoute = pathname === "/settings" || pathname.startsWith("/settings/");
+  const isSecurityRoute = pathname === "/security" || pathname.startsWith("/security/");
+  const isAuditRoute = pathname === "/audit";
+  const hasProjectRoute = routeRef.length > 0;
+  const needsHosts = isFleetRoute || isProjectsRoute || isHostsRoute || isSettingsRoute || (hasProjectRoute && activeProjectTab === "database");
+  const needsFleetPosture = isFleetRoute || isSecurityRoute;
+  const needsAuditTrail = isAuditRoute;
+  const needsPlatformSettings = isSettingsRoute;
+  const needsOrgWorkspace = isOrganizationsRoute || isSecurityRoute;
+  const needsProjectOverview = hasProjectRoute && activeProjectTab === "overview";
+  const needsProjectConnect = hasProjectRoute && activeProjectTab === "connect";
+  const needsProjectAuth = hasProjectRoute && activeProjectTab === "auth";
+  const needsProjectDatabase = hasProjectRoute && activeProjectTab === "database";
+  const needsProjectStorage = hasProjectRoute && activeProjectTab === "storage";
+  const needsProjectFunctions = hasProjectRoute && activeProjectTab === "functions";
+  const needsProjectRealtime = hasProjectRoute && activeProjectTab === "realtime";
+  const needsProjectLogs = hasProjectRoute && activeProjectTab === "logs";
+  const needsProjectBackups = hasProjectRoute && activeProjectTab === "backups";
+  const needsProjectConfig = hasProjectRoute && activeProjectTab === "config";
+  const needsProjectActivity = hasProjectRoute && activeProjectTab === "activity";
+
   const apiHealth = useQuery({ queryKey: ["api-health"], queryFn: getApiHealth, refetchInterval: 30_000 });
   const orgs = useQuery({ queryKey: ["orgs"], queryFn: listOrgs });
-  const hosts = useQuery({ queryKey: ["hosts"], queryFn: listHosts });
-  const fleetMetrics = useQuery({ queryKey: ["fleet-metrics"], queryFn: getFleetMetrics, refetchInterval: 15_000 });
-  const advisorFindings = useQuery({ queryKey: ["advisor-findings"], queryFn: getAdvisorFindings, refetchInterval: 30_000 });
-  const complianceReport = useQuery({ queryKey: ["compliance-report"], queryFn: getComplianceReport, refetchInterval: 30_000 });
+  const hosts = useQuery({ queryKey: ["hosts"], queryFn: listHosts, enabled: needsHosts });
+  const fleetMetrics = useQuery({ queryKey: ["fleet-metrics"], queryFn: getFleetMetrics, enabled: needsFleetPosture, refetchInterval: needsFleetPosture ? 15_000 : false });
+  const advisorFindings = useQuery({ queryKey: ["advisor-findings"], queryFn: getAdvisorFindings, enabled: needsFleetPosture, refetchInterval: needsFleetPosture ? 30_000 : false });
+  const complianceReport = useQuery({ queryKey: ["compliance-report"], queryFn: getComplianceReport, enabled: needsFleetPosture, refetchInterval: needsFleetPosture ? 30_000 : false });
   const provisionerStatus = useQuery({ queryKey: ["provisioner-status"], queryFn: getProvisionerStatus });
   const runtimeConfig = useQuery({ queryKey: ["runtime-config"], queryFn: getRuntimeConfig, refetchInterval: 30_000 });
+  // Always loaded: platform feature flags gate top-level nav (orgs, SSO/SCIM).
   const platformDefaults = useQuery({ queryKey: ["platform-defaults"], queryFn: getPlatformDefaults });
-  const platformSSO = useQuery({ queryKey: ["platform-sso"], queryFn: getPlatformSSOConfig });
-  const backupStorageTargets = useQuery({ queryKey: ["backup-storage-targets"], queryFn: listBackupStorageTargets });
-  const platformBackups = useQuery({ queryKey: ["platform-backups"], queryFn: listPlatformBackups });
-  const scimServiceProviderConfig = useQuery({ queryKey: ["scim-service-provider-config"], queryFn: getSCIMServiceProviderConfig });
-  const scimUsers = useQuery({ queryKey: ["scim-users"], queryFn: listSCIMUsers });
-  const scimGroups = useQuery({ queryKey: ["scim-groups"], queryFn: () => listSCIMGroups() });
-  const auditEvents = useQuery({ queryKey: ["audit-events"], queryFn: listAuditEvents, refetchInterval: 10_000 });
-  const auditIntegrity = useQuery({ queryKey: ["audit-integrity"], queryFn: getAuditIntegrity, refetchInterval: 10_000 });
-  const users = useQuery({ queryKey: ["users"], queryFn: listUsers });
-  const mfaStatus = useQuery({ queryKey: ["account-mfa"], queryFn: getAccountMFA });
+  const platformFlags = platformDefaults.data?.feature_flags ?? {};
+  const orgsEnabled = Boolean(platformFlags.multi_org);
+  const ssoScimEnabled = Boolean(platformFlags.platform_sso_scim);
+  const platformSSO = useQuery({ queryKey: ["platform-sso"], queryFn: getPlatformSSOConfig, enabled: needsPlatformSettings });
+  const backupStorageTargets = useQuery({ queryKey: ["backup-storage-targets"], queryFn: listBackupStorageTargets, enabled: needsPlatformSettings || needsProjectBackups });
+  const platformBackups = useQuery({ queryKey: ["platform-backups"], queryFn: listPlatformBackups, enabled: needsPlatformSettings });
+  const scimServiceProviderConfig = useQuery({ queryKey: ["scim-service-provider-config"], queryFn: getSCIMServiceProviderConfig, enabled: needsPlatformSettings });
+  const scimUsers = useQuery({ queryKey: ["scim-users"], queryFn: listSCIMUsers, enabled: needsPlatformSettings });
+  const scimGroups = useQuery({ queryKey: ["scim-groups"], queryFn: () => listSCIMGroups(), enabled: needsPlatformSettings });
+  const auditEvents = useQuery({ queryKey: ["audit-events"], queryFn: listAuditEvents, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
+  const auditIntegrity = useQuery({ queryKey: ["audit-integrity"], queryFn: getAuditIntegrity, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
+  const users = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: needsPlatformSettings || isSecurityRoute });
+  const mfaStatus = useQuery({ queryKey: ["account-mfa"], queryFn: getAccountMFA, enabled: isSecurityRoute });
   const activeOrgId = selectedOrgId || orgs.data?.[0]?.id || "";
   const members = useQuery({
     queryKey: ["org-members", activeOrgId],
     queryFn: () => listOrgMembers(activeOrgId),
-    enabled: activeOrgId.length > 0,
+    enabled: needsOrgWorkspace && activeOrgId.length > 0,
   });
   const teams = useQuery({
     queryKey: ["org-teams", activeOrgId],
     queryFn: () => listOrgTeams(activeOrgId),
-    enabled: activeOrgId.length > 0,
+    enabled: needsOrgWorkspace && activeOrgId.length > 0,
   });
   const activeTeamSlug = selectedTeamSlug || teams.data?.[0]?.slug || "";
   const teamMembers = useQuery({
     queryKey: ["team-members", activeOrgId, activeTeamSlug],
     queryFn: () => listTeamMembers(activeOrgId, activeTeamSlug),
-    enabled: activeOrgId.length > 0 && activeTeamSlug.length > 0,
+    enabled: isOrganizationsRoute && activeOrgId.length > 0 && activeTeamSlug.length > 0,
   });
   const orgFeatures = useQuery({
     queryKey: ["org-features", activeOrgId],
     queryFn: () => getOrgFeatureFlags(activeOrgId),
-    enabled: activeOrgId.length > 0,
+    enabled: (needsOrgWorkspace || pathname === "/projects/new") && activeOrgId.length > 0,
   });
   const activeOrgFeatures = orgFeatures.data?.effective ?? {};
   const quota = useQuery({
     queryKey: ["org-quota", activeOrgId],
     queryFn: () => getOrgQuota(activeOrgId),
-    enabled: activeOrgId.length > 0,
+    enabled: isOrganizationsRoute && activeOrgId.length > 0,
   });
   const usage = useQuery({
     queryKey: ["org-usage", activeOrgId],
     queryFn: () => getOrgUsage(activeOrgId),
-    enabled: activeOrgId.length > 0,
-    refetchInterval: 15_000,
+    enabled: isOrganizationsRoute && activeOrgId.length > 0,
+    refetchInterval: isOrganizationsRoute ? 15_000 : false,
   });
   const usageSnapshots = useQuery({
     queryKey: ["org-usage-snapshots", activeOrgId],
     queryFn: () => listOrgUsageSnapshots(activeOrgId, 6),
-    enabled: activeOrgId.length > 0 && Boolean(activeOrgFeatures.usage_metering),
+    enabled: isOrganizationsRoute && activeOrgId.length > 0 && Boolean(activeOrgFeatures.usage_metering),
   });
   const billingInvoices = useQuery({
     queryKey: ["billing-invoices", activeOrgId],
     queryFn: () => listBillingInvoices(activeOrgId, 6),
-    enabled: activeOrgId.length > 0 && Boolean(activeOrgFeatures.billing),
+    enabled: isOrganizationsRoute && activeOrgId.length > 0 && Boolean(activeOrgFeatures.billing),
   });
   const accessReview = useQuery({
     queryKey: ["org-access-review", activeOrgId],
     queryFn: () => getOrgAccessReview(activeOrgId),
-    enabled: activeOrgId.length > 0,
-    refetchInterval: 30_000,
+    enabled: isSecurityRoute && activeOrgId.length > 0,
+    refetchInterval: isSecurityRoute ? 30_000 : false,
   });
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: listProjects,
   });
   const projectList = projects.data ?? [];
-  const routeRef = useMemo(() => projectRefFromPathname(pathname), [pathname]);
-  const activeProjectTab = useMemo(() => projectTabFromPathname(pathname), [pathname]);
   const activeConfigArea: ConfigArea =
     activeProjectTab === "auth" ? "auth" :
       activeProjectTab === "database" ? "database" :
@@ -292,57 +336,59 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const projectDetail = useQuery({
     queryKey: ["project", activeRef],
     queryFn: () => getProject(activeRef),
-    enabled: activeRef.length > 0,
-    refetchInterval: 15_000,
+    enabled: hasProjectRoute && activeRef.length > 0,
+    refetchInterval: hasProjectRoute ? 15_000 : false,
   });
   const activeProject = projectDetail.data ?? activeProjectListItem;
   const activeFeatureOrgId = activeProject?.org_id || activeOrgId;
   const activeProjectFeatures = useQuery({
     queryKey: ["org-features", activeFeatureOrgId],
     queryFn: () => getOrgFeatureFlags(activeFeatureOrgId),
-    enabled: activeFeatureOrgId.length > 0,
+    enabled: hasProjectRoute && activeFeatureOrgId.length > 0,
   });
   const activeFeatureFlags = activeProjectFeatures.data?.effective ?? activeOrgFeatures;
   const connect = useQuery({
     queryKey: ["connect", activeRef],
+    // The overview's connection-basics panel and "Open Studio" button also need
+    // the connect payload, so load it on overview as well as the connect tab.
+    enabled: (needsProjectConnect || needsProjectOverview) && activeRef.length > 0,
     queryFn: () => getConnect(activeRef),
-    enabled: activeRef.length > 0,
   });
   const cliProfile = useQuery({
     queryKey: ["cli-profile", activeRef],
     queryFn: () => getProjectCLIProfile(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectConnect && activeRef.length > 0,
   });
   const projectMetrics = useQuery({
     queryKey: ["project-metrics", activeRef],
     queryFn: () => getProjectMetrics(activeRef),
-    enabled: activeRef.length > 0,
-    refetchInterval: 15_000,
+    enabled: needsProjectOverview && activeRef.length > 0,
+    refetchInterval: needsProjectOverview ? 15_000 : false,
   });
   const projectAccess = useQuery({
     queryKey: ["project-access", activeRef],
     queryFn: () => listProjectAccess(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectAuth && activeRef.length > 0,
   });
   const routeManifest = useQuery({
     queryKey: ["project-route-manifest", activeRef],
     queryFn: () => getProjectRouteManifest(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: (needsProjectConnect || needsProjectConfig) && activeRef.length > 0,
   });
   const domains = useQuery({
     queryKey: ["project-domains", activeRef],
     queryFn: () => listProjectDomains(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: (needsProjectConnect || needsProjectConfig) && activeRef.length > 0,
   });
   const projectServices = useQuery({
     queryKey: ["project-services", activeRef],
     queryFn: () => getProjectServices(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: (hasProjectRoute && activeProjectTab !== "activity") && activeRef.length > 0,
   });
   const projectConfig = useQuery({
     queryKey: ["project-config", activeRef, activeConfigArea],
     queryFn: () => getProjectConfig(activeRef, activeConfigArea),
-    enabled: activeRef.length > 0,
+    enabled: (needsProjectAuth || needsProjectDatabase || needsProjectStorage || needsProjectFunctions || needsProjectRealtime || needsProjectConfig) && activeRef.length > 0,
   });
   const authProviderConfig = useQuery({
     queryKey: ["project-config", activeRef, "auth_providers"],
@@ -367,170 +413,178 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const projectBranches = useQuery({
     queryKey: ["project-branches", activeRef],
     queryFn: () => listProjectBranches(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const projectReplicas = useQuery({
     queryKey: ["project-replicas", activeRef],
     queryFn: () => listProjectReplicas(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const projectReplicaRouting = useQuery({
     queryKey: ["project-replica-routing", activeRef],
     queryFn: () => getProjectReplicaRouting(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const projectFunctions = useQuery({
     queryKey: ["project-functions", activeRef],
     queryFn: () => listProjectFunctions(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectFunctions && activeRef.length > 0,
   });
   const functionRegions = useQuery({
     queryKey: ["function-regions", activeRef],
     queryFn: () => listProjectFunctionRegions(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectFunctions && activeRef.length > 0,
   });
   const functionStorageMounts = useQuery({
     queryKey: ["function-storage-mounts", activeRef],
     queryFn: () => listProjectFunctionStorageMounts(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectFunctions && activeRef.length > 0,
   });
   const authClients = useQuery({
     queryKey: ["auth-clients", activeRef],
     queryFn: () => listProjectAuthClients(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectAuth && activeRef.length > 0,
   });
   const authHooks = useQuery({
     queryKey: ["auth-hooks", activeRef],
     queryFn: () => listProjectAuthHooks(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectAuth && activeRef.length > 0,
   });
   const replicationPipelines = useQuery({
     queryKey: ["replication-pipelines", activeRef],
     queryFn: () => listProjectReplicationPipelines(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectRealtime && activeRef.length > 0,
   });
   const embeddingJobs = useQuery({
     queryKey: ["embedding-jobs", activeRef],
     queryFn: () => listProjectEmbeddingJobs(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const databaseExtensions = useQuery({
     queryKey: ["database-extensions", activeRef],
     queryFn: () => listProjectDatabaseExtensions(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const databaseCronJobs = useQuery({
     queryKey: ["database-cron-jobs", activeRef],
     queryFn: () => listProjectDatabaseCronJobs(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const databaseQueues = useQuery({
     queryKey: ["database-queues", activeRef],
     queryFn: () => listProjectDatabaseQueues(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const databaseWebhooks = useQuery({
     queryKey: ["database-webhooks", activeRef],
     queryFn: () => listProjectDatabaseWebhooks(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const databaseSchemas = useQuery({
     queryKey: ["database-schemas", activeRef],
     queryFn: () => listProjectDatabaseSchemas(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const databaseRoles = useQuery({
     queryKey: ["database-roles", activeRef],
     queryFn: () => listProjectDatabaseRoles(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectDatabase && activeRef.length > 0,
   });
   const storageBuckets = useQuery({
     queryKey: ["storage-buckets", activeRef],
     queryFn: () => listProjectStorageBuckets(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectStorage && activeRef.length > 0,
   });
   const vectorBuckets = useQuery({
     queryKey: ["vector-buckets", activeRef],
     queryFn: () => listProjectVectorBuckets(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectStorage && activeRef.length > 0,
   });
   const analyticsBuckets = useQuery({
     queryKey: ["analytics-buckets", activeRef],
     queryFn: () => listProjectAnalyticsBuckets(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectStorage && activeRef.length > 0,
   });
   const cdnPolicy = useQuery({
     queryKey: ["cdn-policy", activeRef],
     queryFn: () => getProjectCDNPolicy(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectStorage && activeRef.length > 0,
   });
   const cdnInvalidations = useQuery({
     queryKey: ["cdn-invalidations", activeRef],
     queryFn: () => listProjectCDNInvalidations(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectStorage && activeRef.length > 0,
   });
   const networkConnections = useQuery({
     queryKey: ["network-connections", activeRef],
     queryFn: () => listProjectNetworkConnections(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectConfig && activeRef.length > 0,
   });
   const networkPolicy = useQuery({
     queryKey: ["network-policy", activeRef],
     queryFn: () => getProjectNetwork(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectConfig && activeRef.length > 0,
   });
   const logDrains = useQuery({
     queryKey: ["log-drains", activeRef],
     queryFn: () => listProjectLogDrains(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectLogs && activeRef.length > 0,
   });
   const backups = useQuery({
     queryKey: ["backups", activeRef],
     queryFn: () => listBackups(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectBackups && activeRef.length > 0,
   });
   const backupPolicy = useQuery({
     queryKey: ["backup-policy", activeRef],
     queryFn: () => getBackupPolicy(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectBackups && activeRef.length > 0,
   });
   const recoverability = useQuery({
     queryKey: ["recoverability", activeRef],
     queryFn: () => getProjectRecoverability(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectBackups && activeRef.length > 0,
   });
   const pitrPolicy = useQuery({
     queryKey: ["pitr-policy", activeRef],
     queryFn: () => getPITRPolicy(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectBackups && activeRef.length > 0,
   });
   const walArchives = useQuery({
     queryKey: ["wal-archives", activeRef],
     queryFn: () => listWALArchives(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectBackups && activeRef.length > 0,
   });
   const projectLogs = useQuery({
     queryKey: ["project-logs", activeRef],
     queryFn: () => listProjectLogs(activeRef),
-    enabled: activeRef.length > 0,
-    refetchInterval: 10_000,
+    enabled: needsProjectLogs && activeRef.length > 0,
+    refetchInterval: needsProjectLogs ? 10_000 : false,
   });
   const projectActivity = useQuery({
     queryKey: ["project-activity", activeRef],
     queryFn: () => listProjectActivity(activeRef),
-    enabled: activeRef.length > 0,
-    refetchInterval: 10_000,
-  });
-  const secrets = useQuery({
-    queryKey: ["project-secrets", activeRef],
-    queryFn: () => listProjectSecrets(activeRef),
-    enabled: activeRef.length > 0,
+    enabled: needsProjectActivity && activeRef.length > 0,
+    refetchInterval: needsProjectActivity ? 10_000 : false,
   });
   useEffect(() => {
     if (routeRef) {
       setSelectedRef(routeRef);
     }
   }, [routeRef]);
+  // Redirect away from feature-gated routes once platform flags are known, so a
+  // deep link / bookmark to a disabled area doesn't land on a dead page.
+  useEffect(() => {
+    if (!platformDefaults.data) {
+      return;
+    }
+    if (!orgsEnabled && isOrganizationsRoute) {
+      void navigate({ to: "/" });
+    }
+    if (!ssoScimEnabled && (pathname === "/settings/sso" || pathname === "/settings/scim")) {
+      void navigate({ to: "/settings" });
+    }
+  }, [platformDefaults.data, orgsEnabled, ssoScimEnabled, isOrganizationsRoute, pathname, navigate]);
   useEffect(() => {
     if (selectedTeamSlug && teams.data?.some((team) => team.slug === selectedTeamSlug) === false) {
       setSelectedTeamSlug("");
@@ -618,20 +672,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   };
   const routeToProject = (ref: string, tab: ProjectTab = "overview") => {
     setSelectedRef(ref);
-    const routeByTab: Record<ProjectTab, string> = {
-      overview: "/projects/$ref",
-      connect: "/projects/$ref/connect",
-      auth: "/projects/$ref/auth",
-      database: "/projects/$ref/database",
-      storage: "/projects/$ref/storage",
-      functions: "/projects/$ref/functions",
-      realtime: "/projects/$ref/realtime",
-      logs: "/projects/$ref/logs",
-      backups: "/projects/$ref/backups",
-      config: "/projects/$ref/config",
-      activity: "/projects/$ref/activity",
-    };
-    void navigate({ to: routeByTab[tab], params: { ref } });
+    void navigate({ to: projectRouteByTab[tab], params: { ref } });
   };
   const paletteActions = useMemo<PaletteAction[]>(() => {
     const actions: PaletteAction[] = [
@@ -651,7 +692,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       { id: "nav-backups", title: "Backups and PITR", subtitle: "Logical backups, restore runs, and WAL archive", group: "Navigation", icon: RotateCcw, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "backups") },
       { id: "nav-project-activity", title: "Project Activity", subtitle: "Per-project activity and audit trail", group: "Navigation", icon: Activity, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "activity") },
       { id: "nav-security", title: "Security", subtitle: "MFA, access review, and fleet advisor", group: "Navigation", icon: Shield, run: () => routeTo("/security", "security") },
-      { id: "nav-hosts", title: "Hosts", subtitle: "Fleet capacity registration", group: "Navigation", icon: Server, run: () => routeTo("/hosts", "hosts") },
+      { id: "nav-hosts", title: "Hosts", subtitle: "Host capacity registration", group: "Navigation", icon: Server, run: () => routeTo("/hosts", "hosts") },
       { id: "nav-settings", title: "Settings", subtitle: "Platform defaults and configuration", group: "Navigation", icon: SlidersHorizontal, run: () => routeTo("/settings", "settings") },
       { id: "nav-audit", title: "Audit log", subtitle: "Immutable control-plane action history", group: "Navigation", icon: Activity, run: () => routeTo("/audit", "audit-log") },
     ];
@@ -668,7 +709,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         },
       });
     }
-    if (activeProject) {
+    if (hasProjectRoute && activeProject) {
       actions.push(
         {
           id: "project-pause",
@@ -708,8 +749,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         },
       );
     }
-    return actions;
-  }, [activeProject, projectActionBusy, projectList, routeTo, routeToProject, triggerBackupMutation.isPending]);
+    return orgsEnabled ? actions : actions.filter((action) => action.id !== "nav-orgs");
+  }, [activeProject, hasProjectRoute, orgsEnabled, projectActionBusy, projectList, routeTo, routeToProject, triggerBackupMutation.isPending]);
 
   const onOrgCreated = (orgId: string) => {
     setSelectedOrgId(orgId);
@@ -739,10 +780,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   };
   const pageTitle = pageTitleForPathname(pathname, activeProject, activeProjectTab);
   const pageScopeLabel = routeRef ? "Project workspace" : "Control plane";
-  const account = useMemo(() => accountSummaryFromToken(token), [token]);
-  const apiStatusLabel = apiHealth.isError ? "API surface unreachable" : apiHealth.isLoading ? "API surface checking" : "API surface online";
+  const account = useMemo(() => accountSummaryFromUser(user), [user]);
+  const apiStatusLabel = apiHealth.isError ? "API offline" : apiHealth.isLoading ? "API checking" : "API online";
   const apiStatusClass = apiHealth.isError ? "bg-danger" : apiHealth.isLoading ? "bg-warning" : "bg-success";
   const contextValue: DashboardContextValue = {
+    orgsEnabled,
+    ssoScimEnabled,
     activeOrgId,
     activeTeamSlug,
     activeRef,
@@ -829,7 +872,6 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     walArchives,
     projectLogs,
     projectActivity,
-    secrets,
   };
   const commandProject =
     projectCommandConfirm?.ref === activeProject?.ref
@@ -864,12 +906,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           description={commandCopy?.description}
           footer={
             <>
-              <button className="button secondary" disabled={projectCommandBusy} onClick={() => setProjectCommandConfirm(null)} type="button">
+              <Button variant="secondary" disabled={projectCommandBusy} onClick={() => setProjectCommandConfirm(null)} type="button">
                 Cancel
-              </button>
-              <button className={commandCopy?.tone === "warning" ? "button danger" : "button"} disabled={projectCommandBusy} onClick={runConfirmedProjectCommand} type="button">
+              </Button>
+              <Button variant={commandCopy?.tone === "warning" ? "danger" : "default"} disabled={projectCommandBusy} onClick={runConfirmedProjectCommand} type="button">
                 {projectCommandBusy ? "Working..." : commandCopy?.confirmLabel ?? "Confirm"}
-              </button>
+              </Button>
             </>
           }
           onClose={() => !projectCommandBusy && setProjectCommandConfirm(null)}
@@ -885,7 +927,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             </div>
           </div>
         </Modal>
-        <div className="grid min-h-screen grid-cols-[248px_1fr] max-lg:grid-cols-1">
+        <div aria-hidden={paletteOpen ? true : undefined} className="grid min-h-screen grid-cols-[248px_1fr] max-lg:grid-cols-1">
           <Sidebar projectMode={Boolean(routeRef)} />
           <section className="min-w-0 border-l border-border max-lg:border-l-0">
             <header className="flex h-14 items-center justify-between border-b border-border px-6">
@@ -896,13 +938,17 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               <div className="flex items-center gap-2 text-sm text-muted">
                 <span className={`status-dot ${apiStatusClass}`} />
                 {apiStatusLabel}
-                <button className="icon-button h-8 min-h-8 min-w-8" onClick={openPalette} title="Open command palette" type="button">
+                <Button className="h-8" variant="ghost" size="icon" onClick={openPalette} title="Open command palette" type="button">
                   <Command size={14} />
-                </button>
+                </Button>
                 <AccountMenu account={account} onLogout={onLogout} onRoute={routeTo} onThemeChange={setTheme} theme={theme} />
               </div>
             </header>
-            <div className="grid gap-6 p-6" id={panelIdForPathname(pathname)}>
+            {/* min-w-0 + overflow-x-clip: a single durable guard so no wide
+                descendant (charts, long mono strings, dense panels) can ever
+                push a page-wide horizontal scrollbar. Tables scroll internally
+                via their own wrapper. */}
+            <div className="grid min-w-0 gap-6 overflow-x-clip p-6" id={panelIdForPathname(pathname)}>
               <Outlet />
             </div>
           </section>
@@ -933,20 +979,90 @@ function AccountMenu({
   theme: "dark" | "light";
 }) {
   const [open, setOpen] = useState(false);
+  const menuID = useId();
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   function navigate(to: string, id: string) {
     setOpen(false);
     onRoute(to, id);
   }
 
+  function focusMenuItem(index: number) {
+    const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]');
+    if (!items?.length) {
+      return;
+    }
+    items[(index + items.length) % items.length]?.focus();
+  }
+
+  function closeAndFocusButton() {
+    setOpen(false);
+    buttonRef.current?.focus();
+  }
+
+  function onButtonKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+      return;
+    }
+    event.preventDefault();
+    setOpen(true);
+    window.requestAnimationFrame(() => focusMenuItem(event.key === "ArrowUp" ? -1 : 0));
+  }
+
+  function onMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]') ?? []);
+    const activeIndex = items.findIndex((item) => item === document.activeElement);
+    switch (event.key) {
+      case "Escape":
+        event.preventDefault();
+        closeAndFocusButton();
+        break;
+      case "Tab":
+        setOpen(false);
+        break;
+      case "ArrowDown":
+        event.preventDefault();
+        focusMenuItem(activeIndex + 1);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        focusMenuItem(activeIndex - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        focusMenuItem(0);
+        break;
+      case "End":
+        event.preventDefault();
+        focusMenuItem(items.length - 1);
+        break;
+    }
+  }
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    window.requestAnimationFrame(() => focusMenuItem(0));
+    function onPointerDown(event: PointerEvent) {
+      if (menuRef.current?.contains(event.target as Node) || buttonRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
   return (
     <div className="relative">
-      <button className="nav-item h-9 gap-2 border border-border bg-surface px-2 pr-3" onClick={() => setOpen((value) => !value)} type="button">
+      <button aria-expanded={open} aria-haspopup="menu" aria-controls={menuID} className="nav-item h-9 gap-2 border border-border bg-surface px-2 pr-3" onClick={() => setOpen((value) => !value)} onKeyDown={onButtonKeyDown} ref={buttonRef} type="button">
         <span className="grid h-6 w-6 place-items-center rounded-full border border-border-strong bg-surface-2 font-mono text-[11px] font-semibold text-text">{account.initials}</span>
         <span className="max-w-[150px] truncate text-sm text-text">{account.shortName}</span>
       </button>
       {open ? (
-        <div className="absolute right-0 top-11 z-50 w-72 rounded-lg border border-border bg-surface p-2 shadow-[0_18px_40px_rgba(0,0,0,.45)]">
+        <div aria-label="Account" className="absolute right-0 top-11 z-50 w-72 rounded-lg border border-border bg-surface p-2 shadow-[0_18px_40px_rgba(0,0,0,.45)]" id={menuID} onKeyDown={onMenuKeyDown} ref={menuRef} role="menu">
           <div className="border-b border-border px-2 pb-3 pt-1">
             <div className="flex items-center gap-3">
               <span className="grid h-9 w-9 place-items-center rounded-full border border-border-strong bg-surface-2 font-mono text-sm font-semibold text-text">{account.initials}</span>
@@ -959,38 +1075,42 @@ function AccountMenu({
           <div className="mt-2 grid gap-1">
             <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg p-1">
               <button
+                aria-checked={theme === "dark"}
                 className={theme === "dark" ? "segmented active h-8" : "segmented h-8"}
                 onClick={() => onThemeChange("dark")}
+                role="menuitemradio"
                 type="button"
               >
                 <Moon size={14} />
                 Dark
               </button>
               <button
+                aria-checked={theme === "light"}
                 className={theme === "light" ? "segmented active h-8" : "segmented h-8"}
                 onClick={() => onThemeChange("light")}
+                role="menuitemradio"
                 type="button"
               >
                 <Sun size={14} />
                 Light
               </button>
             </div>
-            <button className="nav-item h-9 justify-start" onClick={() => navigate("/security", "security")} type="button">
+            <button className="nav-item h-9 justify-start" onClick={() => navigate("/security", "security")} role="menuitem" type="button">
               <UserCircle size={14} />
-              Profile settings
+              Profile
             </button>
-            <button className="nav-item h-9 justify-start" onClick={() => navigate("/security", "security")} type="button">
+            <button className="nav-item h-9 justify-start" onClick={() => navigate("/security/mfa", "security")} role="menuitem" type="button">
               <Shield size={14} />
               Account security
             </button>
-            <button className="nav-item h-9 justify-start" onClick={() => navigate("/settings", "settings")} type="button">
+            <button className="nav-item h-9 justify-start" onClick={() => navigate("/settings", "settings")} role="menuitem" type="button">
               <SlidersHorizontal size={14} />
               Platform settings
             </button>
             <button className="nav-item h-9 justify-start text-danger hover:text-danger" onClick={() => {
               setOpen(false);
               onLogout();
-            }} type="button">
+            }} role="menuitem" type="button">
               <LogOut size={14} />
               Logout
             </button>
@@ -1001,10 +1121,9 @@ function AccountMenu({
   );
 }
 
-function accountSummaryFromToken(token: string | null): AccountSummary {
-  const claims = tokenClaims(token);
-  const email = typeof claims.email === "string" && claims.email ? claims.email : "admin";
-  const role = typeof claims.role === "string" && claims.role ? claims.role : "admin";
+function accountSummaryFromUser(user: User | null): AccountSummary {
+  const email = user?.email || "admin";
+  const role = user?.role || "admin";
   const shortName = email.includes("@") ? email.split("@")[0] : email;
   const initials = shortName
     .split(/[._\-\s]+/)
@@ -1053,31 +1172,36 @@ function projectCommandConfirmCopy(action: ProjectCommandConfirm["action"], proj
   }
 }
 
-function tokenClaims(token: string | null): Record<string, unknown> {
-  if (!token) {
-    return {};
-  }
-  const parts = token.split(".");
-  for (const payload of parts.length >= 3 ? [parts[1], parts[0]] : [parts[0]]) {
-    if (!payload) {
-      continue;
-    }
-    const decoded = decodeBase64URLJSON(payload);
-    if (decoded) {
-      return decoded;
-    }
-  }
-  return {};
-}
+type ToastMessage = { id: string; title: string; detail?: string; kind?: "success" | "warning" | "danger" };
 
-function decodeBase64URLJSON(payload: string): Record<string, unknown> | null {
-  try {
-    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    return JSON.parse(window.atob(padded)) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+const toastIconByKind = {
+  success: CheckCircle2,
+  warning: AlertTriangle,
+  danger: XCircle,
+} as const;
+
+const toastDismissMs = {
+  success: 6000,
+  warning: 6000,
+  danger: 10000,
+} as const;
+
+function ToastItem({ toast, onDismiss }: { toast: ToastMessage; onDismiss: (id: string) => void }) {
+  const kind = toast.kind ?? "success";
+  const Icon = toastIconByKind[kind];
+  useEffect(() => {
+    const timer = window.setTimeout(() => onDismiss(toast.id), toastDismissMs[kind]);
+    return () => window.clearTimeout(timer);
+  }, [toast.id, kind, onDismiss]);
+  return (
+    <button className={`toast ${kind}`} onClick={() => onDismiss(toast.id)} type="button">
+      <Icon size={15} />
+      <span className="min-w-0">
+        <span className="block truncate text-sm font-medium">{toast.title}</span>
+        {toast.detail ? <span className="mt-0.5 block truncate text-xs text-muted">{toast.detail}</span> : null}
+      </span>
+    </button>
+  );
 }
 
 function ToastHost() {
@@ -1086,13 +1210,7 @@ function ToastHost() {
   return (
     <div aria-live="polite" className="toast-host">
       {toasts.map((toast) => (
-        <button className={`toast ${toast.kind ?? "success"}`} key={toast.id} onClick={() => removeToast(toast.id)} type="button">
-          <CheckCircle2 size={15} />
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-medium">{toast.title}</span>
-            {toast.detail ? <span className="mt-0.5 block truncate text-xs text-muted">{toast.detail}</span> : null}
-          </span>
-        </button>
+        <ToastItem key={toast.id} onDismiss={removeToast} toast={toast} />
       ))}
     </div>
   );
@@ -1100,6 +1218,9 @@ function ToastHost() {
 
 function CommandPalette({ actions }: { actions: PaletteAction[] }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const open = useUIStore((state) => state.paletteOpen);
   const query = useUIStore((state) => state.paletteQuery);
@@ -1123,8 +1244,23 @@ function CommandPalette({ actions }: { actions: PaletteAction[] }) {
     if (!open) {
       return;
     }
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const restoreBackground = makeBackgroundInert(backdropRef.current);
     setActiveIndex(0);
     window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => {
+      restoreBackground();
+      if (previousFocusRef.current?.isConnected) {
+        previousFocusRef.current.focus();
+      }
+      previousFocusRef.current = null;
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open) {
+      setActiveIndex(0);
+    }
   }, [open, query]);
 
   if (!open) {
@@ -1164,9 +1300,36 @@ function CommandPalette({ actions }: { actions: PaletteAction[] }) {
     }
   }
 
+  function onDialogKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePalette();
+      return;
+    }
+    if (event.key !== "Tab") {
+      return;
+    }
+    const elements = focusableElements(dialogRef.current);
+    if (elements.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = elements[0];
+    const last = elements[elements.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+      return;
+    }
+    if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
-    <div className="palette-backdrop" onMouseDown={closePalette} role="presentation">
-      <section aria-label="Command palette" aria-modal="true" className="palette-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+    <div className="palette-backdrop" onMouseDown={closePalette} ref={backdropRef} role="presentation">
+      <section aria-label="Command palette" aria-modal="true" className="palette-dialog" onKeyDown={onDialogKeyDown} onMouseDown={(event) => event.stopPropagation()} ref={dialogRef} role="dialog" tabIndex={-1}>
         <div className="palette-search">
           <Search size={16} />
           <input
@@ -1186,25 +1349,30 @@ function CommandPalette({ actions }: { actions: PaletteAction[] }) {
             matches.map((action, index) => {
               const Icon = action.icon;
               const active = index === activeIndex;
+              const showHeader = index === 0 || matches[index - 1]?.group !== action.group;
               return (
-                <button
-                  aria-selected={active}
-                  className={action.disabled ? "palette-item disabled" : active ? "palette-item active" : "palette-item"}
-                  disabled={action.disabled}
-                  key={action.id}
-                  onMouseEnter={() => setActiveIndex(index)}
-                  onClick={() => runAction(action)}
-                  role="option"
-                  type="button"
-                >
-                  <span className="palette-icon">
-                    <Icon size={15} />
-                  </span>
-                  <span className="min-w-0">
-                    <span className="palette-title">{action.title}</span>
-                    <span className="palette-subtitle">{action.group} · {action.subtitle}</span>
-                  </span>
-                </button>
+                <div key={action.id}>
+                  {showHeader ? (
+                    <div className="label" role="presentation" style={{ padding: "10px 12px 4px" }}>{action.group}</div>
+                  ) : null}
+                  <button
+                    aria-selected={active}
+                    className={action.disabled ? "palette-item disabled" : active ? "palette-item active" : "palette-item"}
+                    disabled={action.disabled}
+                    onMouseEnter={() => setActiveIndex(index)}
+                    onClick={() => runAction(action)}
+                    role="option"
+                    type="button"
+                  >
+                    <span className="palette-icon">
+                      <Icon size={15} />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="palette-title">{action.title}</span>
+                      <span className="palette-subtitle">{action.subtitle}</span>
+                    </span>
+                  </button>
+                </div>
               );
             })
           )}
@@ -1215,31 +1383,16 @@ function CommandPalette({ actions }: { actions: PaletteAction[] }) {
 }
 
 function Sidebar({ projectMode }: { projectMode: boolean }) {
-  const { activeProject, activeProjectTab, activeRef } = useDashboardContext();
+  const { activeProject, activeProjectTab, activeRef, orgsEnabled, ssoScimEnabled } = useDashboardContext();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const projectSections = useUIStore((state) => state.projectSections);
   if (projectMode) {
     const ref = activeProject?.ref ?? activeRef;
-    const routeByTab: Record<ProjectTab, string> = {
-      overview: "/projects/$ref",
-      connect: "/projects/$ref/connect",
-      auth: "/projects/$ref/auth",
-      database: "/projects/$ref/database",
-      storage: "/projects/$ref/storage",
-      functions: "/projects/$ref/functions",
-      realtime: "/projects/$ref/realtime",
-      logs: "/projects/$ref/logs",
-      backups: "/projects/$ref/backups",
-      config: "/projects/$ref/config",
-      activity: "/projects/$ref/activity",
-    };
 
     return (
       <aside className="flex min-h-screen flex-col bg-bg px-4 py-4 max-lg:min-h-0">
-        <div className="flex h-10 items-center gap-3 px-2">
-          <div className="grid h-10 w-10 place-items-center rounded-md border border-border-strong bg-surface-2">
-            <BrandLogo className="h-7 w-7 text-accent" />
-          </div>
+        <div className="flex h-10 items-center gap-2.5 px-1">
+          <BrandLogo className="h-9 w-9" />
           <BrandWordmark />
         </div>
         <div className="mt-5 rounded-lg border border-border bg-surface p-3">
@@ -1251,9 +1404,9 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
           <h2 className="mt-1 truncate text-base font-medium">{activeProject?.name ?? ref}</h2>
           <p className="mt-1 truncate font-mono text-xs text-muted">{ref}</p>
           <div className="mt-3 flex flex-wrap gap-1">
-            <span className={`pill ${activeProject?.status === "healthy" ? "healthy" : activeProject?.status === "paused" ? "provisioning" : ""}`}>{activeProject?.status ?? "loading"}</span>
-            {activeProject ? <span className="pill">{activeProject.spec.resource_tier}</span> : null}
-            {activeProject ? <span className="pill">{activeProject.spec.profile}</span> : null}
+            <StatusPill status={activeProject?.status ?? "loading"} />
+            {activeProject ? <Badge variant="muted">{activeProject.spec.resource_tier}</Badge> : null}
+            {activeProject ? <Badge variant="muted">{activeProject.spec.profile}</Badge> : null}
           </div>
         </div>
         <nav className="mt-4 grid gap-1">
@@ -1265,17 +1418,28 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
             const tabSuffix = tab.suffix;
             return (
               <div className="grid gap-1" key={tab.id}>
-                <Link activeOptions={{ exact: tab.id === "overview" }} activeProps={{ className: "nav-item active" }} className={`nav-item ${active ? "active" : ""}`} params={{ ref }} to={routeByTab[tab.id]}>
+                <Link activeOptions={{ exact: tab.id === "overview" }} activeProps={{ className: "nav-item active" }} className={`nav-item ${active ? "active" : ""}`} params={{ ref }} to={projectRouteByTab[tab.id]}>
                   <Icon size={15} />
                   {tab.label}
                 </Link>
                 {subnav ? (
                   <div className="project-subnav">
-                    {subnav.map((item) => (
-                      <Link activeOptions={{ exact: true }} className={`project-subnav-item ${activeSection === item.id ? "active" : ""}`} key={item.id} title={item.description} to={item.id === "overview" ? routeByTab[tab.id] : `/projects/${ref}/${tabSuffix}/${item.id}`}>
-                        {item.label}
-                      </Link>
-                    ))}
+                    {subnav.map((item, index) => {
+                      const group = item.group;
+                      // Render a small cluster header whenever a new group begins.
+                      // Tabs whose items have no group skip headers entirely.
+                      const showGroup = group ? group !== subnav[index - 1]?.group : false;
+                      return (
+                        <div className="contents" key={item.id}>
+                          {showGroup ? (
+                            <div className="label" role="presentation" style={{ padding: "10px 12px 4px" }}>{group}</div>
+                          ) : null}
+                          <Link activeOptions={{ exact: true }} className={`project-subnav-item ${activeSection === item.id ? "active" : ""}`} title={item.description} to={item.id === "overview" ? projectRouteByTab[tab.id] : projectPath(ref, tabSuffix, item.id)}>
+                            {item.label}
+                          </Link>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>
@@ -1288,20 +1452,21 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
 
   const navItems: Array<{ label: string; icon: LucideIcon; to: string }> = [
     { label: "Dashboard", icon: Activity, to: "/" },
-    { label: "Organizations", icon: UserPlus, to: "/organizations" },
+    // Organizations only when multi-org is enabled (off by default for MVP).
+    ...(orgsEnabled ? [{ label: "Organizations", icon: UserPlus, to: "/organizations" }] : []),
     { label: "Projects", icon: Database, to: "/projects" },
     { label: "Security", icon: Shield, to: "/security" },
     { label: "Hosts", icon: Server, to: "/hosts" },
     { label: "Settings", icon: SlidersHorizontal, to: "/settings" },
     { label: "Audit", icon: Activity, to: "/audit" },
   ];
+  // Hide the SSO/SCIM settings sub-sections unless platform SSO/SCIM is enabled.
+  const visibleSettingsSections = platformSettingsSections.filter((item) => ssoScimEnabled || (item.id !== "sso" && item.id !== "scim"));
 
   return (
     <aside className="flex min-h-screen flex-col bg-bg px-4 py-4 max-lg:min-h-0">
-      <div className="flex h-10 items-center gap-3 px-2">
-        <div className="grid h-10 w-10 place-items-center rounded-md border border-border-strong bg-surface-2">
-          <BrandLogo className="h-7 w-7 text-accent" />
-        </div>
+      <div className="flex h-10 items-center gap-2.5 px-1">
+        <BrandLogo className="h-9 w-9" />
         <BrandWordmark />
       </div>
       <nav className="mt-6 grid gap-1">
@@ -1336,7 +1501,7 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
               ) : null}
               {label === "Settings" && active ? (
                 <div className="project-subnav">
-                  {platformSettingsSections.map((item) => {
+                  {visibleSettingsSections.map((item) => {
                     const activeSection = pathname.match(/^\/settings\/([^/]+)/)?.[1] ?? "overview";
                     return (
                       item.id === "overview" ? (

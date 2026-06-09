@@ -63,6 +63,75 @@ func TestCORSOrigins(t *testing.T) {
 		if got := response.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "PATCH") {
 			t.Fatalf("expected CORS preflight to allow PATCH for SCIM updates, got %q", got)
 		}
+		if got := response.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "X-Supadupa-Browser") {
+			t.Fatalf("expected CORS preflight to allow browser auth marker, got %q", got)
+		}
+	}
+}
+
+func TestBrowserAuthResponsesOmitBearerToken(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}, AuthRequired: true})
+
+	bootstrap := performWithHeader(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`, "X-Supadupa-Browser", "true")
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	if strings.Contains(bootstrap.Body.String(), `"token"`) {
+		t.Fatalf("browser bootstrap response must not include bearer token: %s", bootstrap.Body.String())
+	}
+	assertAuthCookie(t, bootstrap.Result().Cookies(), false)
+
+	login := performWithHeader(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`, "X-Supadupa-Browser", "true")
+	if login.Code != http.StatusOK {
+		t.Fatalf("expected login status 200, got %d: %s", login.Code, login.Body.String())
+	}
+	if strings.Contains(login.Body.String(), `"token"`) {
+		t.Fatalf("browser login response must not include bearer token: %s", login.Body.String())
+	}
+	assertAuthCookie(t, login.Result().Cookies(), false)
+
+	secureLoginRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"email":"admin@example.com","password":"super-secure"}`))
+	secureLoginRequest.Header.Set("Content-Type", "application/json")
+	secureLoginRequest.Header.Set("X-Supadupa-Browser", "true")
+	secureLoginRequest.Header.Set("X-Forwarded-Proto", "https")
+	secureLogin := httptest.NewRecorder()
+	server.Handler.ServeHTTP(secureLogin, secureLoginRequest)
+	if secureLogin.Code != http.StatusOK {
+		t.Fatalf("expected secure login status 200, got %d: %s", secureLogin.Code, secureLogin.Body.String())
+	}
+	assertAuthCookie(t, secureLogin.Result().Cookies(), true)
+}
+
+func assertAuthCookie(t *testing.T, cookies []*http.Cookie, secure bool) {
+	t.Helper()
+	if len(cookies) == 0 {
+		t.Fatalf("expected auth response to set auth cookie")
+	}
+	cookie := cookies[0]
+	if cookie.Name != authCookieName {
+		t.Fatalf("expected %s cookie, got %q", authCookieName, cookie.Name)
+	}
+	if cookie.Value == "" {
+		t.Fatalf("expected auth cookie value")
+	}
+	if cookie.Path != "/" {
+		t.Fatalf("expected auth cookie path /, got %q", cookie.Path)
+	}
+	if !cookie.HttpOnly {
+		t.Fatalf("expected auth cookie to be HttpOnly")
+	}
+	if cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("expected auth cookie SameSite=Lax, got %v", cookie.SameSite)
+	}
+	if cookie.Domain != "" {
+		t.Fatalf("expected auth cookie to be host-only by default, got domain %q", cookie.Domain)
+	}
+	if cookie.Secure != secure {
+		t.Fatalf("expected auth cookie Secure=%v, got %v", secure, cookie.Secure)
+	}
+	if cookie.MaxAge <= 0 {
+		t.Fatalf("expected auth cookie MaxAge to be positive, got %d", cookie.MaxAge)
 	}
 }
 
@@ -264,6 +333,12 @@ func TestPlatformSAMLSSOSettingsAndCallback(t *testing.T) {
 		"auto_provision":  true,
 		"default_role":    "developer",
 	})
+	updateWithoutAdapterFlag := performWithToken(server, http.MethodPut, "/v1/settings/sso", configBody, token)
+	if updateWithoutAdapterFlag.Code != http.StatusBadRequest || !strings.Contains(updateWithoutAdapterFlag.Body.String(), "SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER") {
+		t.Fatalf("expected platform sso JSON adapter opt-in rejection, got %d: %s", updateWithoutAdapterFlag.Code, updateWithoutAdapterFlag.Body.String())
+	}
+
+	t.Setenv("SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER", "true")
 	update := performWithToken(server, http.MethodPut, "/v1/settings/sso", configBody, token)
 	if update.Code != http.StatusOK {
 		t.Fatalf("expected sso settings update 200, got %d: %s", update.Code, update.Body.String())
@@ -288,9 +363,27 @@ func TestPlatformSAMLSSOSettingsAndCallback(t *testing.T) {
 		NotOnOrAfter: time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
 	}
 	assertion.Signature = signSAMLAssertion(t, privateKey, assertion)
-	callback := perform(server, http.MethodPost, "/v1/auth/sso/saml/callback", mustJSON(t, assertion))
-	if callback.Code != http.StatusOK || !strings.Contains(callback.Body.String(), `"token"`) || !strings.Contains(callback.Body.String(), `"email":"engineer@example.com"`) || !strings.Contains(callback.Body.String(), `"role":"viewer"`) {
-		t.Fatalf("expected sso callback token and provisioned user: %d %s", callback.Code, callback.Body.String())
+	callback := performWithHeader(server, http.MethodPost, "/v1/auth/sso/saml/callback", mustJSON(t, assertion), "Origin", "https://idp.example.com")
+	if callback.Code != http.StatusOK || strings.Contains(callback.Body.String(), `"token"`) || !strings.Contains(callback.Body.String(), `"email":"engineer@example.com"`) || !strings.Contains(callback.Body.String(), `"role":"viewer"`) {
+		t.Fatalf("expected sso callback user without bearer token: %d %s", callback.Code, callback.Body.String())
+	}
+	if len(callback.Result().Cookies()) == 0 {
+		t.Fatal("expected sso callback to set session cookie")
+	}
+
+	replayCallback := perform(server, http.MethodPost, "/v1/auth/sso/saml/callback", mustJSON(t, assertion))
+	if replayCallback.Code != http.StatusUnauthorized || !strings.Contains(replayCallback.Body.String(), "already been used") {
+		t.Fatalf("expected sso assertion replay rejection: %d %s", replayCallback.Code, replayCallback.Body.String())
+	}
+
+	tamperedRoleAssertion := assertion
+	tamperedRoleAssertion.Email = "other-engineer@example.com"
+	tamperedRoleAssertion.NameID = "idp-user-456"
+	tamperedRoleAssertion.Signature = signSAMLAssertion(t, privateKey, tamperedRoleAssertion)
+	tamperedRoleAssertion.Role = "admin"
+	tamperedRoleCallback := perform(server, http.MethodPost, "/v1/auth/sso/saml/callback", mustJSON(t, tamperedRoleAssertion))
+	if tamperedRoleCallback.Code != http.StatusUnauthorized || !strings.Contains(tamperedRoleCallback.Body.String(), "signature is invalid") {
+		t.Fatalf("expected role tampering rejection: %d %s", tamperedRoleCallback.Code, tamperedRoleCallback.Body.String())
 	}
 
 	badAssertion := assertion
@@ -306,6 +399,252 @@ func TestPlatformSAMLSSOSettingsAndCallback(t *testing.T) {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected %s audit event: %s", action, auditResponse.Body.String())
 		}
+	}
+}
+
+func TestPlatformSSOCallbackFailuresAreThrottledAndAudited(t *testing.T) {
+	t.Setenv("SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER", "true")
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	token := extractString(t, bootstrap.Body.String(), "token")
+	privateKey, certificate := testSAMLSigningCertificate(t)
+	configBody := mustJSON(t, map[string]any{
+		"enabled":         true,
+		"idp_entity_id":   "https://idp.example.com/saml",
+		"sso_url":         "https://idp.example.com/login",
+		"certificate_pem": certificate,
+		"acs_url":         "https://supadupa.example.com/v1/auth/sso/saml/callback",
+		"email_domain":    "example.com",
+		"auto_provision":  true,
+		"default_role":    "developer",
+	})
+	update := performWithToken(server, http.MethodPut, "/v1/settings/sso", configBody, token)
+	if update.Code != http.StatusOK {
+		t.Fatalf("expected sso settings update 200, got %d: %s", update.Code, update.Body.String())
+	}
+
+	badAssertion := control.PlatformSSOAssertion{
+		Issuer:       "https://idp.example.com/saml",
+		Audience:     "https://supadupa.example.com/v1/auth/sso/saml/callback",
+		Email:        "engineer@other.test",
+		NameID:       "idp-user-456",
+		Role:         "developer",
+		NotOnOrAfter: time.Now().UTC().Add(5 * time.Minute),
+	}
+	badAssertion.Signature = signSAMLAssertion(t, privateKey, badAssertion)
+	for i := 0; i < maxSSOCallbackFailures; i++ {
+		response := perform(server, http.MethodPost, "/v1/auth/sso/saml/callback", mustJSON(t, badAssertion))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected bad sso callback %d to be unauthorized, got %d: %s", i+1, response.Code, response.Body.String())
+		}
+	}
+
+	validAssertion := badAssertion
+	validAssertion.Email = "engineer@example.com"
+	validAssertion.Signature = signSAMLAssertion(t, privateKey, validAssertion)
+	throttled := perform(server, http.MethodPost, "/v1/auth/sso/saml/callback", mustJSON(t, validAssertion))
+	if throttled.Code != http.StatusTooManyRequests || !strings.Contains(throttled.Body.String(), "too many sso callback failures") {
+		t.Fatalf("expected throttled sso callback, got %d: %s", throttled.Code, throttled.Body.String())
+	}
+	if throttled.Header().Get("Retry-After") == "" {
+		t.Fatal("expected throttled sso callback to include Retry-After")
+	}
+
+	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
+	if !strings.Contains(auditResponse.Body.String(), `"action":"user.sso_callback_failed"`) || !strings.Contains(auditResponse.Body.String(), `"reason":"validation_failed"`) {
+		t.Fatalf("expected sso callback failure audit event: %s", auditResponse.Body.String())
+	}
+	if strings.Contains(auditResponse.Body.String(), badAssertion.Signature) {
+		t.Fatalf("sso failure audit must not include assertion signature: %s", auditResponse.Body.String())
+	}
+}
+
+func TestRequestBodyLimitRejectsDeclaredOversizedBody(t *testing.T) {
+	server := NewServer(Config{Store: control.NewMemoryStore(), AuthRequired: true})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "application/json")
+	request.ContentLength = maxRequestBodyBytes + 1
+	response := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), "request body too large") {
+		t.Fatalf("expected oversized body rejection, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestJSONBodyLimitRejectsDeclaredOversizedJSONBody(t *testing.T) {
+	server := NewServer(Config{Store: control.NewMemoryStore(), AuthRequired: true})
+	body := `{"email":"admin@example.com","password":"` + strings.Repeat("a", defaultJSONBodyBytes) + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(response, request)
+
+	if len(body) >= maxRequestBodyBytes {
+		t.Fatalf("test body should stay below global request cap")
+	}
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), "request body too large") {
+		t.Fatalf("expected oversized JSON body rejection, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestCORSRejectsMutatingDisallowedOrigin(t *testing.T) {
+	server := NewServer(Config{Store: control.NewMemoryStore(), AuthRequired: true, CORSOrigins: []string{"https://admin.example.com"}})
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"email":"admin@example.com","password":"secret"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://evil.example.com")
+	response := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "origin is not allowed") {
+		t.Fatalf("expected disallowed origin rejection, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestCORSRequiresOriginForCookieAuthenticatedMutation(t *testing.T) {
+	server := NewServer(Config{Store: control.NewMemoryStore(), AuthRequired: true, CORSOrigins: []string{"https://admin.example.com"}})
+	bootstrap := performWithHeader(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`, "X-Supadupa-Browser", "true")
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+
+	noOrigin := httptest.NewRequest(http.MethodPost, "/v1/orgs", strings.NewReader(`{"name":"Cookie Org"}`))
+	noOrigin.Header.Set("Content-Type", "application/json")
+	for _, cookie := range bootstrap.Result().Cookies() {
+		noOrigin.AddCookie(cookie)
+	}
+	noOriginResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(noOriginResponse, noOrigin)
+	if noOriginResponse.Code != http.StatusForbidden || !strings.Contains(noOriginResponse.Body.String(), "origin is required") {
+		t.Fatalf("expected cookie mutation without origin to be rejected, got %d: %s", noOriginResponse.Code, noOriginResponse.Body.String())
+	}
+
+	allowedOrigin := httptest.NewRequest(http.MethodPost, "/v1/orgs", strings.NewReader(`{"name":"Allowed Cookie Org"}`))
+	allowedOrigin.Header.Set("Content-Type", "application/json")
+	allowedOrigin.Header.Set("Origin", "https://admin.example.com")
+	for _, cookie := range bootstrap.Result().Cookies() {
+		allowedOrigin.AddCookie(cookie)
+	}
+	allowedOriginResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(allowedOriginResponse, allowedOrigin)
+	if allowedOriginResponse.Code != http.StatusCreated {
+		t.Fatalf("expected allowed-origin cookie mutation, got %d: %s", allowedOriginResponse.Code, allowedOriginResponse.Body.String())
+	}
+
+	login := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
+	token := extractString(t, login.Body.String(), "token")
+	bearerResponse := performWithToken(server, http.MethodPost, "/v1/orgs", `{"name":"Bearer Org"}`, token)
+	if bearerResponse.Code != http.StatusCreated {
+		t.Fatalf("expected bearer mutation without origin to remain allowed, got %d: %s", bearerResponse.Code, bearerResponse.Body.String())
+	}
+}
+
+func TestAuthStateIncludesCookieAuthenticatedUser(t *testing.T) {
+	server := NewServer(Config{Store: control.NewMemoryStore(), AuthRequired: true})
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/auth/state", nil)
+	for _, cookie := range bootstrap.Result().Cookies() {
+		request.AddCookie(cookie)
+	}
+	response := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"authenticated":true`) || !strings.Contains(response.Body.String(), `"email":"admin@example.com"`) {
+		t.Fatalf("expected authenticated auth state, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestLoginThrottlesRepeatedFailures(t *testing.T) {
+	server := NewServer(Config{Store: control.NewMemoryStore(), AuthRequired: true})
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	token := extractString(t, bootstrap.Body.String(), "token")
+
+	for i := 0; i < maxAuthFailures; i++ {
+		response := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"wrong-password"}`)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected failed login %d to be unauthorized, got %d: %s", i+1, response.Code, response.Body.String())
+		}
+	}
+	throttled := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
+	if throttled.Code != http.StatusTooManyRequests || !strings.Contains(throttled.Body.String(), "too many failed authentication attempts") {
+		t.Fatalf("expected throttled login after repeated failures, got %d: %s", throttled.Code, throttled.Body.String())
+	}
+	spoofedForwardedFor := performWithHeader(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`, "X-Forwarded-For", "203.0.113.10")
+	if spoofedForwardedFor.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected spoofed X-Forwarded-For to stay throttled, got %d: %s", spoofedForwardedFor.Code, spoofedForwardedFor.Body.String())
+	}
+
+	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
+	if !strings.Contains(auditResponse.Body.String(), `"action":"user.login_failed"`) || !strings.Contains(auditResponse.Body.String(), `"reason":"invalid_credentials"`) {
+		t.Fatalf("expected failed login audit event: %s", auditResponse.Body.String())
+	}
+	if strings.Contains(auditResponse.Body.String(), "wrong-password") {
+		t.Fatalf("login audit events must not include submitted passwords: %s", auditResponse.Body.String())
+	}
+}
+
+func TestLoginThrottlesRepeatedFailuresByClientIP(t *testing.T) {
+	server := NewServer(Config{Store: control.NewMemoryStore(), AuthRequired: true})
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+
+	for i := 0; i < maxAuthFailures; i++ {
+		body := fmt.Sprintf(`{"email":"attacker-%d@example.com","password":"wrong-password"}`, i)
+		response := perform(server, http.MethodPost, "/v1/auth/login", body)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("expected failed login %d to be unauthorized, got %d: %s", i+1, response.Code, response.Body.String())
+		}
+	}
+	throttled := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
+	if throttled.Code != http.StatusTooManyRequests || !strings.Contains(throttled.Body.String(), "too many failed authentication attempts") {
+		t.Fatalf("expected valid login throttled by client IP failures, got %d: %s", throttled.Code, throttled.Body.String())
+	}
+}
+
+func TestAuthAttemptLimiterPrunesExpiredEntriesAndCapsKeys(t *testing.T) {
+	limiter := newAuthAttemptLimiter()
+	old := time.Now().UTC().Add(-2 * authAttemptWindow)
+	limiter.RecordFailure("old@example.com|192.0.2.1", old)
+	limiter.RecordFailure("new@example.com|192.0.2.1", time.Now().UTC())
+
+	limiter.mu.Lock()
+	if _, ok := limiter.attempts["old@example.com|192.0.2.1"]; ok {
+		limiter.mu.Unlock()
+		t.Fatal("expected expired auth attempt key to be pruned")
+	}
+	limiter.mu.Unlock()
+
+	limiter = newAuthAttemptLimiter()
+	now := time.Now().UTC()
+	for i := 0; i < maxAuthAttemptKeys+50; i++ {
+		limiter.RecordFailure(fmt.Sprintf("user-%d@example.com|192.0.2.1", i), now.Add(time.Duration(i)*time.Millisecond))
+	}
+	limiter.mu.Lock()
+	size := len(limiter.attempts)
+	limiter.mu.Unlock()
+	if size > maxAuthAttemptKeys {
+		t.Fatalf("expected auth attempt limiter to cap keys at %d, got %d", maxAuthAttemptKeys, size)
 	}
 }
 
@@ -333,7 +672,8 @@ func TestPlatformMFAEnrollmentLoginAndDisable(t *testing.T) {
 		t.Fatalf("expected mfa enrollment: %d %s", enroll.Code, enroll.Body.String())
 	}
 	secret := extractString(t, enroll.Body.String(), "secret")
-	code, err := control.TOTPCode(secret, time.Now().UTC())
+	now := time.Now().UTC()
+	code, err := control.TOTPCode(secret, now.Add(-30*time.Second))
 	if err != nil {
 		t.Fatalf("expected totp code: %v", err)
 	}
@@ -353,7 +693,7 @@ func TestPlatformMFAEnrollmentLoginAndDisable(t *testing.T) {
 		t.Fatalf("expected mfa login challenge without token: %d %s", challenge.Code, challenge.Body.String())
 	}
 
-	loginCode, err := control.TOTPCode(secret, time.Now().UTC())
+	loginCode, err := control.TOTPCode(secret, now)
 	if err != nil {
 		t.Fatalf("expected login totp code: %v", err)
 	}
@@ -362,7 +702,11 @@ func TestPlatformMFAEnrollmentLoginAndDisable(t *testing.T) {
 		t.Fatalf("expected login with mfa token: %d %s", login.Code, login.Body.String())
 	}
 
-	disable := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"`+loginCode+`"}`, token)
+	disableCode, err := control.TOTPCode(secret, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("expected disable totp code: %v", err)
+	}
+	disable := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"`+disableCode+`"}`, token)
 	if disable.Code != http.StatusOK || !strings.Contains(disable.Body.String(), `"enabled":false`) {
 		t.Fatalf("expected mfa disabled: %d %s", disable.Code, disable.Body.String())
 	}
@@ -372,6 +716,98 @@ func TestPlatformMFAEnrollmentLoginAndDisable(t *testing.T) {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected %s audit event: %s", action, auditResponse.Body.String())
 		}
+	}
+}
+
+func TestPlatformMFAFailuresAreThrottledAndAudited(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	token := extractString(t, bootstrap.Body.String(), "token")
+	enroll := performWithToken(server, http.MethodPost, "/v1/account/mfa/enroll", "", token)
+	if enroll.Code != http.StatusCreated {
+		t.Fatalf("expected mfa enrollment: %d %s", enroll.Code, enroll.Body.String())
+	}
+
+	for i := 0; i < maxMFAAccessAttempts; i++ {
+		response := performWithToken(server, http.MethodPost, "/v1/account/mfa/verify", `{"code":"000000"}`, token)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("expected bad mfa verify %d status 400, got %d: %s", i+1, response.Code, response.Body.String())
+		}
+	}
+	throttled := performWithToken(server, http.MethodPost, "/v1/account/mfa/verify", `{"code":"000000"}`, token)
+	if throttled.Code != http.StatusTooManyRequests || !strings.Contains(throttled.Body.String(), "too many mfa attempts") {
+		t.Fatalf("expected throttled mfa verify, got %d: %s", throttled.Code, throttled.Body.String())
+	}
+	if throttled.Header().Get("Retry-After") == "" {
+		t.Fatal("expected throttled mfa verify to include Retry-After")
+	}
+
+	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
+	if !strings.Contains(auditResponse.Body.String(), `"action":"user.mfa_verify_failed"`) {
+		t.Fatalf("expected failed mfa verify audit event: %s", auditResponse.Body.String())
+	}
+	if strings.Contains(auditResponse.Body.String(), "000000") {
+		t.Fatalf("mfa audit events must not include submitted codes: %s", auditResponse.Body.String())
+	}
+}
+
+func TestPlatformMFADisableFailuresAreThrottledAndResetAfterSuccess(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	token := extractString(t, bootstrap.Body.String(), "token")
+	enroll := performWithToken(server, http.MethodPost, "/v1/account/mfa/enroll", "", token)
+	secret := extractString(t, enroll.Body.String(), "secret")
+	now := time.Now().UTC()
+	code, err := control.TOTPCode(secret, now.Add(-30*time.Second))
+	if err != nil {
+		t.Fatalf("expected totp code: %v", err)
+	}
+	verify := performWithToken(server, http.MethodPost, "/v1/account/mfa/verify", `{"code":"`+code+`"}`, token)
+	if verify.Code != http.StatusOK {
+		t.Fatalf("expected mfa verify: %d %s", verify.Code, verify.Body.String())
+	}
+
+	for i := 0; i < maxMFAAccessAttempts-1; i++ {
+		response := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"111111"}`, token)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("expected bad mfa disable %d status 400, got %d: %s", i+1, response.Code, response.Body.String())
+		}
+	}
+	disableCode, err := control.TOTPCode(secret, now)
+	if err != nil {
+		t.Fatalf("expected disable totp code: %v", err)
+	}
+	disable := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"`+disableCode+`"}`, token)
+	if disable.Code != http.StatusOK || !strings.Contains(disable.Body.String(), `"enabled":false`) {
+		t.Fatalf("expected successful mfa disable before throttle, got %d: %s", disable.Code, disable.Body.String())
+	}
+
+	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
+	for _, action := range []string{"user.mfa_disable_failed", "user.mfa_disable"} {
+		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
+			t.Fatalf("expected %s audit event: %s", action, auditResponse.Body.String())
+		}
+	}
+	if strings.Contains(auditResponse.Body.String(), "111111") || strings.Contains(auditResponse.Body.String(), disableCode) {
+		t.Fatalf("mfa audit events must not include submitted codes: %s", auditResponse.Body.String())
 	}
 }
 
@@ -529,14 +965,22 @@ func TestSCIMBearerTokenProvisioningIsSeparateFromPlatformAdminAuth(t *testing.T
 		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
 	}
 	adminToken := extractString(t, bootstrap.Body.String(), "token")
-	update := performWithToken(server, http.MethodPut, "/v1/settings/sso", `{"enabled":false,"default_role":"developer","scim_enabled":true,"scim_token":"scim-secret-token"}`, adminToken)
+	scimToken := "scim-secret-token-value-123456"
+	update := performWithToken(server, http.MethodPut, "/v1/settings/sso", `{"enabled":false,"default_role":"developer","scim_enabled":true,"scim_token":"`+scimToken+`"}`, adminToken)
 	if update.Code != http.StatusOK {
 		t.Fatalf("expected SCIM config update 200, got %d: %s", update.Code, update.Body.String())
 	}
-	for _, forbidden := range []string{"scim-secret-token", "scim_token_hash"} {
+	for _, forbidden := range []string{scimToken, "scim_token_hash", "hmac-sha256"} {
 		if strings.Contains(update.Body.String(), forbidden) {
 			t.Fatalf("expected SCIM token material to be redacted from settings response: %s", update.Body.String())
 		}
+	}
+	config, err := store.GetPlatformSSOConfig(context.Background())
+	if err != nil {
+		t.Fatalf("get sso config: %v", err)
+	}
+	if !strings.HasPrefix(config.SCIMTokenHash, "hmac-sha256$") {
+		t.Fatalf("expected versioned SCIM token hash, got %q", config.SCIMTokenHash)
 	}
 	if !strings.Contains(update.Body.String(), `"scim_enabled":true`) || !strings.Contains(update.Body.String(), `"scim_token_configured":true`) {
 		t.Fatalf("expected SCIM settings status in response: %s", update.Body.String())
@@ -547,7 +991,7 @@ func TestSCIMBearerTokenProvisioningIsSeparateFromPlatformAdminAuth(t *testing.T
 		t.Fatalf("expected invalid SCIM bearer to be unauthorized, got %d: %s", invalid.Code, invalid.Body.String())
 	}
 
-	create := performWithToken(server, http.MethodPost, "/v1/scim/v2/Users", `{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"idp-user@example.com","active":true}`, "scim-secret-token")
+	create := performWithToken(server, http.MethodPost, "/v1/scim/v2/Users", `{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"idp-user@example.com","active":true}`, scimToken)
 	if create.Code != http.StatusCreated {
 		t.Fatalf("expected SCIM bearer user create 201, got %d: %s", create.Code, create.Body.String())
 	}
@@ -559,13 +1003,13 @@ func TestSCIMBearerTokenProvisioningIsSeparateFromPlatformAdminAuth(t *testing.T
 	if editWithoutToken.Code != http.StatusOK || !strings.Contains(editWithoutToken.Body.String(), `"scim_token_configured":true`) {
 		t.Fatalf("expected SCIM token hash to be preserved on SSO edit, got %d: %s", editWithoutToken.Code, editWithoutToken.Body.String())
 	}
-	list := performWithToken(server, http.MethodGet, "/v1/scim/v2/Users", "", "scim-secret-token")
+	list := performWithToken(server, http.MethodGet, "/v1/scim/v2/Users", "", scimToken)
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"userName":"idp-user@example.com"`) {
 		t.Fatalf("expected preserved SCIM token to keep working, got %d: %s", list.Code, list.Body.String())
 	}
 
 	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", adminToken)
-	if strings.Contains(auditResponse.Body.String(), "scim-secret-token") {
+	if strings.Contains(auditResponse.Body.String(), scimToken) {
 		t.Fatalf("expected audit events to redact SCIM token material: %s", auditResponse.Body.String())
 	}
 }
@@ -1286,6 +1730,7 @@ func TestCreateOrgProjectAndConnect(t *testing.T) {
 		t.Fatalf("expected storage route in response: %s", routesResponse.Body.String())
 	}
 
+	enableDatabaseExposure(t, server, "alpha-proj", "public", "")
 	routeManifestResponse := perform(server, http.MethodGet, "/v1/projects/alpha-proj/route-manifest", "")
 	if routeManifestResponse.Code != http.StatusOK {
 		t.Fatalf("expected route manifest status 200, got %d: %s", routeManifestResponse.Code, routeManifestResponse.Body.String())
@@ -1358,7 +1803,7 @@ func TestStudioForwardAuthUsesSupadupaSessionCookie(t *testing.T) {
 	}
 
 	authorizedRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
-	authorizedRequest.Header.Set("X-Forwarded-Host", "studio-studio-other.apps.example.test")
+	authorizedRequest.Header.Set("X-Forwarded-Host", "studio-studio-auth.apps.example.test")
 	authorizedRequest.AddCookie(cookies[0])
 	authorizedResponse := httptest.NewRecorder()
 	server.Handler.ServeHTTP(authorizedResponse, authorizedRequest)
@@ -1372,29 +1817,72 @@ func TestStudioForwardAuthUsesSupadupaSessionCookie(t *testing.T) {
 		t.Fatalf("expected forwarded project header, got %q", got)
 	}
 
+	mismatchRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
+	mismatchRequest.Header.Set("X-Forwarded-Host", "studio-studio-other.apps.example.test")
+	mismatchRequest.AddCookie(cookies[0])
+	mismatchResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(mismatchResponse, mismatchRequest)
+	if mismatchResponse.Code != http.StatusNotFound {
+		t.Fatalf("expected studio host/project mismatch to fail closed, got %d: %s", mismatchResponse.Code, mismatchResponse.Body.String())
+	}
+
 	sessionResponse := performWithToken(server, http.MethodGet, "/v1/projects/studio-auth/studio-session", "", token)
 	if sessionResponse.Code != http.StatusOK {
 		t.Fatalf("expected studio session status 200, got %d: %s", sessionResponse.Code, sessionResponse.Body.String())
 	}
-	studioToken := extractString(t, sessionResponse.Body.String(), "token")
+	studioCode := extractString(t, sessionResponse.Body.String(), "code")
 	studioRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
-	studioRequest.Header.Set("X-Forwarded-Host", "studio-studio-other.apps.example.test")
-	studioRequest.Header.Set("X-Forwarded-Uri", "/?supadupa_studio_token="+url.QueryEscape(studioToken))
+	studioRequest.Header.Set("X-Forwarded-Host", "studio-studio-auth.apps.example.test")
+	studioRequest.Header.Set("X-Forwarded-Uri", "/?supadupa_studio_code="+url.QueryEscape(studioCode))
 	studioResponse := httptest.NewRecorder()
 	server.Handler.ServeHTTP(studioResponse, studioRequest)
 	if studioResponse.Code != http.StatusNoContent {
-		t.Fatalf("expected scoped studio token to pass, got %d: %s", studioResponse.Code, studioResponse.Body.String())
+		t.Fatalf("expected scoped studio code to pass, got %d: %s", studioResponse.Code, studioResponse.Body.String())
 	}
 	if got := studioResponse.Header().Get("X-Supadupa-Project"); got != "studio-auth" {
 		t.Fatalf("expected scoped studio project header, got %q", got)
 	}
+	if len(studioResponse.Result().Cookies()) == 0 {
+		t.Fatalf("expected scoped studio code to set follow-up auth cookie")
+	}
 
+	// Studio echoes the one-time code back in its own redirect URL (/ ->
+	// /project/default?supadupa_studio_code=...). A follow-up request that
+	// already carries the session cookie must authenticate via the cookie and
+	// ignore the now-spent code, instead of failing to re-consume it.
+	echoRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
+	echoRequest.Header.Set("X-Forwarded-Host", "studio-studio-auth.apps.example.test")
+	echoRequest.Header.Set("X-Forwarded-Uri", "/project/default?supadupa_studio_code="+url.QueryEscape(studioCode))
+	for _, cookie := range studioResponse.Result().Cookies() {
+		echoRequest.AddCookie(cookie)
+	}
+	echoResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(echoResponse, echoRequest)
+	if echoResponse.Code != http.StatusNoContent {
+		t.Fatalf("expected echoed studio code with session cookie to pass via cookie, got %d: %s", echoResponse.Code, echoResponse.Body.String())
+	}
+
+	replayRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
+	replayRequest.Header.Set("X-Forwarded-Host", "studio-studio-auth.apps.example.test")
+	replayRequest.Header.Set("X-Forwarded-Uri", "/?supadupa_studio_code="+url.QueryEscape(studioCode))
+	replayResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(replayResponse, replayRequest)
+	if replayResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("expected one-time studio code replay to be rejected, got %d: %s", replayResponse.Code, replayResponse.Body.String())
+	}
+
+	wrongProjectSessionResponse := performWithToken(server, http.MethodGet, "/v1/projects/studio-auth/studio-session", "", token)
+	if wrongProjectSessionResponse.Code != http.StatusOK {
+		t.Fatalf("expected second studio session status 200, got %d: %s", wrongProjectSessionResponse.Code, wrongProjectSessionResponse.Body.String())
+	}
+	wrongProjectCode := extractString(t, wrongProjectSessionResponse.Body.String(), "code")
 	wrongProjectRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-other", nil)
-	wrongProjectRequest.Header.Set("X-Forwarded-Uri", "/?supadupa_studio_token="+url.QueryEscape(studioToken))
+	wrongProjectRequest.Header.Set("X-Forwarded-Host", "studio-studio-other.apps.example.test")
+	wrongProjectRequest.Header.Set("X-Forwarded-Uri", "/?supadupa_studio_code="+url.QueryEscape(wrongProjectCode))
 	wrongProjectResponse := httptest.NewRecorder()
 	server.Handler.ServeHTTP(wrongProjectResponse, wrongProjectRequest)
 	if wrongProjectResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("expected scoped studio token to be rejected for another project, got %d: %s", wrongProjectResponse.Code, wrongProjectResponse.Body.String())
+		t.Fatalf("expected scoped studio code to be rejected for another project, got %d: %s", wrongProjectResponse.Code, wrongProjectResponse.Body.String())
 	}
 }
 
@@ -1615,7 +2103,7 @@ func TestProjectBranchCreatePassesGeneratedSecretsToProvisioner(t *testing.T) {
 func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
-	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10}}`)
+	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}`)
 	if hostResponse.Code != http.StatusCreated {
 		t.Fatalf("expected host create 201, got %d: %s", hostResponse.Code, hostResponse.Body.String())
 	}
@@ -1671,6 +2159,7 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 			t.Fatalf("expected %s in replica create response: %s", expected, createResponse.Body.String())
 		}
 	}
+	enableDatabaseExposure(t, server, "replica-proj", "public", "")
 	manifestResponse := perform(server, http.MethodGet, "/v1/projects/replica-proj/route-manifest", "")
 	for _, expected := range []string{
 		`"name":"db-replica-east"`,
@@ -1711,7 +2200,7 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 		t.Fatalf("expected automatic failover to west replica: %d %s", failoverResponse.Code, failoverResponse.Body.String())
 	}
 	usageResponse := perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/usage", "")
-	for _, expected := range []string{`"read_replicas":2`, `"cpu":3`, `"ram_mb":6144`, `"disk_gb":60`, `"disk_iops":9000`, `"projects":1`} {
+	for _, expected := range []string{`"read_replicas":2`, `"cpu":3`, `"ram_mb":6144`, `"disk_gb":60`, `"projects":1`} {
 		if !strings.Contains(usageResponse.Body.String(), expected) {
 			t.Fatalf("expected usage value %s: %s", expected, usageResponse.Body.String())
 		}
@@ -1774,7 +2263,7 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 func TestProjectScaleUpdatesTierCapacityAndAudit(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
-	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10}}`)
+	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}`)
 	if hostResponse.Code != http.StatusCreated {
 		t.Fatalf("expected host create 201, got %d: %s", hostResponse.Code, hostResponse.Body.String())
 	}
@@ -1801,13 +2290,13 @@ func TestProjectScaleUpdatesTierCapacityAndAudit(t *testing.T) {
 	}
 
 	usageResponse := perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/usage", "")
-	for _, expected := range []string{`"cpu":4`, `"ram_mb":8192`, `"disk_gb":100`, `"disk_iops":12000`, `"projects":1`} {
+	for _, expected := range []string{`"cpu":4`, `"ram_mb":8192`, `"disk_gb":100`, `"projects":1`} {
 		if !strings.Contains(usageResponse.Body.String(), expected) {
 			t.Fatalf("expected scaled usage %s: %s", expected, usageResponse.Body.String())
 		}
 	}
 	hostsResponse := perform(server, http.MethodGet, "/v1/hosts", "")
-	for _, expected := range []string{`"used":{"cpu":4`, `"ram_mb":8192`, `"disk_gb":100`, `"disk_iops":12000`, `"projects":1`} {
+	for _, expected := range []string{`"used":{"cpu":4`, `"ram_mb":8192`, `"disk_gb":100`, `"projects":1`} {
 		if !strings.Contains(hostsResponse.Body.String(), expected) {
 			t.Fatalf("expected scaled host usage %s: %s", expected, hostsResponse.Body.String())
 		}
@@ -2359,6 +2848,7 @@ func TestProjectServicesUpdateSyncsRuntimeProvisioner(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	enableDatabaseExposure(t, server, "runtime-services-proj", "public", "")
 	updateResponse := perform(server, http.MethodPut, "/v1/projects/runtime-services-proj/services", `{"services":{"storage":false,"functions":false}}`)
 	if updateResponse.Code != http.StatusOK {
 		t.Fatalf("expected services update 200, got %d: %s", updateResponse.Code, updateResponse.Body.String())
@@ -2439,12 +2929,12 @@ func TestNetworkConfigReconcilesRoutePolicy(t *testing.T) {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
-	invalidResponse := perform(server, http.MethodPut, "/v1/projects/network-proj/config/network", `{"config":{"ip_allowlist":"bad-cidr"}}`)
+	invalidResponse := perform(server, http.MethodPut, "/v1/projects/network-proj/config/network", `{"config":{"http_allowlist":"bad-cidr"}}`)
 	if invalidResponse.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid network config 400, got %d: %s", invalidResponse.Code, invalidResponse.Body.String())
 	}
 
-	updateResponse := perform(server, http.MethodPut, "/v1/projects/network-proj/config/network", `{"config":{"ip_allowlist":"10.0.0.0/8, 203.0.113.10","ssl_enforced":"true"}}`)
+	updateResponse := perform(server, http.MethodPut, "/v1/projects/network-proj/config/network", `{"config":{"http_allowlist":"10.0.0.0/8, 203.0.113.10","ssl_enforced":"true"}}`)
 	if updateResponse.Code != http.StatusOK {
 		t.Fatalf("expected network config update 200, got %d: %s", updateResponse.Code, updateResponse.Body.String())
 	}
@@ -2460,6 +2950,63 @@ func TestNetworkConfigReconcilesRoutePolicy(t *testing.T) {
 	logsResponse := perform(server, http.MethodGet, "/v1/projects/network-proj/logs", "")
 	if !strings.Contains(logsResponse.Body.String(), "Project config updated") {
 		t.Fatalf("expected network config project log: %s", logsResponse.Body.String())
+	}
+}
+
+func TestPlatformDatabaseIngressAllowlistReconcilesProjectTCPRoutes(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("SUPADUPA_ROUTES_ROOT", root)
+	t.Setenv("SUPADUPA_POSTGRES_ADDR", "0.0.0.0:5432")
+	t.Setenv("SUPADUPA_POOLER_ADDR", "0.0.0.0:6543")
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"db-ingress-proj","name":"DB Ingress","domain":"apps.supadupa.test","profile":"full","resource_tier":"small"}`)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	// Master on + this project set to allowlisted with its own CIDRs.
+	enableDatabaseExposure(t, server, "db-ingress-proj", "allowlisted", "203.0.113.10/32\n198.51.100.0/24")
+
+	routeFile, err := os.ReadFile(filepath.Join(root, "db-ingress-proj.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeBody := string(routeFile)
+	for _, expected := range []string{
+		"db-ingress-proj-db-tcp-ipallowlist",
+		"db-ingress-proj-pooler-transaction-tcp-ipallowlist",
+		"db-ingress-proj-pooler-session-tcp-ipallowlist",
+		"- \"203.0.113.10/32\"",
+		"- \"198.51.100.0/24\"",
+	} {
+		if !strings.Contains(routeBody, expected) {
+			t.Fatalf("expected %q in reconciled route file:\n%s", expected, routeBody)
+		}
+	}
+
+	manifestResponse := perform(server, http.MethodGet, "/v1/projects/db-ingress-proj/route-manifest", "")
+	if manifestResponse.Code != http.StatusOK || !strings.Contains(manifestResponse.Body.String(), `"ip_allowlist":["203.0.113.10/32","198.51.100.0/24"]`) {
+		t.Fatalf("expected route manifest to include the project allowlist, got %d: %s", manifestResponse.Code, manifestResponse.Body.String())
+	}
+	if !strings.Contains(manifestResponse.Body.String(), `"database_external_access_enabled":true`) || !strings.Contains(manifestResponse.Body.String(), `"database_ingress_published":true`) {
+		t.Fatalf("expected manifest to report master+publish enabled: %s", manifestResponse.Body.String())
+	}
+
+	// Master kill switch off forces every project private regardless of mode.
+	off := perform(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.supadupa.test","stack_version":"latest","profile":"full","resource_tier":"small","backup_schedule":"daily","feature_flags":{"database_external_access":false}}`)
+	if off.Code != http.StatusOK {
+		t.Fatalf("expected master-off update 200, got %d: %s", off.Code, off.Body.String())
+	}
+	gatedFile, err := os.ReadFile(filepath.Join(root, "db-ingress-proj.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gatedFile), "db-ingress-proj-db:") || strings.Contains(string(gatedFile), "HostSNI(`db-db-ingress-proj") {
+		t.Fatalf("expected no database TCP routers when master is off:\n%s", string(gatedFile))
 	}
 }
 
@@ -2712,6 +3259,23 @@ func TestProjectLogDrainsCreateListDeleteAndAudit(t *testing.T) {
 		t.Fatalf("expected masked log drain token in list: %s", listResponse.Body.String())
 	}
 
+	updateResponse := perform(server, http.MethodPut, "/v1/projects/drain-proj/log-drains/"+drainID, `{"target":"loki","config":{"url":"https://loki.example.com/api/v1/push"}}`)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("expected log drain update 200, got %d: %s", updateResponse.Code, updateResponse.Body.String())
+	}
+	if !strings.Contains(updateResponse.Body.String(), `"id":"`+drainID+`"`) || !strings.Contains(updateResponse.Body.String(), `"target":"loki"`) {
+		t.Fatalf("expected in-place log drain update, got: %s", updateResponse.Body.String())
+	}
+	artifact, err = os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("expected updated log drain artifact: %v", err)
+	}
+	for _, expected := range []string{`type = "loki"`, `endpoint = "https://loki.example.com/api/v1/push"`} {
+		if !strings.Contains(string(artifact), expected) {
+			t.Fatalf("expected updated artifact to contain %q, got:\n%s", expected, artifact)
+		}
+	}
+
 	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/drain-proj/log-drains/"+drainID, "")
 	if deleteResponse.Code != http.StatusNoContent {
 		t.Fatalf("expected log drain delete 204, got %d: %s", deleteResponse.Code, deleteResponse.Body.String())
@@ -2728,13 +3292,13 @@ func TestProjectLogDrainsCreateListDeleteAndAudit(t *testing.T) {
 	}
 
 	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
-	for _, action := range []string{"project.log_drain_create", "project.log_drain_delete"} {
+	for _, action := range []string{"project.log_drain_create", "project.log_drain_update", "project.log_drain_delete"} {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected %s audit event: %s", action, auditResponse.Body.String())
 		}
 	}
 	logsResponse := perform(server, http.MethodGet, "/v1/projects/drain-proj/logs", "")
-	if !strings.Contains(logsResponse.Body.String(), "Log drain created") || !strings.Contains(logsResponse.Body.String(), "Log drain deleted") {
+	if !strings.Contains(logsResponse.Body.String(), "Log drain created") || !strings.Contains(logsResponse.Body.String(), "Log drain updated") || !strings.Contains(logsResponse.Body.String(), "Log drain deleted") {
 		t.Fatalf("expected log drain project logs: %s", logsResponse.Body.String())
 	}
 }
@@ -2857,7 +3421,7 @@ func TestCreateHostAndPlaceProject(t *testing.T) {
 func TestProjectPlacementRejectsInsufficientHostCapacity(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
-	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"tiny","address":"localhost","capacity":{"cpu":1,"ram_mb":2048,"disk_gb":20,"disk_iops":3000,"projects":1}}`)
+	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"tiny","address":"localhost","capacity":{"cpu":1,"ram_mb":2048,"disk_gb":20,"projects":1}}`)
 	if hostResponse.Code != http.StatusCreated {
 		t.Fatalf("expected host status 201, got %d: %s", hostResponse.Code, hostResponse.Body.String())
 	}
@@ -2877,15 +3441,18 @@ func TestProjectPlacementRejectsInsufficientHostCapacity(t *testing.T) {
 		t.Fatalf("expected second project capacity conflict, got %d: %s", secondResponse.Code, secondResponse.Body.String())
 	}
 
-	iopsHostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"iops-tight","address":"127.0.0.2","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":2999,"projects":10}}`)
-	if iopsHostResponse.Code != http.StatusCreated {
-		t.Fatalf("expected iops host status 201, got %d: %s", iopsHostResponse.Code, iopsHostResponse.Body.String())
+	// A host with ample CPU/RAM/slots but too little disk must still reject a
+	// small-tier project (which reserves 20 GiB), proving placement enforces a
+	// per-dimension capacity check beyond the project-slot count.
+	diskHostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"disk-tight","address":"127.0.0.2","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":10,"projects":10}}`)
+	if diskHostResponse.Code != http.StatusCreated {
+		t.Fatalf("expected disk host status 201, got %d: %s", diskHostResponse.Code, diskHostResponse.Body.String())
 	}
-	iopsHostID := extractString(t, iopsHostResponse.Body.String(), "id")
-	iopsProject := `{"ref":"iops-one","name":"IOPS One","host_id":"` + iopsHostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
-	iopsResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", iopsProject)
-	if iopsResponse.Code != http.StatusConflict {
-		t.Fatalf("expected iops capacity conflict, got %d: %s", iopsResponse.Code, iopsResponse.Body.String())
+	diskHostID := extractString(t, diskHostResponse.Body.String(), "id")
+	diskProject := `{"ref":"disk-one","name":"Disk One","host_id":"` + diskHostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
+	diskResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", diskProject)
+	if diskResponse.Code != http.StatusConflict {
+		t.Fatalf("expected disk capacity conflict, got %d: %s", diskResponse.Code, diskResponse.Body.String())
 	}
 }
 
@@ -2900,7 +3467,7 @@ func TestOrgQuotasTrackUsageAndRejectProjectOverLimit(t *testing.T) {
 		t.Fatalf("expected default unlimited quota: %d %s", defaultQuotaResponse.Code, defaultQuotaResponse.Body.String())
 	}
 
-	updateQuotaResponse := perform(server, http.MethodPut, "/v1/orgs/"+orgID+"/quotas", `{"max_projects":1,"max_cpu":1,"max_ram_mb":2048,"max_disk_gb":20,"max_disk_iops":3000}`)
+	updateQuotaResponse := perform(server, http.MethodPut, "/v1/orgs/"+orgID+"/quotas", `{"max_projects":1,"max_cpu":1,"max_ram_mb":2048,"max_disk_gb":20}`)
 	if updateQuotaResponse.Code != http.StatusOK {
 		t.Fatalf("expected quota update 200, got %d: %s", updateQuotaResponse.Code, updateQuotaResponse.Body.String())
 	}
@@ -2912,7 +3479,7 @@ func TestOrgQuotasTrackUsageAndRejectProjectOverLimit(t *testing.T) {
 	}
 
 	quotaResponse := perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/quotas", "")
-	for _, expected := range []string{`"max_projects":1`, `"max_disk_iops":3000`, `"cpu":1`, `"ram_mb":2048`, `"disk_gb":20`, `"disk_iops":3000`, `"projects":1`} {
+	for _, expected := range []string{`"max_projects":1`, `"cpu":1`, `"ram_mb":2048`, `"disk_gb":20`, `"projects":1`} {
 		if !strings.Contains(quotaResponse.Body.String(), expected) {
 			t.Fatalf("expected quota usage %s: %s", expected, quotaResponse.Body.String())
 		}
@@ -2977,7 +3544,6 @@ func TestOrgUsageMeteringTracksControlPlaneResources(t *testing.T) {
 		`"cpu":3`,
 		`"ram_mb":6144`,
 		`"disk_gb":70`,
-		`"disk_iops":9000`,
 		`"projects":2`,
 		`"healthy":2`,
 		`"backup_count":1`,
@@ -3073,13 +3639,32 @@ func TestBillingInvoicesGenerateFromUsageSnapshots(t *testing.T) {
 }
 
 func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
+	t.Setenv("SUPADUPA_POSTGRES_ADDR", "127.0.0.1:5432")
+	t.Setenv("SUPADUPA_POOLER_ADDR", "127.0.0.1:6543")
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
-	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10}}`)
+	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}`)
 	if hostResponse.Code != http.StatusCreated {
 		t.Fatalf("expected host status 201, got %d: %s", hostResponse.Code, hostResponse.Body.String())
 	}
 	hostID := extractString(t, hostResponse.Body.String(), "id")
+	if _, err := store.RecordNodeTelemetry(context.Background(), hostID, control.NodeTelemetrySampleInput{
+		Source:             "compose-local-node",
+		CPUPercent:         12.5,
+		CPUUsedCores:       1,
+		CPUCapacityCores:   8,
+		MemoryUsedBytes:    4294967296,
+		MemoryTotalBytes:   34359738368,
+		DiskUsedBytes:      85899345920,
+		DiskTotalBytes:     536870912000,
+		DiskAvailableBytes: 450971566080,
+		NetworkSampled:     true,
+		NetworkRxBytes:     1234,
+		NetworkTxBytes:     5678,
+		SampledAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("record node telemetry: %v", err)
+	}
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"metrics-proj","name":"Metrics","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
@@ -3109,7 +3694,6 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		`"function_deployments":1`,
 		`"backups":1`,
 		`"backup_storage_bytes":2048`,
-		`"disk_iops":3000`,
 		`"observed":{"project_ref":"metrics-proj","source":"compose","cpu_percent":18.5`,
 		`"memory_bytes":536870912`,
 	} {
@@ -3127,8 +3711,11 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		`"hosts":1`,
 		`"projects":1`,
 		`"healthy":1`,
-		`"host_capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10}`,
-		`"host_used":{"cpu":1,"ram_mb":2048,"disk_gb":20,"disk_iops":3000,"projects":1}`,
+		`"host_capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}`,
+		`"host_used":{"cpu":1,"ram_mb":2048,"disk_gb":20,"projects":1}`,
+		`"database_ingress":{"mode":"private","public":false,"postgres_addr":"127.0.0.1:5432","pooler_addr":"127.0.0.1:6543","postgres_public":false,"pooler_public":false`,
+		`"node_observed":[{"host_id":"` + hostID + `","source":"compose-local-node","cpu_percent":12.5`,
+		`"network_sampled":true,"network_rx_bytes":1234,"network_tx_bytes":5678`,
 		`"observed":{"projects_sampled":1,"cpu_percent":18.5,"memory_bytes":536870912`,
 		`"function_deployments":1`,
 		`"backups":1`,
@@ -3149,8 +3736,12 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		"supadupa_projects_by_status{status=\"healthy\"} 1",
 		"supadupa_host_capacity_cpu 8",
 		"supadupa_host_used_cpu 1",
-		"supadupa_host_capacity_disk_iops 24000",
-		"supadupa_host_used_disk_iops 3000",
+		"supadupa_node_cpu_percent{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 12.5",
+		"supadupa_node_memory_used_bytes{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 4294967296",
+		"supadupa_node_disk_used_bytes{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 85899345920",
+		"supadupa_node_network_sampled{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 1",
+		"supadupa_node_network_rx_bytes{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 1234",
+		"supadupa_node_network_tx_bytes{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 5678",
 		"supadupa_observed_projects 1",
 		"supadupa_observed_cpu_percent 18.5",
 		"supadupa_observed_memory_bytes 536870912",
@@ -3158,7 +3749,6 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		"supadupa_backup_storage_bytes 2048",
 		"supadupa_audit_verified 1",
 		"supadupa_project_resource_cpu{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 1",
-		"supadupa_project_resource_disk_iops{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 3000",
 		"supadupa_project_logs_total{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"}",
 		"supadupa_project_backups_total{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 1",
 		"supadupa_project_backup_storage_bytes{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 2048",
@@ -3172,6 +3762,44 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 	}
 	if strings.Count(promResponse.Body.String(), "# HELP supadupa_project_resource_cpu ") != 1 {
 		t.Fatalf("expected one HELP line for project CPU metric: %s", promResponse.Body.String())
+	}
+}
+
+func TestDatabaseIngressStatusFromEnv(t *testing.T) {
+	private := databaseIngressStatusFromEnv(func(key string) string {
+		return map[string]string{
+			"SUPADUPA_POSTGRES_ADDR": "127.0.0.1:5432",
+			"SUPADUPA_POOLER_ADDR":   "localhost:6543",
+		}[key]
+	})
+	if private.Mode != "private" || private.Public || private.PostgresPublic || private.PoolerPublic || len(private.Warnings) != 0 {
+		t.Fatalf("expected private database ingress, got %#v", private)
+	}
+
+	public := databaseIngressStatusFromEnv(func(key string) string {
+		return map[string]string{
+			"SUPADUPA_POSTGRES_ADDR":            "0.0.0.0:5432",
+			"SUPADUPA_POOLER_ADDR":              "[::]:6543",
+			"SUPADUPA_DB_INGRESS_ALLOWED_CIDRS": "203.0.113.0/24, 2001:db8::/32",
+		}[key]
+	})
+	if public.Mode != "public" || !public.Public || !public.PostgresPublic || !public.PoolerPublic || !public.AllowlistConfigured || len(public.AllowedCIDRs) != 2 {
+		t.Fatalf("expected public allowlisted database ingress, got %#v", public)
+	}
+	for _, warning := range public.Warnings {
+		if strings.Contains(warning, "no database ingress CIDR allowlist") {
+			t.Fatalf("allowlisted public ingress should not warn about missing allowlist: %#v", public)
+		}
+	}
+
+	unrestricted := databaseIngressStatusFromEnv(func(key string) string {
+		return map[string]string{
+			"SUPADUPA_POSTGRES_ADDR": "198.51.100.10:5432",
+			"SUPADUPA_POOLER_ADDR":   "127.0.0.1:6543",
+		}[key]
+	})
+	if unrestricted.Mode != "public" || !unrestricted.PostgresPublic || unrestricted.PoolerPublic || len(unrestricted.Warnings) != 1 {
+		t.Fatalf("expected public ingress with a single informational warning, got %#v", unrestricted)
 	}
 }
 
@@ -3194,6 +3822,12 @@ func TestFleetAdvisorFindingsEndpoint(t *testing.T) {
 	}
 	if _, err := store.UpdateProjectStatus(context.Background(), "advisor-proj", control.ProjectDegraded, "db health check failed"); err != nil {
 		t.Fatalf("update project status: %v", err)
+	}
+	// Mark the project production so posture findings keep their full severity;
+	// development projects intentionally downgrade those to info.
+	generalConfigResponse := perform(server, http.MethodPut, "/v1/projects/advisor-proj/config/general", `{"config":{"environment":"production"}}`)
+	if generalConfigResponse.Code != http.StatusOK {
+		t.Fatalf("expected general config update 200, got %d: %s", generalConfigResponse.Code, generalConfigResponse.Body.String())
 	}
 	databaseConfigResponse := perform(server, http.MethodPut, "/v1/projects/advisor-proj/config/database", `{"config":{"ssl_enforced":"false"}}`)
 	if databaseConfigResponse.Code != http.StatusOK {
@@ -3222,10 +3856,8 @@ func TestFleetAdvisorFindingsEndpoint(t *testing.T) {
 		`"title":"Project is not healthy"`,
 		`"title":"Backups are disabled"`,
 		`"title":"PITR is disabled"`,
-		`"title":"Ingress is open to all IPs"`,
+		`"title":"Database ports are open to all IPs"`,
 		`"title":"Database SSL is not enforced"`,
-		`"title":"Fleet advisor mode is not enabled"`,
-		`"title":"No log drains configured"`,
 		`"title":"Public storage bucket"`,
 		`"recommendation":"Inspect project logs and reconcile the project until it returns to healthy."`,
 	} {
@@ -3253,7 +3885,7 @@ func TestComplianceReportEndpoint(t *testing.T) {
 	if projectResponse.Code != http.StatusCreated {
 		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
-	networkResponse := perform(server, http.MethodPut, "/v1/projects/compliance-proj/config/network", `{"config":{"ip_allowlist":"10.0.0.0/8","ssl_enforced":"true"}}`)
+	networkResponse := perform(server, http.MethodPut, "/v1/projects/compliance-proj/config/network", `{"config":{"db_allowlist":"10.0.0.0/8","ssl_enforced":"true"}}`)
 	if networkResponse.Code != http.StatusOK {
 		t.Fatalf("expected network config 200, got %d: %s", networkResponse.Code, networkResponse.Body.String())
 	}
@@ -3305,7 +3937,7 @@ func TestProjectReplicasSyncRuntimeWhenProvisionerSupportsReplicaSyncer(t *testi
 	store := control.NewMemoryStore()
 	provisioner := &capturingProvisioner{}
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
-	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10}}`)
+	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}`)
 	if hostResponse.Code != http.StatusCreated {
 		t.Fatalf("expected host create 201, got %d: %s", hostResponse.Code, hostResponse.Body.String())
 	}
@@ -5303,7 +5935,7 @@ func TestProjectNetworkConnectionsCreateListDeleteMetricsAndAudit(t *testing.T) 
 	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), `"name":"aws-prod"`) || !strings.Contains(listResponse.Body.String(), `"token":"********"`) {
 		t.Fatalf("expected network connection in list: %d %s", listResponse.Code, listResponse.Body.String())
 	}
-	networkConfigResponse := perform(server, http.MethodPut, "/v1/projects/net-proj/config/network", `{"config":{"ip_allowlist":"10.0.0.0/8,203.0.113.10/32","ssl_enforced":"true"}}`)
+	networkConfigResponse := perform(server, http.MethodPut, "/v1/projects/net-proj/config/network", `{"config":{"db_allowlist":"10.0.0.0/8,203.0.113.10/32","ssl_enforced":"true"}}`)
 	if networkConfigResponse.Code != http.StatusOK {
 		t.Fatalf("expected network config update 200, got %d: %s", networkConfigResponse.Code, networkConfigResponse.Body.String())
 	}
@@ -5314,7 +5946,7 @@ func TestProjectNetworkConnectionsCreateListDeleteMetricsAndAudit(t *testing.T) 
 	for _, expected := range []string{
 		`"project_ref":"net-proj"`,
 		`"area":"network"`,
-		`"ip_allowlist":"10.0.0.0/8,203.0.113.10/32"`,
+		`"db_allowlist":"10.0.0.0/8,203.0.113.10/32"`,
 		`"ssl_enforced":"true"`,
 		`"connections":[`,
 		`"name":"aws-prod"`,
@@ -5894,6 +6526,108 @@ func TestProjectSecretsMaskedAndRevealAudited(t *testing.T) {
 	}
 	if !strings.Contains(logsResponse.Body.String(), "Secret rotated") {
 		t.Fatalf("expected secret rotate project log: %s", logsResponse.Body.String())
+	}
+}
+
+func TestProjectSecretRevealIsThrottled(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectBody := `{"ref":"secret-throttle","name":"Secret Throttle","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
+	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	for i := 0; i < maxSecretAccessAttempts; i++ {
+		response := perform(server, http.MethodGet, "/v1/projects/secret-throttle/secrets/service_role/reveal", "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected reveal %d status 200, got %d: %s", i+1, response.Code, response.Body.String())
+		}
+	}
+	throttled := perform(server, http.MethodGet, "/v1/projects/secret-throttle/secrets/service_role/reveal", "")
+	if throttled.Code != http.StatusTooManyRequests || !strings.Contains(throttled.Body.String(), "too many secret access attempts") {
+		t.Fatalf("expected throttled secret reveal, got %d: %s", throttled.Code, throttled.Body.String())
+	}
+	if throttled.Header().Get("Retry-After") == "" {
+		t.Fatal("expected throttled secret reveal to include Retry-After")
+	}
+}
+
+func TestProjectSecretRevealThrottleFollowsAccountAcrossIPs(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"owner@example.com","password":"super-secure"}`)
+	ownerToken := extractString(t, bootstrap.Body.String(), "token")
+	orgResponse := performWithToken(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`, ownerToken)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectBody := `{"ref":"secret-account-throttle","name":"Secret Account Throttle","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
+	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody, ownerToken)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	for i := 0; i < maxSecretAccessAttempts; i++ {
+		remoteAddr := fmt.Sprintf("203.0.113.%d:12345", i+1)
+		response := performWithTokenAndRemoteAddr(server, http.MethodGet, "/v1/projects/secret-account-throttle/secrets/service_role/reveal", "", ownerToken, remoteAddr)
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected reveal %d status 200, got %d: %s", i+1, response.Code, response.Body.String())
+		}
+	}
+	throttled := performWithTokenAndRemoteAddr(server, http.MethodGet, "/v1/projects/secret-account-throttle/secrets/service_role/reveal", "", ownerToken, "203.0.113.250:12345")
+	if throttled.Code != http.StatusTooManyRequests || !strings.Contains(throttled.Body.String(), "too many secret access attempts") {
+		t.Fatalf("expected same account to stay throttled after changing IP, got %d: %s", throttled.Code, throttled.Body.String())
+	}
+	if throttled.Header().Get("Retry-After") == "" {
+		t.Fatal("expected throttled secret reveal to include Retry-After")
+	}
+}
+
+func TestProjectSecretCopyThrottleFollowsIPAcrossAccounts(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"owner@example.com","password":"super-secure"}`)
+	ownerToken := extractString(t, bootstrap.Body.String(), "token")
+	orgResponse := performWithToken(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`, ownerToken)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectBody := `{"ref":"secret-ip-throttle","name":"Secret IP Throttle","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
+	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody, ownerToken)
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	createUserResponse := performWithToken(server, http.MethodPost, "/v1/users", `{"email":"admin@example.com","password":"super-secure","role":"admin"}`, ownerToken)
+	if createUserResponse.Code != http.StatusCreated {
+		t.Fatalf("expected admin user status 201, got %d: %s", createUserResponse.Code, createUserResponse.Body.String())
+	}
+	memberResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/members", `{"email":"admin@example.com","role":"admin"}`, ownerToken)
+	if memberResponse.Code != http.StatusOK {
+		t.Fatalf("expected admin membership status 200, got %d: %s", memberResponse.Code, memberResponse.Body.String())
+	}
+	adminLogin := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
+	adminToken := extractString(t, adminLogin.Body.String(), "token")
+
+	tokens := []string{ownerToken, adminToken}
+	for i := 0; i < maxSecretAccessAttempts; i++ {
+		response := performWithTokenAndRemoteAddr(server, http.MethodPost, "/v1/projects/secret-ip-throttle/secrets/service_role/copy", "", tokens[i%len(tokens)], "198.51.100.80:12345")
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("expected copy %d status 204, got %d: %s", i+1, response.Code, response.Body.String())
+		}
+	}
+	throttled := performWithTokenAndRemoteAddr(server, http.MethodPost, "/v1/projects/secret-ip-throttle/secrets/service_role/copy", "", ownerToken, "198.51.100.80:54321")
+	if throttled.Code != http.StatusTooManyRequests || !strings.Contains(throttled.Body.String(), "too many secret access attempts") {
+		t.Fatalf("expected same IP to stay throttled across accounts, got %d: %s", throttled.Code, throttled.Body.String())
+	}
+	if throttled.Header().Get("Retry-After") == "" {
+		t.Fatal("expected throttled secret copy to include Retry-After")
 	}
 }
 
@@ -6730,6 +7464,22 @@ func perform(server *http.Server, method string, path string, body string) *http
 	return response
 }
 
+// enableDatabaseExposure flips the platform master switch on and sets a single
+// project's per-project exposure mode/allowlist, mirroring how an operator would
+// open a database from the UI (master on + per-project opt-in).
+func enableDatabaseExposure(t *testing.T, server *http.Server, ref string, mode string, allowlist string) {
+	t.Helper()
+	master := perform(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.supadupa.test","stack_version":"latest","profile":"full","resource_tier":"small","backup_schedule":"daily","feature_flags":{"database_external_access":true}}`)
+	if master.Code != http.StatusOK {
+		t.Fatalf("enable database external access: %d %s", master.Code, master.Body.String())
+	}
+	cfg := fmt.Sprintf(`{"config":{"db_ingress_mode":%q,"db_allowlist":%q}}`, mode, allowlist)
+	resp := perform(server, http.MethodPut, "/v1/projects/"+ref+"/config/network", cfg)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("set db exposure for %s: %d %s", ref, resp.Code, resp.Body.String())
+	}
+}
+
 func seedProjectSecrets(t *testing.T, store control.Store, ref string, kinds ...string) {
 	t.Helper()
 	for _, kind := range kinds {
@@ -6756,6 +7506,18 @@ func performWithToken(server *http.Server, method string, path string, body stri
 		request.Header.Set("Content-Type", "application/json")
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+	return response
+}
+
+func performWithTokenAndRemoteAddr(server *http.Server, method string, path string, body string, token string, remoteAddr string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.RemoteAddr = remoteAddr
 	response := httptest.NewRecorder()
 	server.Handler.ServeHTTP(response, request)
 	return response

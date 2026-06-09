@@ -1,16 +1,25 @@
 package control
 
 type ProjectSpec struct {
-	Ref          string                 `json:"ref"`
-	OrgID        string                 `json:"org_id"`
-	Name         string                 `json:"name"`
-	HostID       string                 `json:"host_id"`
-	Domain       string                 `json:"domain"`
-	StackVersion string                 `json:"stack_version"`
-	Profile      StackProfile           `json:"profile"`
-	ResourceTier ResourceTier           `json:"resource_tier"`
-	Services     map[string]ServiceSpec `json:"services"`
-	Environment  map[string]string      `json:"environment"`
+	Ref          string       `json:"ref"`
+	OrgID        string       `json:"org_id"`
+	Name         string       `json:"name"`
+	HostID       string       `json:"host_id"`
+	Domain       string       `json:"domain"`
+	StackVersion string       `json:"stack_version"`
+	Profile      StackProfile `json:"profile"`
+	ResourceTier ResourceTier `json:"resource_tier"`
+	// Exact resource sizing. When any of these is > 0 it overrides the
+	// tier-derived default for that dimension, so a preset (tier) sets sensible
+	// numbers and advanced users can dial in exact CPU cores / RAM (MB) / disk
+	// (GB). EnforceLimits, when true, applies real container CPU/memory limits to
+	// the project's database service; otherwise sizing is placement/quota only.
+	CPU           int                    `json:"cpu,omitempty"`
+	RAMMB         int                    `json:"ram_mb,omitempty"`
+	DiskGB        int                    `json:"disk_gb,omitempty"`
+	EnforceLimits bool                   `json:"enforce_limits,omitempty"`
+	Services      map[string]ServiceSpec `json:"services"`
+	Environment   map[string]string      `json:"environment"`
 }
 
 type ProjectStatus struct {
@@ -35,6 +44,7 @@ type ProjectPhase string
 
 const (
 	ProjectProvisioning ProjectPhase = "provisioning"
+	ProjectStarting     ProjectPhase = "starting"
 	ProjectHealthy      ProjectPhase = "healthy"
 	ProjectDegraded     ProjectPhase = "degraded"
 	ProjectPaused       ProjectPhase = "paused"

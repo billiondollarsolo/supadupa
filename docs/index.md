@@ -12,13 +12,15 @@ Start here:
 - [Upgrades](upgrades.md): stable stack releases, project upgrades, upgrade backup guards, and control-plane updates.
 - [Operations](operations.md): day-to-day commands, runtime layout, metrics, logs, Advisor, Compliance, and local development.
 - [Security](security.md): secrets, access model, network exposure, Studio access, and production hardening.
+- [Kubernetes](kubernetes.md): Helm chart, CRDs, operator scaffold, and current Kubernetes limits.
+- [Operator Note Policy](release-note-policy.md): when security-sensitive or deployment-sensitive changes need explicit release/operator notes.
 - [Troubleshooting](troubleshooting.md): common API, CORS, TLS, project runtime, backup, and CLI issues.
 
 The older long-form README is preserved at [README-legacy.md](README-legacy.md).
 
 ## MVP Scope
 
-Supadupa is currently MVP-ready for evaluation, internal dev, and production-like validation on a Linux VPS. The supported runtime path is Docker Compose. Kubernetes rendering exists, but Kubernetes is not the primary MVP install path.
+Supadupa is currently MVP-ready for evaluation, internal dev, and production-like validation on a Linux VPS. The supported runtime path is Docker Compose. Kubernetes now has a Helm/operator scaffold, but Kubernetes is not yet the primary MVP runtime path.
 
 Working at MVP level:
 
@@ -38,5 +40,5 @@ Not hosted-grade yet:
 - Failed-upgrade restore needs durable off-host backup artifact validation, not only local/dev artifacts.
 - Official `supabase gen types --db-url` against the public DB route has an upstream Supabase CLI TLS/CA caveat. Use the Supadupa tunnel/wrapper workflow when needed.
 - Real third-party provider propagation still needs proof for external CDN behavior, real SMS delivery, and true multi-region placement/failover.
-- Kubernetes is not the MVP runtime path.
+- Kubernetes is not yet the primary MVP runtime path; the operator materializes generic project workloads, but full Supabase data-plane parity still needs live service validation.
 - Compliance screens are operator evidence helpers, not certification claims.

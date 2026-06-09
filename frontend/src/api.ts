@@ -1,7 +1,6 @@
 import type { AdvisorFinding, AuditEvent, AuditIntegrity, AuthResponse, AuthState, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, CreateBranchResponse, FleetMetrics, Host, HostCapacity, LogDrain, MFAEnrollment, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, PlatformSSOInitiation, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectRouteManifest, ProjectSecret, ProjectSecretReveal, ProjectServices, ProjectStudioSession, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RestoreToTimeResponse, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest, Team, TeamMember, UpgradeProjectResponse, UsageSnapshot, User, WALArchive } from "./types";
 
 const apiBase = resolveApiBase();
-const tokenStorageKey = "supadupa_token";
 
 export function getApiBase() {
   return apiBase;
@@ -43,26 +42,27 @@ function isLoopbackHost(hostname: string) {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 }
 
-export function getToken() {
-  return window.localStorage.getItem(tokenStorageKey);
+function segment(value: string) {
+  return encodeURIComponent(value);
 }
 
-export function setToken(token: string) {
-  window.localStorage.setItem(tokenStorageKey, token);
-}
-
-export function clearToken() {
-  window.localStorage.removeItem(tokenStorageKey);
+function queryString(params: Record<string, string | number | boolean | undefined>) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) {
+      continue;
+    }
+    query.set(key, String(value));
+  }
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : "";
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = getToken();
   const headers = new Headers(init?.headers);
+  headers.set("X-Supadupa-Browser", "true");
   if (init?.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
-  }
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
   }
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
@@ -113,8 +113,8 @@ export function getApiHealth() {
   return request<{ status: string }>("/v1/health");
 }
 
-export function getAuthState() {
-  return request<AuthState>("/v1/auth/state");
+export function getAuthState(init?: RequestInit) {
+  return request<AuthState>("/v1/auth/state", init);
 }
 
 export function getProvisionerStatus() {
@@ -141,109 +141,109 @@ export function createOrg(name: string) {
 }
 
 export function listOrgMembers(orgId: string) {
-  return request<Membership[]>(`/v1/orgs/${orgId}/members`);
+  return request<Membership[]>(`/v1/orgs/${segment(orgId)}/members`);
 }
 
 export function upsertOrgMember(orgId: string, input: { email: string; role: string }) {
-  return request<Membership>(`/v1/orgs/${orgId}/members`, {
+  return request<Membership>(`/v1/orgs/${segment(orgId)}/members`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteOrgMember(orgId: string, email: string) {
-  return request<void>(`/v1/orgs/${orgId}/members/${encodeURIComponent(email)}`, {
+  return request<void>(`/v1/orgs/${segment(orgId)}/members/${segment(email)}`, {
     method: "DELETE",
   });
 }
 
 export function listOrgTeams(orgId: string) {
-  return request<Team[]>(`/v1/orgs/${orgId}/teams`);
+  return request<Team[]>(`/v1/orgs/${segment(orgId)}/teams`);
 }
 
 export function createOrgTeam(orgId: string, input: { name: string; slug: string }) {
-  return request<Team>(`/v1/orgs/${orgId}/teams`, {
+  return request<Team>(`/v1/orgs/${segment(orgId)}/teams`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteOrgTeam(orgId: string, slug: string) {
-  return request<void>(`/v1/orgs/${orgId}/teams/${encodeURIComponent(slug)}`, {
+  return request<void>(`/v1/orgs/${segment(orgId)}/teams/${segment(slug)}`, {
     method: "DELETE",
   });
 }
 
 export function listTeamMembers(orgId: string, slug: string) {
-  return request<TeamMember[]>(`/v1/orgs/${orgId}/teams/${encodeURIComponent(slug)}/members`);
+  return request<TeamMember[]>(`/v1/orgs/${segment(orgId)}/teams/${segment(slug)}/members`);
 }
 
 export function upsertTeamMember(orgId: string, slug: string, email: string) {
-  return request<TeamMember>(`/v1/orgs/${orgId}/teams/${encodeURIComponent(slug)}/members`, {
+  return request<TeamMember>(`/v1/orgs/${segment(orgId)}/teams/${segment(slug)}/members`, {
     method: "POST",
     body: JSON.stringify({ email }),
   });
 }
 
 export function deleteTeamMember(orgId: string, slug: string, email: string) {
-  return request<void>(`/v1/orgs/${orgId}/teams/${encodeURIComponent(slug)}/members/${encodeURIComponent(email)}`, {
+  return request<void>(`/v1/orgs/${segment(orgId)}/teams/${segment(slug)}/members/${segment(email)}`, {
     method: "DELETE",
   });
 }
 
 export function getOrgQuota(orgId: string) {
-  return request<OrgQuota>(`/v1/orgs/${orgId}/quotas`);
+  return request<OrgQuota>(`/v1/orgs/${segment(orgId)}/quotas`);
 }
 
 export function getOrgFeatureFlags(orgId: string) {
-  return request<OrgFeatureFlags>(`/v1/orgs/${orgId}/features`);
+  return request<OrgFeatureFlags>(`/v1/orgs/${segment(orgId)}/features`);
 }
 
 export function updateOrgFeatureFlags(orgId: string, overrides: Record<string, boolean>) {
-  return request<OrgFeatureFlags>(`/v1/orgs/${orgId}/features`, {
+  return request<OrgFeatureFlags>(`/v1/orgs/${segment(orgId)}/features`, {
     method: "PUT",
     body: JSON.stringify({ overrides }),
   });
 }
 
-export function updateOrgQuota(orgId: string, input: { max_projects: number; max_cpu: number; max_ram_mb: number; max_disk_gb: number; max_disk_iops: number }) {
-  return request<OrgQuota>(`/v1/orgs/${orgId}/quotas`, {
+export function updateOrgQuota(orgId: string, input: { max_projects: number; max_cpu: number; max_ram_mb: number; max_disk_gb: number }) {
+  return request<OrgQuota>(`/v1/orgs/${segment(orgId)}/quotas`, {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
 export function getOrgUsage(orgId: string) {
-  return request<OrgUsage>(`/v1/orgs/${orgId}/usage`);
+  return request<OrgUsage>(`/v1/orgs/${segment(orgId)}/usage`);
 }
 
 export function listOrgUsageSnapshots(orgId: string, limit = 10) {
-  return request<UsageSnapshot[]>(`/v1/orgs/${orgId}/usage/snapshots?limit=${limit}`);
+  return request<UsageSnapshot[]>(`/v1/orgs/${segment(orgId)}/usage/snapshots${queryString({ limit })}`);
 }
 
 export function createOrgUsageSnapshot(orgId: string) {
-  return request<UsageSnapshot>(`/v1/orgs/${orgId}/usage/snapshots`, {
+  return request<UsageSnapshot>(`/v1/orgs/${segment(orgId)}/usage/snapshots`, {
     method: "POST",
   });
 }
 
 export function listBillingInvoices(orgId: string, limit = 10) {
-  return request<BillingInvoice[]>(`/v1/orgs/${orgId}/billing/invoices?limit=${limit}`);
+  return request<BillingInvoice[]>(`/v1/orgs/${segment(orgId)}/billing/invoices${queryString({ limit })}`);
 }
 
 export function createBillingInvoice(orgId: string, input: { usage_snapshot_id?: string; currency?: string; status?: string; due_days?: number }) {
-  return request<BillingInvoice>(`/v1/orgs/${orgId}/billing/invoices`, {
+  return request<BillingInvoice>(`/v1/orgs/${segment(orgId)}/billing/invoices`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function getBillingInvoice(orgId: string, invoiceId: string) {
-  return request<BillingInvoice>(`/v1/orgs/${orgId}/billing/invoices/${encodeURIComponent(invoiceId)}`);
+  return request<BillingInvoice>(`/v1/orgs/${segment(orgId)}/billing/invoices/${segment(invoiceId)}`);
 }
 
 export function getOrgAccessReview(orgId: string) {
-  return request<OrgAccessReview>(`/v1/orgs/${orgId}/access-review`);
+  return request<OrgAccessReview>(`/v1/orgs/${segment(orgId)}/access-review`);
 }
 
 export function getFleetMetrics() {
@@ -259,7 +259,7 @@ export function getComplianceReport() {
 }
 
 export function getProjectMetrics(ref: string) {
-  return request<ProjectMetrics>(`/v1/projects/${ref}/metrics`);
+  return request<ProjectMetrics>(`/v1/projects/${segment(ref)}/metrics`);
 }
 
 export function getPlatformDefaults() {
@@ -313,20 +313,20 @@ export function createBackupStorageTarget(input: BackupStorageTargetInput) {
 }
 
 export function updateBackupStorageTarget(id: string, input: BackupStorageTargetInput) {
-  return request<BackupStorageTarget>(`/v1/backup-storage-targets/${encodeURIComponent(id)}`, {
+  return request<BackupStorageTarget>(`/v1/backup-storage-targets/${segment(id)}`, {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
 export function testBackupStorageTarget(id: string) {
-  return request<BackupStorageTarget>(`/v1/backup-storage-targets/${encodeURIComponent(id)}/test`, {
+  return request<BackupStorageTarget>(`/v1/backup-storage-targets/${segment(id)}/test`, {
     method: "POST",
   });
 }
 
 export function deleteBackupStorageTarget(id: string) {
-  return request<void>(`/v1/backup-storage-targets/${encodeURIComponent(id)}`, {
+  return request<void>(`/v1/backup-storage-targets/${segment(id)}`, {
     method: "DELETE",
   });
 }
@@ -342,7 +342,7 @@ export function triggerPlatformBackup() {
 }
 
 export function restorePlatformBackup(id: string) {
-  return request<{ backup: PlatformBackup; restore_path: string; restore_state: string; runtime_reconciled: number; runtime_destroyed: number; runtime_errors?: string[] }>(`/v1/platform/backups/${encodeURIComponent(id)}/restore`, {
+  return request<{ backup: PlatformBackup; restore_path: string; restore_state: string; runtime_reconciled: number; runtime_destroyed: number; runtime_errors?: string[] }>(`/v1/platform/backups/${segment(id)}/restore`, {
     method: "POST",
     body: JSON.stringify({ confirm: "restore-control-plane" }),
   });
@@ -357,8 +357,7 @@ export function listSCIMUsers() {
 }
 
 export function listSCIMGroups(orgId?: string) {
-  const suffix = orgId ? `?org_id=${encodeURIComponent(orgId)}` : "";
-  return request<SCIMListResponse<SCIMGroup>>(`/v1/scim/v2/Groups${suffix}`);
+  return request<SCIMListResponse<SCIMGroup>>(`/v1/scim/v2/Groups${queryString({ org_id: orgId })}`);
 }
 
 export function bootstrapAdmin(input: { email: string; password: string }) {
@@ -432,7 +431,7 @@ export function createHost(input: { name: string; address: string; capacity: Par
 }
 
 export function deleteHost(id: string) {
-  return request<void>(`/v1/hosts/${encodeURIComponent(id)}`, {
+  return request<void>(`/v1/hosts/${segment(id)}`, {
     method: "DELETE",
   });
 }
@@ -442,11 +441,11 @@ export function listProjects() {
 }
 
 export function getProject(ref: string) {
-  return request<Project>(`/v1/projects/${ref}`);
+  return request<Project>(`/v1/projects/${segment(ref)}`);
 }
 
 export function listOrgProjects(orgId: string) {
-  return request<Project[]>(`/v1/orgs/${orgId}/projects`);
+  return request<Project[]>(`/v1/orgs/${segment(orgId)}/projects`);
 }
 
 export type CreateProjectInput = {
@@ -458,176 +457,184 @@ export type CreateProjectInput = {
   stack_version: string;
   profile: "essential" | "full" | "orioledb";
   resource_tier: "small" | "medium" | "large";
+  // Optional exact-size overrides. 0/undefined means "use the tier preset".
+  cpu?: number;
+  ram_mb?: number;
+  disk_gb?: number;
+  // Opt-in: apply real container CPU/memory limits to the database service.
+  enforce_limits?: boolean;
+  // Per-service enable map (subset of the supported Supabase services).
+  services?: Record<string, boolean>;
 };
 
 export function createProject(input: CreateProjectInput) {
   const { orgId, ...payload } = input;
-  return request<Project>(`/v1/orgs/${orgId}/projects`, {
+  return request<Project>(`/v1/orgs/${segment(orgId)}/projects`, {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
 export function getConnect(ref: string) {
-  return request<ConnectPayload>(`/v1/projects/${ref}/connect`);
+  return request<ConnectPayload>(`/v1/projects/${segment(ref)}/connect`);
 }
 
 export function getProjectCLIProfile(ref: string) {
-  return request<ProjectCLIProfile>(`/v1/projects/${ref}/connect/cli`);
+  return request<ProjectCLIProfile>(`/v1/projects/${segment(ref)}/connect/cli`);
 }
 
 export function createProjectStudioSession(ref: string) {
-  return request<ProjectStudioSession>(`/v1/projects/${ref}/studio-session`);
+  return request<ProjectStudioSession>(`/v1/projects/${segment(ref)}/studio-session`);
 }
 
 export function listProjectAccess(ref: string) {
-  return request<ProjectAccessGrant[]>(`/v1/projects/${ref}/access`);
+  return request<ProjectAccessGrant[]>(`/v1/projects/${segment(ref)}/access`);
 }
 
 export function upsertProjectAccess(ref: string, input: { subject_type: string; subject_id: string; role: string }) {
-  return request<ProjectAccessGrant>(`/v1/projects/${ref}/access`, {
+  return request<ProjectAccessGrant>(`/v1/projects/${segment(ref)}/access`, {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectAccess(ref: string, subjectType: string, subjectId: string) {
-  return request<void>(`/v1/projects/${ref}/access/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/access/${segment(subjectType)}/${segment(subjectId)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectRoutes(ref: string) {
-  return request<ProjectRoute[]>(`/v1/projects/${ref}/routes`);
+  return request<ProjectRoute[]>(`/v1/projects/${segment(ref)}/routes`);
 }
 
 export function getProjectRouteManifest(ref: string) {
-  return request<ProjectRouteManifest>(`/v1/projects/${ref}/route-manifest`);
+  return request<ProjectRouteManifest>(`/v1/projects/${segment(ref)}/route-manifest`);
 }
 
 export function listProjectDomains(ref: string) {
-  return request<ProjectDomain[]>(`/v1/projects/${ref}/domains`);
+  return request<ProjectDomain[]>(`/v1/projects/${segment(ref)}/domains`);
 }
 
 export function getProjectServices(ref: string) {
-  return request<ProjectServices>(`/v1/projects/${ref}/services`);
+  return request<ProjectServices>(`/v1/projects/${segment(ref)}/services`);
 }
 
 export function updateProjectServices(ref: string, services: Record<string, boolean>) {
-  return request<ProjectServices>(`/v1/projects/${ref}/services`, {
+  return request<ProjectServices>(`/v1/projects/${segment(ref)}/services`, {
     method: "PUT",
     body: JSON.stringify({ services }),
   });
 }
 
 export function addProjectDomain(ref: string, fqdn: string) {
-  return request<ProjectDomain>(`/v1/projects/${ref}/domains`, {
+  return request<ProjectDomain>(`/v1/projects/${segment(ref)}/domains`, {
     method: "POST",
     body: JSON.stringify({ fqdn }),
   });
 }
 
 export function deleteProjectDomain(ref: string, fqdn: string) {
-  return request<void>(`/v1/projects/${ref}/domains/${encodeURIComponent(fqdn)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/domains/${segment(fqdn)}`, {
     method: "DELETE",
   });
 }
 
 export function uploadProjectDomainCertificate(ref: string, fqdn: string, certificatePEM: string, privateKeyPEM: string) {
-  return request<ProjectDomain>(`/v1/projects/${ref}/domains/${encodeURIComponent(fqdn)}/certificate`, {
+  return request<ProjectDomain>(`/v1/projects/${segment(ref)}/domains/${segment(fqdn)}/certificate`, {
     method: "PUT",
     body: JSON.stringify({ certificate_pem: certificatePEM, private_key_pem: privateKeyPEM }),
   });
 }
 
 export function resetProjectDomainCertificate(ref: string, fqdn: string) {
-  return request<ProjectDomain>(`/v1/projects/${ref}/domains/${encodeURIComponent(fqdn)}/certificate`, {
+  return request<ProjectDomain>(`/v1/projects/${segment(ref)}/domains/${segment(fqdn)}/certificate`, {
     method: "DELETE",
   });
 }
 
 export function getProjectConfig(ref: string, area: string) {
-  return request<ProjectConfig>(`/v1/projects/${ref}/config/${area}`);
+  return request<ProjectConfig>(`/v1/projects/${segment(ref)}/config/${segment(area)}`);
 }
 
 export function updateProjectConfig(ref: string, area: string, config: Record<string, string>) {
-  return request<ProjectConfig>(`/v1/projects/${ref}/config/${area}`, {
+  return request<ProjectConfig>(`/v1/projects/${segment(ref)}/config/${segment(area)}`, {
     method: "PUT",
     body: JSON.stringify({ config }),
   });
 }
 
 export function listProjectBranches(ref: string) {
-  return request<ProjectBranch[]>(`/v1/projects/${ref}/branches`);
+  return request<ProjectBranch[]>(`/v1/projects/${segment(ref)}/branches`);
 }
 
 export function createProjectBranch(ref: string, input: { ref: string; name: string; ttl_hours: number; with_data: boolean }) {
-  return request<CreateBranchResponse>(`/v1/projects/${ref}/branches`, {
+  return request<CreateBranchResponse>(`/v1/projects/${segment(ref)}/branches`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectBranch(ref: string, branchRef: string) {
-  return request<void>(`/v1/projects/${ref}/branches/${encodeURIComponent(branchRef)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/branches/${segment(branchRef)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectReplicas(ref: string) {
-  return request<ProjectReplica[]>(`/v1/projects/${ref}/replicas`);
+  return request<ProjectReplica[]>(`/v1/projects/${segment(ref)}/replicas`);
 }
 
 export function getProjectReplicaRouting(ref: string) {
-  return request<ProjectReplicaRouting>(`/v1/projects/${ref}/replicas/routing`);
+  return request<ProjectReplicaRouting>(`/v1/projects/${segment(ref)}/replicas/routing`);
 }
 
 export function createProjectReplica(ref: string, input: { name: string; host_id: string; region: string; tier: "small" | "medium" | "large" | string; read_weight: number; failover_priority: number }) {
-  return request<ProjectReplica>(`/v1/projects/${ref}/replicas`, {
+  return request<ProjectReplica>(`/v1/projects/${segment(ref)}/replicas`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectReplica(ref: string, id: string) {
-  return request<void>(`/v1/projects/${ref}/replicas/${encodeURIComponent(id)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/replicas/${segment(id)}`, {
     method: "DELETE",
   });
 }
 
 export function promoteProjectReplica(ref: string, id: string, reason: string) {
-  return request<ProjectReplica>(`/v1/projects/${ref}/replicas/${encodeURIComponent(id)}/promote`, {
+  return request<ProjectReplica>(`/v1/projects/${segment(ref)}/replicas/${segment(id)}/promote`, {
     method: "POST",
     body: JSON.stringify({ reason }),
   });
 }
 
 export function failoverProjectReplica(ref: string, reason: string) {
-  return request<ProjectReplica>(`/v1/projects/${ref}/replicas/failover`, {
+  return request<ProjectReplica>(`/v1/projects/${segment(ref)}/replicas/failover`, {
     method: "POST",
     body: JSON.stringify({ reason }),
   });
 }
 
 export function listProjectFunctions(ref: string) {
-  return request<ProjectFunction[]>(`/v1/projects/${ref}/functions`);
+  return request<ProjectFunction[]>(`/v1/projects/${segment(ref)}/functions`);
 }
 
 export function deployProjectFunction(ref: string, input: { name: string; entrypoint: string; verify_jwt: boolean; source: string; secrets: Record<string, string> }) {
-  return request<ProjectFunction>(`/v1/projects/${ref}/functions`, {
+  return request<ProjectFunction>(`/v1/projects/${segment(ref)}/functions`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectFunction(ref: string, name: string) {
-  return request<void>(`/v1/projects/${ref}/functions/${encodeURIComponent(name)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/functions/${segment(name)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectFunctionRegions(ref: string) {
-  return request<ProjectFunctionRegion[]>(`/v1/projects/${ref}/functions/regions`);
+  return request<ProjectFunctionRegion[]>(`/v1/projects/${segment(ref)}/functions/regions`);
 }
 
 export function createProjectFunctionRegion(ref: string, input: {
@@ -636,20 +643,20 @@ export function createProjectFunctionRegion(ref: string, input: {
   region: string;
   routing_policy: string;
 }) {
-  return request<ProjectFunctionRegion>(`/v1/projects/${ref}/functions/regions`, {
+  return request<ProjectFunctionRegion>(`/v1/projects/${segment(ref)}/functions/regions`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectFunctionRegion(ref: string, id: string) {
-  return request<void>(`/v1/projects/${ref}/functions/regions/${encodeURIComponent(id)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/functions/regions/${segment(id)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectFunctionStorageMounts(ref: string) {
-  return request<ProjectFunctionStorageMount[]>(`/v1/projects/${ref}/functions/storage-mounts`);
+  return request<ProjectFunctionStorageMount[]>(`/v1/projects/${segment(ref)}/functions/storage-mounts`);
 }
 
 export function createProjectFunctionStorageMount(ref: string, input: {
@@ -660,20 +667,20 @@ export function createProjectFunctionStorageMount(ref: string, input: {
   prefix: string;
   env_alias: string;
 }) {
-  return request<ProjectFunctionStorageMount>(`/v1/projects/${ref}/functions/storage-mounts`, {
+  return request<ProjectFunctionStorageMount>(`/v1/projects/${segment(ref)}/functions/storage-mounts`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectFunctionStorageMount(ref: string, id: string) {
-  return request<void>(`/v1/projects/${ref}/functions/storage-mounts/${encodeURIComponent(id)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/functions/storage-mounts/${segment(id)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectAuthClients(ref: string) {
-  return request<ProjectAuthClient[]>(`/v1/projects/${ref}/auth/clients`);
+  return request<ProjectAuthClient[]>(`/v1/projects/${segment(ref)}/auth/clients`);
 }
 
 export function createProjectAuthClient(ref: string, input: {
@@ -685,20 +692,20 @@ export function createProjectAuthClient(ref: string, input: {
   scopes: string[];
   confidential: boolean;
 }) {
-  return request<ProjectAuthClient>(`/v1/projects/${ref}/auth/clients`, {
+  return request<ProjectAuthClient>(`/v1/projects/${segment(ref)}/auth/clients`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectAuthClient(ref: string, clientId: string) {
-  return request<void>(`/v1/projects/${ref}/auth/clients/${encodeURIComponent(clientId)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/auth/clients/${segment(clientId)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectAuthHooks(ref: string) {
-  return request<ProjectAuthHook[]>(`/v1/projects/${ref}/auth/hooks`);
+  return request<ProjectAuthHook[]>(`/v1/projects/${segment(ref)}/auth/hooks`);
 }
 
 export function setProjectAuthHook(ref: string, input: {
@@ -711,20 +718,20 @@ export function setProjectAuthHook(ref: string, input: {
   timeout_ms: number;
   retry_attempts: number;
 }) {
-  return request<ProjectAuthHook>(`/v1/projects/${ref}/auth/hooks`, {
+  return request<ProjectAuthHook>(`/v1/projects/${segment(ref)}/auth/hooks`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectAuthHook(ref: string, hookType: string) {
-  return request<void>(`/v1/projects/${ref}/auth/hooks/${encodeURIComponent(hookType)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/auth/hooks/${segment(hookType)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectReplicationPipelines(ref: string) {
-  return request<ProjectReplicationPipeline[]>(`/v1/projects/${ref}/replication`);
+  return request<ProjectReplicationPipeline[]>(`/v1/projects/${segment(ref)}/replication`);
 }
 
 export function createProjectReplicationPipeline(ref: string, input: {
@@ -737,20 +744,20 @@ export function createProjectReplicationPipeline(ref: string, input: {
   credential_handle: string;
   config: Record<string, string>;
 }) {
-  return request<ProjectReplicationPipeline>(`/v1/projects/${ref}/replication`, {
+  return request<ProjectReplicationPipeline>(`/v1/projects/${segment(ref)}/replication`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectReplicationPipeline(ref: string, id: string) {
-  return request<void>(`/v1/projects/${ref}/replication/${encodeURIComponent(id)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/replication/${segment(id)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectEmbeddingJobs(ref: string) {
-  return request<ProjectEmbeddingJob[]>(`/v1/projects/${ref}/embeddings`);
+  return request<ProjectEmbeddingJob[]>(`/v1/projects/${segment(ref)}/embeddings`);
 }
 
 export function createProjectEmbeddingJob(ref: string, input: {
@@ -767,20 +774,20 @@ export function createProjectEmbeddingJob(ref: string, input: {
   schedule: string;
   batch_size: number;
 }) {
-  return request<ProjectEmbeddingJob>(`/v1/projects/${ref}/embeddings`, {
+  return request<ProjectEmbeddingJob>(`/v1/projects/${segment(ref)}/embeddings`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectEmbeddingJob(ref: string, id: string) {
-  return request<void>(`/v1/projects/${ref}/embeddings/${encodeURIComponent(id)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/embeddings/${segment(id)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectDatabaseExtensions(ref: string) {
-  return request<ProjectDatabaseExtension[]>(`/v1/projects/${ref}/database/extensions`);
+  return request<ProjectDatabaseExtension[]>(`/v1/projects/${segment(ref)}/database/extensions`);
 }
 
 export function updateProjectDatabaseExtension(ref: string, name: string, input: {
@@ -788,14 +795,14 @@ export function updateProjectDatabaseExtension(ref: string, name: string, input:
   version: string;
   enabled: boolean;
 }) {
-  return request<ProjectDatabaseExtension>(`/v1/projects/${ref}/database/extensions/${encodeURIComponent(name)}`, {
+  return request<ProjectDatabaseExtension>(`/v1/projects/${segment(ref)}/database/extensions/${segment(name)}`, {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
 export function listProjectDatabaseCronJobs(ref: string) {
-  return request<ProjectDatabaseCronJob[]>(`/v1/projects/${ref}/database/cron-jobs`);
+  return request<ProjectDatabaseCronJob[]>(`/v1/projects/${segment(ref)}/database/cron-jobs`);
 }
 
 export function createProjectDatabaseCronJob(ref: string, input: {
@@ -809,20 +816,20 @@ export function createProjectDatabaseCronJob(ref: string, input: {
   max_runtime_seconds: number;
   metadata: Record<string, string>;
 }) {
-  return request<ProjectDatabaseCronJob>(`/v1/projects/${ref}/database/cron-jobs`, {
+  return request<ProjectDatabaseCronJob>(`/v1/projects/${segment(ref)}/database/cron-jobs`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectDatabaseCronJob(ref: string, name: string) {
-  return request<void>(`/v1/projects/${ref}/database/cron-jobs/${encodeURIComponent(name)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/database/cron-jobs/${segment(name)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectDatabaseQueues(ref: string) {
-  return request<ProjectDatabaseQueue[]>(`/v1/projects/${ref}/database/queues`);
+  return request<ProjectDatabaseQueue[]>(`/v1/projects/${segment(ref)}/database/queues`);
 }
 
 export function createProjectDatabaseQueue(ref: string, input: {
@@ -835,20 +842,20 @@ export function createProjectDatabaseQueue(ref: string, input: {
   active: boolean;
   metadata: Record<string, string>;
 }) {
-  return request<ProjectDatabaseQueue>(`/v1/projects/${ref}/database/queues`, {
+  return request<ProjectDatabaseQueue>(`/v1/projects/${segment(ref)}/database/queues`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectDatabaseQueue(ref: string, name: string) {
-  return request<void>(`/v1/projects/${ref}/database/queues/${encodeURIComponent(name)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/database/queues/${segment(name)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectDatabaseWebhooks(ref: string) {
-  return request<ProjectDatabaseWebhook[]>(`/v1/projects/${ref}/database/webhooks`);
+  return request<ProjectDatabaseWebhook[]>(`/v1/projects/${segment(ref)}/database/webhooks`);
 }
 
 export function createProjectDatabaseWebhook(ref: string, input: {
@@ -864,20 +871,20 @@ export function createProjectDatabaseWebhook(ref: string, input: {
   active: boolean;
   metadata: Record<string, string>;
 }) {
-  return request<ProjectDatabaseWebhook>(`/v1/projects/${ref}/database/webhooks`, {
+  return request<ProjectDatabaseWebhook>(`/v1/projects/${segment(ref)}/database/webhooks`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectDatabaseWebhook(ref: string, name: string) {
-  return request<void>(`/v1/projects/${ref}/database/webhooks/${encodeURIComponent(name)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/database/webhooks/${segment(name)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectDatabaseSchemas(ref: string) {
-  return request<ProjectDatabaseSchema[]>(`/v1/projects/${ref}/database/schemas`);
+  return request<ProjectDatabaseSchema[]>(`/v1/projects/${segment(ref)}/database/schemas`);
 }
 
 export function createProjectDatabaseSchema(ref: string, input: {
@@ -889,20 +896,20 @@ export function createProjectDatabaseSchema(ref: string, input: {
   active: boolean;
   metadata: Record<string, string>;
 }) {
-  return request<ProjectDatabaseSchema>(`/v1/projects/${ref}/database/schemas`, {
+  return request<ProjectDatabaseSchema>(`/v1/projects/${segment(ref)}/database/schemas`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectDatabaseSchema(ref: string, name: string, version: string) {
-  return request<void>(`/v1/projects/${ref}/database/schemas/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/database/schemas/${segment(name)}/${segment(version)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectDatabaseRoles(ref: string) {
-  return request<ProjectDatabaseRole[]>(`/v1/projects/${ref}/database/roles`);
+  return request<ProjectDatabaseRole[]>(`/v1/projects/${segment(ref)}/database/roles`);
 }
 
 export function createProjectDatabaseRole(ref: string, input: {
@@ -916,20 +923,20 @@ export function createProjectDatabaseRole(ref: string, input: {
   schema_grants: Record<string, string>;
   metadata: Record<string, string>;
 }) {
-  return request<ProjectDatabaseRole>(`/v1/projects/${ref}/database/roles`, {
+  return request<ProjectDatabaseRole>(`/v1/projects/${segment(ref)}/database/roles`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectDatabaseRole(ref: string, name: string) {
-  return request<void>(`/v1/projects/${ref}/database/roles/${encodeURIComponent(name)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/database/roles/${segment(name)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectStorageBuckets(ref: string) {
-  return request<ProjectStorageBucket[]>(`/v1/projects/${ref}/storage/buckets`);
+  return request<ProjectStorageBucket[]>(`/v1/projects/${segment(ref)}/storage/buckets`);
 }
 
 export function createProjectStorageBucket(ref: string, input: {
@@ -941,20 +948,20 @@ export function createProjectStorageBucket(ref: string, input: {
   avif_autodetection: boolean;
   metadata: Record<string, string>;
 }) {
-  return request<ProjectStorageBucket>(`/v1/projects/${ref}/storage/buckets`, {
+  return request<ProjectStorageBucket>(`/v1/projects/${segment(ref)}/storage/buckets`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectStorageBucket(ref: string, name: string) {
-  return request<void>(`/v1/projects/${ref}/storage/buckets/${encodeURIComponent(name)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/storage/buckets/${segment(name)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectVectorBuckets(ref: string) {
-  return request<ProjectVectorBucket[]>(`/v1/projects/${ref}/vector-buckets`);
+  return request<ProjectVectorBucket[]>(`/v1/projects/${segment(ref)}/vector-buckets`);
 }
 
 export function createProjectVectorBucket(ref: string, input: {
@@ -966,20 +973,20 @@ export function createProjectVectorBucket(ref: string, input: {
   storage_uri: string;
   metadata: Record<string, string>;
 }) {
-  return request<ProjectVectorBucket>(`/v1/projects/${ref}/vector-buckets`, {
+  return request<ProjectVectorBucket>(`/v1/projects/${segment(ref)}/vector-buckets`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectVectorBucket(ref: string, name: string) {
-  return request<void>(`/v1/projects/${ref}/vector-buckets/${encodeURIComponent(name)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/vector-buckets/${segment(name)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectAnalyticsBuckets(ref: string) {
-  return request<ProjectAnalyticsBucket[]>(`/v1/projects/${ref}/analytics-buckets`);
+  return request<ProjectAnalyticsBucket[]>(`/v1/projects/${segment(ref)}/analytics-buckets`);
 }
 
 export function createProjectAnalyticsBucket(ref: string, input: {
@@ -994,20 +1001,20 @@ export function createProjectAnalyticsBucket(ref: string, input: {
   compaction_schedule: string;
   metadata: Record<string, string>;
 }) {
-  return request<ProjectAnalyticsBucket>(`/v1/projects/${ref}/analytics-buckets`, {
+  return request<ProjectAnalyticsBucket>(`/v1/projects/${segment(ref)}/analytics-buckets`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectAnalyticsBucket(ref: string, name: string) {
-  return request<void>(`/v1/projects/${ref}/analytics-buckets/${encodeURIComponent(name)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/analytics-buckets/${segment(name)}`, {
     method: "DELETE",
   });
 }
 
 export function getProjectCDNPolicy(ref: string) {
-  return request<ProjectCDNPolicy>(`/v1/projects/${ref}/cdn/policy`);
+  return request<ProjectCDNPolicy>(`/v1/projects/${segment(ref)}/cdn/policy`);
 }
 
 export function updateProjectCDNPolicy(ref: string, input: {
@@ -1020,36 +1027,36 @@ export function updateProjectCDNPolicy(ref: string, input: {
   smart_revalidation: boolean;
   cache_control: string;
 }) {
-  return request<ProjectCDNPolicy>(`/v1/projects/${ref}/cdn/policy`, {
+  return request<ProjectCDNPolicy>(`/v1/projects/${segment(ref)}/cdn/policy`, {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
 export function listProjectCDNInvalidations(ref: string) {
-  return request<CDNInvalidation[]>(`/v1/projects/${ref}/cdn/invalidations`);
+  return request<CDNInvalidation[]>(`/v1/projects/${segment(ref)}/cdn/invalidations`);
 }
 
 export function createProjectCDNInvalidation(ref: string, paths: string[]) {
-  return request<CDNInvalidation>(`/v1/projects/${ref}/cdn/invalidations`, {
+  return request<CDNInvalidation>(`/v1/projects/${segment(ref)}/cdn/invalidations`, {
     method: "POST",
     body: JSON.stringify({ paths }),
   });
 }
 
 export function createProjectCDNObjectEvent(ref: string, input: { event_id: string; bucket: string; object_path: string; event_type: string }) {
-  return request<CDNInvalidation>(`/v1/projects/${ref}/cdn/object-events`, {
+  return request<CDNInvalidation>(`/v1/projects/${segment(ref)}/cdn/object-events`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function listProjectNetworkConnections(ref: string) {
-  return request<ProjectNetworkConnection[]>(`/v1/projects/${ref}/network-connections`);
+  return request<ProjectNetworkConnection[]>(`/v1/projects/${segment(ref)}/network-connections`);
 }
 
 export function getProjectNetwork(ref: string) {
-  return request<ProjectNetworkPolicy>(`/v1/projects/${ref}/network`);
+  return request<ProjectNetworkPolicy>(`/v1/projects/${segment(ref)}/network`);
 }
 
 export function createProjectNetworkConnection(ref: string, input: {
@@ -1061,31 +1068,31 @@ export function createProjectNetworkConnection(ref: string, input: {
   endpoint_id: string;
   config: Record<string, string>;
 }) {
-  return request<ProjectNetworkConnection>(`/v1/projects/${ref}/network-connections`, {
+  return request<ProjectNetworkConnection>(`/v1/projects/${segment(ref)}/network-connections`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectNetworkConnection(ref: string, id: string) {
-  return request<void>(`/v1/projects/${ref}/network-connections/${encodeURIComponent(id)}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/network-connections/${segment(id)}`, {
     method: "DELETE",
   });
 }
 
 export function listProjectLogDrains(ref: string) {
-  return request<LogDrain[]>(`/v1/projects/${ref}/log-drains`);
+  return request<LogDrain[]>(`/v1/projects/${segment(ref)}/log-drains`);
 }
 
 export function createProjectLogDrain(ref: string, input: { target: string; config: Record<string, string> }) {
-  return request<LogDrain>(`/v1/projects/${ref}/log-drains`, {
+  return request<LogDrain>(`/v1/projects/${segment(ref)}/log-drains`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export function deleteProjectLogDrain(ref: string, id: string) {
-  return request<void>(`/v1/projects/${ref}/log-drains/${id}`, {
+  return request<void>(`/v1/projects/${segment(ref)}/log-drains/${segment(id)}`, {
     method: "DELETE",
   });
 }
@@ -1099,76 +1106,75 @@ export function getAuditIntegrity() {
 }
 
 export function listBackups(ref: string) {
-  return request<Backup[]>(`/v1/projects/${ref}/backups`);
+  return request<Backup[]>(`/v1/projects/${segment(ref)}/backups`);
 }
 
 export function triggerBackup(ref: string) {
-  return request<Backup>(`/v1/projects/${ref}/backups`, {
+  return request<Backup>(`/v1/projects/${segment(ref)}/backups`, {
     method: "POST",
   });
 }
 
 export function restoreBackup(ref: string, backupId: string) {
-  return request<{ backup: Backup; restore_path: string; restore_state: string }>(`/v1/projects/${ref}/restore`, {
+  return request<{ backup: Backup; restore_path: string; restore_state: string }>(`/v1/projects/${segment(ref)}/restore`, {
     method: "POST",
     body: JSON.stringify({ backup_id: backupId }),
   });
 }
 
 export function restoreToTime(ref: string, recoveryTimeTargetUnix: number) {
-  return request<RestoreToTimeResponse>(`/v1/projects/${ref}/database/backups/restore-pitr`, {
+  return request<RestoreToTimeResponse>(`/v1/projects/${segment(ref)}/database/backups/restore-pitr`, {
     method: "POST",
     body: JSON.stringify({ recovery_time_target_unix: String(recoveryTimeTargetUnix) }),
   });
 }
 
 export function getBackupPolicy(ref: string) {
-  return request<BackupPolicy>(`/v1/projects/${ref}/backups/policy`);
+  return request<BackupPolicy>(`/v1/projects/${segment(ref)}/backups/policy`);
 }
 
 export function getProjectRecoverability(ref: string) {
-  return request<ProjectRecoverabilityStatus>(`/v1/projects/${ref}/recoverability`);
+  return request<ProjectRecoverabilityStatus>(`/v1/projects/${segment(ref)}/recoverability`);
 }
 
 export function updateBackupPolicy(ref: string, input: { enabled: boolean; schedule: string; kind: string; storage_target_id?: string }) {
-  return request<BackupPolicy>(`/v1/projects/${ref}/backups/policy`, {
+  return request<BackupPolicy>(`/v1/projects/${segment(ref)}/backups/policy`, {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
 export function getPITRPolicy(ref: string) {
-  return request<PITRPolicy>(`/v1/projects/${ref}/pitr/policy`);
+  return request<PITRPolicy>(`/v1/projects/${segment(ref)}/pitr/policy`);
 }
 
 export function updatePITRPolicy(ref: string, input: { enabled: boolean; archive_bucket: string; retention_days: number }) {
-  return request<PITRPolicy>(`/v1/projects/${ref}/pitr/policy`, {
+  return request<PITRPolicy>(`/v1/projects/${segment(ref)}/pitr/policy`, {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
 export function listWALArchives(ref: string) {
-  return request<WALArchive[]>(`/v1/projects/${ref}/pitr/wal`);
+  return request<WALArchive[]>(`/v1/projects/${segment(ref)}/pitr/wal`);
 }
 
 export function archiveWAL(ref: string) {
-  return request<WALArchive>(`/v1/projects/${ref}/pitr/wal`, {
+  return request<WALArchive>(`/v1/projects/${segment(ref)}/pitr/wal`, {
     method: "POST",
   });
 }
 
 export function listProjectLogs(ref: string) {
-  return request<ProjectLog[]>(`/v1/projects/${ref}/logs`);
+  return request<ProjectLog[]>(`/v1/projects/${segment(ref)}/logs`);
 }
 
 export async function streamProjectLogs(ref: string, onLog: (entry: ProjectLog) => void, signal?: AbortSignal) {
-  const token = getToken();
-  const response = await fetch(`${apiBase}/v1/projects/${encodeURIComponent(ref)}/logs?stream=true`, {
+  const response = await fetch(`${apiBase}/v1/projects/${segment(ref)}/logs?stream=true`, {
     headers: {
       Accept: "text/event-stream",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
+    credentials: "include",
     signal,
   });
   if (!response.ok) {
@@ -1215,65 +1221,64 @@ function parseServerSentEvent(block: string) {
 }
 
 export function listProjectActivity(ref: string) {
-  return request<AuditEvent[]>(`/v1/projects/${ref}/activity`);
+  return request<AuditEvent[]>(`/v1/projects/${segment(ref)}/activity`);
 }
 
 export function listProjectSecrets(ref: string) {
-  return request<ProjectSecret[]>(`/v1/projects/${ref}/secrets`);
+  return request<ProjectSecret[]>(`/v1/projects/${segment(ref)}/secrets`);
 }
 
 export function revealProjectSecret(ref: string, kind: string) {
-  return request<ProjectSecretReveal>(`/v1/projects/${ref}/secrets/${encodeURIComponent(kind)}/reveal`);
+  return request<ProjectSecretReveal>(`/v1/projects/${segment(ref)}/secrets/${segment(kind)}/reveal`);
 }
 
 export function auditProjectSecretCopy(ref: string, kind: string) {
-  return request<void>(`/v1/projects/${ref}/secrets/${encodeURIComponent(kind)}/copy`, {
+  return request<void>(`/v1/projects/${segment(ref)}/secrets/${segment(kind)}/copy`, {
     method: "POST",
   });
 }
 
 export function rotateProjectSecret(ref: string, kind: string) {
-  return request<ProjectSecret>(`/v1/projects/${ref}/keys/rotate`, {
+  return request<ProjectSecret>(`/v1/projects/${segment(ref)}/keys/rotate`, {
     method: "POST",
     body: JSON.stringify({ kind }),
   });
 }
 
 export function pauseProject(ref: string) {
-  return request<Project>(`/v1/projects/${ref}/pause`, {
+  return request<Project>(`/v1/projects/${segment(ref)}/pause`, {
     method: "POST",
   });
 }
 
 export function resumeProject(ref: string) {
-  return request<Project>(`/v1/projects/${ref}/resume`, {
+  return request<Project>(`/v1/projects/${segment(ref)}/resume`, {
     method: "POST",
   });
 }
 
 export function restartProject(ref: string) {
-  return request<Project>(`/v1/projects/${ref}/restart`, {
+  return request<Project>(`/v1/projects/${segment(ref)}/restart`, {
     method: "POST",
   });
 }
 
 export function upgradeProject(ref: string, version: string) {
-  return request<UpgradeProjectResponse>(`/v1/projects/${ref}/upgrade`, {
+  return request<UpgradeProjectResponse>(`/v1/projects/${segment(ref)}/upgrade`, {
     method: "POST",
     body: JSON.stringify({ version }),
   });
 }
 
 export function scaleProject(ref: string, resourceTier: "small" | "medium" | "large" | string) {
-  return request<Project>(`/v1/projects/${ref}/scale`, {
+  return request<Project>(`/v1/projects/${segment(ref)}/scale`, {
     method: "POST",
     body: JSON.stringify({ resource_tier: resourceTier }),
   });
 }
 
 export function destroyProject(ref: string, opts?: { retainVolumes?: boolean }) {
-  const query = opts?.retainVolumes ? "?retain_volumes=true" : "";
-  return request<void>(`/v1/projects/${ref}${query}`, {
+  return request<void>(`/v1/projects/${segment(ref)}${queryString({ retain_volumes: opts?.retainVolumes ? true : undefined })}`, {
     method: "DELETE",
   });
 }

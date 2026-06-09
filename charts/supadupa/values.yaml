@@ -1,0 +1,242 @@
+global:
+  imagePullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+controlPlane:
+  replicaCount: 1
+  metaDsn: ""
+  image:
+    repository: supadupa-control-plane
+    tag: 0.1.0
+  service:
+    type: ClusterIP
+    port: 8080
+  env:
+    SUPADUPA_PROVISIONER: kubernetes
+    SUPADUPA_K8S_APPLY: "true"
+    SUPADUPA_K8S_MANAGE_CRDS: "false"
+    SUPADUPA_K8S_ROOT: /tmp/supadupa-kubernetes
+    SUPADUPA_CORS_ORIGINS: ""
+    SUPADUPA_APPS_DOMAIN: ""
+    SUPADUPA_PROJECT_DOMAIN: ""
+    # NOTE: SUPADUPA_K8S_ISOLATION and SUPADUPA_K8S_RUNTIME_NAMESPACE_PREFIX are
+    # driven by projectIsolation.enabled / projectIsolation.runtimeNamespacePrefix
+    # (see below) and injected by the control-plane template; setting them here
+    # has no effect (the template overrides them so the control plane and
+    # operator never disagree on the runtime namespace).
+  kubernetesNamespaceOverride: ""
+  # Conservative defaults so the request-serving control plane has a scheduling
+  # floor and a limit ceiling. Override per environment.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podDisruptionBudget:
+    # Recommended when controlPlane.replicaCount > 1 so node drains keep at least
+    # one API replica serving. minAvailable is ignored unless enabled.
+    enabled: false
+    minAvailable: 1
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+
+admin:
+  replicaCount: 1
+  image:
+    repository: supadupa-admin
+    tag: 0.1.0
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 101
+    fsGroup: 101
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: false
+
+metaDb:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 16-alpine
+  database: supadupa_meta
+  username: supadupa
+  password: ""
+  storage:
+    size: 10Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  podSecurityContext:
+    fsGroup: 999
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop:
+        - ALL
+      add:
+        - CHOWN
+        - FOWNER
+        - DAC_OVERRIDE
+        - SETGID
+        - SETUID
+
+secrets:
+  existingSecret: ""
+  secretKey: ""
+  authSecret: ""
+  allowDevSecrets: false
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  apiHost: api.supadupa.example.com
+  adminHost: admin.supadupa.example.com
+  tls: []
+
+operator:
+  enabled: false
+  runtimeNamespaceOverride: ""
+  interval: 15s
+  # replicaCount is honoured only when leaderElection.enabled is true; with
+  # leader election disabled the operator is pinned to a single replica to avoid
+  # concurrent reconcilers fighting over the same Project CRs.
+  replicaCount: 1
+  image:
+    repository: supadupa-operator
+    tag: 0.1.0
+  health:
+    # Liveness/readiness HTTP server. Empty port disables the probes + server.
+    port: 8081
+  leaderElection:
+    # Lease-based leader election (cut-line; off by default, replicas pinned 1).
+    enabled: false
+  metrics:
+    # Off by default. When enabled the operator exposes a ClusterIP Service and
+    # the SUPADUPA_OPERATOR_METRICS_ADDR env is wired through.
+    enabled: false
+    port: 9090
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs (monitoring.coreos.com/v1).
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+  podDisruptionBudget:
+    # NOTE: a single-replica operator (leaderElection.enabled=false, replicas=1)
+    # with minAvailable:1 will BLOCK voluntary node drains entirely. Only enable
+    # this together with leaderElection.enabled=true and replicaCount>1, where it
+    # keeps a standby available during drains.
+    enabled: false
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+
+# Namespace-per-project isolation. When enabled (the default) the operator
+# provisions one Kubernetes namespace per project, applies a default-deny
+# NetworkPolicy set, a non-automounting runtime ServiceAccount, and optional
+# ResourceQuota / LimitRange, and labels the namespace for Pod Security
+# Admission. Set projectIsolation.enabled=false to restore the legacy
+# single-namespace behaviour (all project workloads share the runtime namespace).
+#
+# PREREQUISITE: NetworkPolicy enforcement requires a policy-enforcing CNI
+# (Calico, Cilium, ...). Under kindnet or other flat CNIs the policies render and
+# apply but do NOT block traffic; isolation is then namespace + RBAC + quota only.
+projectIsolation:
+  enabled: true
+  runtimeNamespacePrefix: "supadupa-proj-"
+  podSecurity:
+    # PSA enforce level stamped on each runtime namespace. Default is "baseline"
+    # because the Supabase db container runs as root and re-adds capabilities,
+    # which "restricted" rejects. Raise to "restricted" only after verifying the
+    # generated db pod, or run a root-tolerant database image.
+    enforce: "baseline"
+    enforceVersion: "latest"
+    audit: "restricted"
+    auditVersion: "latest"
+    warn: "restricted"
+    warnVersion: "latest"
+  networkPolicy:
+    enabled: true
+    # Namespace the ingress controller runs in; used to build a name-based
+    # namespaceSelector so the ingress controller can reach exposed pods.
+    ingressControllerNamespace: "ingress-nginx"
+    # Explicit namespaceSelector matchLabels; overrides the name-based selector
+    # above when non-empty.
+    ingressControllerNamespaceSelector: {}
+    # Namespace where CoreDNS / kube-dns runs (DNS egress target).
+    allowDNSNamespace: "kube-system"
+    # Additional CIDRs every project namespace may egress to (e.g. an external
+    # SMTP relay or object store). Per-project overrides live on the Project CR
+    # under spec.runtimeNetwork.allowedEgressCidrs.
+    extraEgressCIDRs: []
+  resourceQuota:
+    enabled: true
+    hard:
+      requests.cpu: "4"
+      requests.memory: 8Gi
+      limits.cpu: "8"
+      limits.memory: 16Gi
+      pods: "50"
+      persistentvolumeclaims: "20"
+  limitRange:
+    enabled: true
+    default:
+      cpu: "500m"
+      memory: 512Mi
+    defaultRequest:
+      cpu: "100m"
+      memory: 128Mi

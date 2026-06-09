@@ -1677,14 +1677,14 @@ func TestHostToolsUsePlatformEndpoints(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts":
-			_, _ = w.Write([]byte(`[{"id":"host_1","name":"east-1a","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10}}]`))
+			_, _ = w.Write([]byte(`[{"id":"host_1","name":"east-1a","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/hosts":
 			var got map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
 			capacity, ok := got["capacity"].(map[string]any)
-			if !ok || got["name"] != "east-1a" || got["address"] != "10.0.0.12" || capacity["cpu"] != float64(8) || capacity["ram_mb"] != float64(32768) || capacity["disk_gb"] != float64(500) || capacity["disk_iops"] != float64(24000) || capacity["projects"] != float64(10) {
+			if !ok || got["name"] != "east-1a" || got["address"] != "10.0.0.12" || capacity["cpu"] != float64(8) || capacity["ram_mb"] != float64(32768) || capacity["disk_gb"] != float64(500) || capacity["projects"] != float64(10) {
 				t.Fatalf("unexpected host payload %#v", got)
 			}
 			_, _ = w.Write([]byte(`{"id":"host_1","name":"east-1a","address":"10.0.0.12"}`))
@@ -1700,7 +1700,7 @@ func TestHostToolsUsePlatformEndpoints(t *testing.T) {
 
 	input := bytes.NewBuffer(nil)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"supadupa_list_hosts","arguments":{}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_create_host","arguments":{"name":"east-1a","address":"10.0.0.12","capacity_cpu":8,"capacity_ram_mb":32768,"capacity_disk_gb":500,"capacity_disk_iops":24000,"capacity_projects":10}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_create_host","arguments":{"name":"east-1a","address":"10.0.0.12","capacity_cpu":8,"capacity_ram_mb":32768,"capacity_disk_gb":500,"capacity_projects":10}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_get_host","arguments":{"id":"host_1"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"supadupa_delete_host","arguments":{"id":"host_1"}}}`)
 	output := bytes.NewBuffer(nil)
@@ -1742,7 +1742,7 @@ func TestOrgAccessToolsUsePlatformEndpoints(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got["max_projects"] != float64(4) || got["max_cpu"] != float64(16) || got["max_ram_mb"] != float64(65536) || got["max_disk_gb"] != float64(1000) || got["max_disk_iops"] != float64(24000) {
+			if got["max_projects"] != float64(4) || got["max_cpu"] != float64(16) || got["max_ram_mb"] != float64(65536) || got["max_disk_gb"] != float64(1000) {
 				t.Fatalf("unexpected quota payload %#v", got)
 			}
 			_, _ = w.Write([]byte(`{"org_id":"org_1","max_projects":4,"max_cpu":16}`))
@@ -1808,7 +1808,7 @@ func TestOrgAccessToolsUsePlatformEndpoints(t *testing.T) {
 
 	input := bytes.NewBuffer(nil)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"supadupa_get_org_quota","arguments":{"org_id":"org_1"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_set_org_quota","arguments":{"org_id":"org_1","max_projects":4,"max_cpu":16,"max_ram_mb":65536,"max_disk_gb":1000,"max_disk_iops":24000}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_set_org_quota","arguments":{"org_id":"org_1","max_projects":4,"max_cpu":16,"max_ram_mb":65536,"max_disk_gb":1000}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_list_org_members","arguments":{"org_id":"org_1"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"supadupa_upsert_org_member","arguments":{"org_id":"org_1","email":"dev@example.com","role":"admin"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"supadupa_delete_org_member","arguments":{"org_id":"org_1","email":"dev@example.com"}}}`)
@@ -1997,6 +1997,73 @@ func TestOrgCRUDToolsUseManagementEndpoints(t *testing.T) {
 	}
 }
 
+func TestReadMessageRejectsOversizedContentLength(t *testing.T) {
+	input := bytes.NewBufferString("Content-Length: " + strconv.Itoa(maxMCPMessageBytes+1) + "\r\n\r\n")
+	_, err := readMessage(bufio.NewReader(input))
+	if err == nil || !strings.Contains(err.Error(), "MCP message exceeded") {
+		t.Fatalf("expected oversized MCP frame rejection, got %v", err)
+	}
+}
+
+func TestReadMessageRejectsOversizedBareJSONLine(t *testing.T) {
+	input := bytes.NewBufferString("{" + strings.Repeat("x", maxMCPMessageBytes+1))
+	_, err := readMessage(bufio.NewReader(input))
+	if err == nil || !strings.Contains(err.Error(), "MCP message exceeded") {
+		t.Fatalf("expected oversized MCP line rejection, got %v", err)
+	}
+}
+
+func TestReadMessageRejectsOversizedHeaderLine(t *testing.T) {
+	input := bytes.NewBufferString("X-Header: " + strings.Repeat("x", maxMCPHeaderLineBytes+1) + "\r\nContent-Length: 2\r\n\r\n{}")
+	_, err := readMessage(bufio.NewReader(input))
+	if err == nil || !strings.Contains(err.Error(), "MCP header exceeded") {
+		t.Fatalf("expected oversized MCP header rejection, got %v", err)
+	}
+}
+
+func TestReadMessageRejectsOversizedBareJSONLineBeforeReadingWholeInput(t *testing.T) {
+	input := &countingReader{r: io.MultiReader(
+		strings.NewReader("{"),
+		io.LimitReader(repeatByteReader('x'), int64(4*maxMCPMessageBytes)),
+		strings.NewReader("\n"),
+	)}
+	_, err := readMessage(bufio.NewReader(input))
+	if err == nil || !strings.Contains(err.Error(), "MCP message exceeded") {
+		t.Fatalf("expected oversized MCP line rejection, got %v", err)
+	}
+	if input.n >= 2*maxMCPMessageBytes {
+		t.Fatalf("expected bounded read near %d bytes, read %d bytes", maxMCPMessageBytes, input.n)
+	}
+}
+
+func TestReadMessageRejectsOversizedHeaderLineBeforeReadingWholeInput(t *testing.T) {
+	input := &countingReader{r: io.MultiReader(
+		strings.NewReader("X-Header: "),
+		io.LimitReader(repeatByteReader('x'), int64(4*maxMCPMessageBytes)),
+		strings.NewReader("\r\nContent-Length: 2\r\n\r\n{}"),
+	)}
+	_, err := readMessage(bufio.NewReader(input))
+	if err == nil || !strings.Contains(err.Error(), "MCP header exceeded") {
+		t.Fatalf("expected oversized MCP header rejection, got %v", err)
+	}
+	if input.n >= maxMCPMessageBytes {
+		t.Fatalf("expected header read bounded near %d bytes, read %d bytes", maxMCPHeaderLineBytes, input.n)
+	}
+}
+
+func TestAPIClientRejectsOversizedResponses(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(w, io.LimitReader(strings.NewReader(strings.Repeat("x", maxManagementAPIBytes+1)), maxManagementAPIBytes+1))
+	}))
+	t.Cleanup(api.Close)
+
+	client := apiClient{baseURL: api.URL, client: api.Client()}
+	_, _, err := client.do(context.Background(), http.MethodGet, "/v1/projects", nil)
+	if err == nil || !strings.Contains(err.Error(), "management API response exceeded") {
+		t.Fatalf("expected oversized API response rejection, got %v", err)
+	}
+}
+
 func writeTestFrame(t *testing.T, out *bytes.Buffer, payload string) {
 	t.Helper()
 	if !json.Valid([]byte(payload)) {
@@ -2023,4 +2090,24 @@ func readTestFrames(t *testing.T, input *bytes.Buffer) []string {
 		frames = append(frames, string(payload))
 	}
 	return frames
+}
+
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	r.n += n
+	return n, err
+}
+
+type repeatByteReader byte
+
+func (r repeatByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(r)
+	}
+	return len(p), nil
 }

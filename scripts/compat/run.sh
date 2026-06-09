@@ -73,6 +73,9 @@ fi
 for phase in "${phases[@]}"; do
   case "$phase" in
     */*)
+      if ! compat_bool "${SUPADUPA_COMPAT_ALLOW_EXTERNAL_PHASES:-false}"; then
+        fail "runner.$phase" "external phase paths require SUPADUPA_COMPAT_ALLOW_EXTERNAL_PHASES=true"
+      fi
       phase_path="$phase"
       ;;
     *)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   cat >&2 <<'TXT'
@@ -17,7 +18,8 @@ Options:
   --dns-provider provider       acme DNS provider: cloudflare or route53 (default: cloudflare)
   --email email                 Let's Encrypt email
   --bootstrap-email email       optional first admin email
-  --bootstrap-password value    optional first admin password
+  --bootstrap-password value    optional first admin password; prefer SUPADUPA_BOOTSTRAP_PASSWORD
+  --expose-db                   bind Postgres and pooler edge ports publicly in VPS mode
   --force                       overwrite existing .env
   -h, --help                    show this help
 
@@ -37,6 +39,7 @@ dns_provider=""
 email=""
 bootstrap_email=""
 bootstrap_password=""
+expose_db=false
 force=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -77,6 +80,10 @@ while [[ "$#" -gt 0 ]]; do
       bootstrap_password="${2:-}"
       shift 2
       ;;
+    --expose-db)
+      expose_db=true
+      shift
+      ;;
     --force)
       force=true
       shift
@@ -102,6 +109,43 @@ if [[ -n "$dns_provider" && "$dns_provider" != "cloudflare" && "$dns_provider" !
   echo "--dns-provider must be cloudflare or route53" >&2
   exit 2
 fi
+
+reject_control_chars() {
+  local name="$1"
+  local value="${2:-}"
+  if [[ "$value" == *[[:cntrl:]]* ]]; then
+    echo "$name must not contain control characters" >&2
+    exit 2
+  fi
+}
+
+validate_hostname() {
+  local name="$1"
+  local value="$2"
+  reject_control_chars "$name" "$value"
+  if [[ -z "$value" || ${#value} -gt 253 || "$value" != *.* ]]; then
+    echo "$name must be a fully qualified hostname" >&2
+    exit 2
+  fi
+  if [[ ! "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+    echo "$name must contain only DNS hostname characters" >&2
+    exit 2
+  fi
+}
+
+validate_email() {
+  local name="$1"
+  local value="$2"
+  reject_control_chars "$name" "$value"
+  if [[ -z "$value" || "$value" == *" "* || "$value" != *@*.* ]]; then
+    echo "$name must be an email address" >&2
+    exit 2
+  fi
+}
+
+validate_env_value() {
+  reject_control_chars "$1" "${2:-}"
+}
 
 if [[ -f .env && "$force" != "true" ]]; then
   echo ".env already exists; rerun with --force to overwrite" >&2
@@ -130,10 +174,10 @@ if [[ "$mode" == "local" ]]; then
   cors_origins="http://localhost:3000,http://127.0.0.1:3000"
   tls_cert_resolver="letsencrypt"
   acme_dns_provider="${dns_provider:-cloudflare}"
-  http_addr="0.0.0.0:80"
-  https_addr="0.0.0.0:443"
-  postgres_addr="0.0.0.0:5432"
-  pooler_addr="0.0.0.0:6543"
+  http_addr="127.0.0.1:80"
+  https_addr="127.0.0.1:443"
+  postgres_addr="127.0.0.1:5432"
+  pooler_addr="127.0.0.1:6543"
 elif [[ "$mode" == "offline" ]]; then
   admin_host="${admin_host:-admin.supadupa.test}"
   api_host="${api_host:-api.supadupa.test}"
@@ -163,17 +207,51 @@ else
   acme_dns_provider="${dns_provider:-cloudflare}"
   http_addr="0.0.0.0:80"
   https_addr="0.0.0.0:443"
-  postgres_addr="0.0.0.0:5432"
-  pooler_addr="0.0.0.0:6543"
+  postgres_addr="127.0.0.1:5432"
+  pooler_addr="127.0.0.1:6543"
+  if [[ "$expose_db" == "true" ]]; then
+    postgres_addr="0.0.0.0:5432"
+    pooler_addr="0.0.0.0:6543"
+  fi
 fi
 
 bootstrap_email="${bootstrap_email:-admin@example.test}"
-bootstrap_password="${bootstrap_password:-}"
+bootstrap_password="${bootstrap_password:-${SUPADUPA_BOOTSTRAP_PASSWORD:-}}"
+validate_hostname "SUPADUPA_ADMIN_HOST" "$admin_host"
+validate_hostname "SUPADUPA_API_HOST" "$api_host"
+validate_hostname "SUPADUPA_APPS_DOMAIN" "$apps_domain"
+validate_email "SUPADUPA_ACME_EMAIL" "$email"
+validate_email "SUPADUPA_BOOTSTRAP_EMAIL" "$bootstrap_email"
+validate_env_value "SUPADUPA_BOOTSTRAP_PASSWORD" "$bootstrap_password"
+for name in \
+  CLOUDFLARE_API_TOKEN \
+  AWS_ACCESS_KEY_ID \
+  AWS_SECRET_ACCESS_KEY \
+  AWS_SESSION_TOKEN \
+  AWS_REGION \
+  AWS_PROFILE \
+  AWS_SHARED_CREDENTIALS_FILE \
+  AWS_HOSTED_ZONE_ID; do
+  validate_env_value "$name" "${!name:-}"
+done
 runtime_dir="$(pwd)/runtime"
+host_uid="$(id -u)"
+host_gid="$(id -g)"
+control_plane_user="$host_uid:$host_gid"
+if [[ "$host_uid" == "0" ]]; then
+  control_plane_user="10001:10001"
+fi
+docker_gid="0"
+if [[ -S /var/run/docker.sock ]]; then
+  docker_gid="$(stat -c '%g' /var/run/docker.sock)"
+fi
 secret_key="$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 auth_secret="$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 
 mkdir -p "$runtime_dir"/{projects,routes,certs,backups}
+if [[ "$host_uid" == "0" ]]; then
+  chown -R 10001:10001 "$runtime_dir"
+fi
 docker network inspect supadupa-ingress >/dev/null 2>&1 || docker network create supadupa-ingress >/dev/null
 
 generate_offline_tls() {
@@ -222,6 +300,80 @@ tls:
 EOF_LOCAL_TLS
 }
 
+generate_platform_routes() {
+  local route_file="$runtime_dir/routes/00-platform.yaml"
+  {
+    cat <<EOF_PLATFORM_API
+http:
+  routers:
+    supadupa-api:
+      rule: Host(\`$api_host\`)
+      entryPoints:
+        - websecure
+      service: supadupa-api
+EOF_PLATFORM_API
+    if [[ -n "$tls_cert_resolver" ]]; then
+      cat <<EOF_PLATFORM_API_TLS
+      tls:
+        certResolver: $tls_cert_resolver
+EOF_PLATFORM_API_TLS
+    else
+      cat <<'EOF_PLATFORM_API_TLS'
+      tls: {}
+EOF_PLATFORM_API_TLS
+    fi
+    cat <<EOF_PLATFORM_ROUTES
+    supadupa-api-http:
+      rule: Host(\`$api_host\`)
+      entryPoints:
+        - web
+      middlewares:
+        - supadupa-api-https
+      service: supadupa-api
+    supadupa-admin:
+      rule: Host(\`$admin_host\`)
+      entryPoints:
+        - websecure
+      service: supadupa-admin
+EOF_PLATFORM_ROUTES
+    if [[ -n "$tls_cert_resolver" ]]; then
+      cat <<EOF_PLATFORM_ADMIN_TLS
+      tls:
+        certResolver: $tls_cert_resolver
+EOF_PLATFORM_ADMIN_TLS
+    else
+      cat <<'EOF_PLATFORM_ADMIN_TLS'
+      tls: {}
+EOF_PLATFORM_ADMIN_TLS
+    fi
+    cat <<EOF_PLATFORM_REST
+    supadupa-admin-http:
+      rule: Host(\`$admin_host\`)
+      entryPoints:
+        - web
+      middlewares:
+        - supadupa-admin-https
+      service: supadupa-admin
+  services:
+    supadupa-api:
+      loadBalancer:
+        servers:
+          - url: http://supadupavisor:8080
+    supadupa-admin:
+      loadBalancer:
+        servers:
+          - url: http://admin-ui:8080
+  middlewares:
+    supadupa-api-https:
+      redirectScheme:
+        scheme: https
+    supadupa-admin-https:
+      redirectScheme:
+        scheme: https
+EOF_PLATFORM_REST
+  } >"$route_file"
+}
+
 if [[ "$mode" == "offline" ]]; then
   if ! command -v openssl >/dev/null 2>&1; then
     echo "offline mode requires openssl for local certificate generation" >&2
@@ -229,8 +381,11 @@ if [[ "$mode" == "offline" ]]; then
   fi
   generate_offline_tls
 fi
+generate_platform_routes
 
-cat >.env <<EOF
+env_tmp="$(mktemp .env.XXXXXX)"
+trap 'rm -f "$env_tmp"' EXIT
+cat >"$env_tmp" <<EOF
 SUPADUPA_INSTALL_MODE=$mode
 SUPADUPA_ADMIN_HOST=$admin_host
 SUPADUPA_API_HOST=$api_host
@@ -243,6 +398,7 @@ SUPADUPA_ACME_DNS_DELAY_BEFORE_CHECK=10
 
 SUPADUPA_ADMIN_ADDR=$admin_addr
 SUPADUPA_API_ADDR=$api_addr
+SUPADUPA_META_DB_ADDR=127.0.0.1:15432
 VITE_API_BASE_URL=$vite_api_base
 SUPADUPA_CORS_ORIGINS=$cors_origins
 
@@ -252,19 +408,22 @@ SUPADUPA_BOOTSTRAP_EMAIL=$bootstrap_email
 SUPADUPA_BOOTSTRAP_PASSWORD=$bootstrap_password
 
 SUPADUPA_RUNTIME_HOST_DIR=$runtime_dir
-SUPADUPA_RUNTIME_CONTAINER_DIR=$runtime_dir
+SUPADUPA_RUNTIME_CONTAINER_DIR=/app/runtime
 SUPADUPA_ROUTES_HOST_DIR=$runtime_dir/routes
 SUPADUPA_CERTS_HOST_DIR=$runtime_dir/certs
-SUPADUPA_PROJECT_ROOT=$runtime_dir/projects
-SUPADUPA_BACKUP_ROOT=$runtime_dir/backups
+SUPADUPA_PROJECT_HOST_ROOT=$runtime_dir/projects
+SUPADUPA_CONTROL_PLANE_USER=$control_plane_user
+SUPADUPA_DOCKER_GID=$docker_gid
 
 SUPADUPA_PROVISIONER=compose
 SUPADUPA_COMPOSE_APPLY=true
+SUPADUPA_PROJECT_DOCKER_LOGS=false
 
 SUPADUPA_HTTP_ADDR=$http_addr
 SUPADUPA_HTTPS_ADDR=$https_addr
 SUPADUPA_POSTGRES_ADDR=$postgres_addr
 SUPADUPA_POOLER_ADDR=$pooler_addr
+SUPADUPA_DB_INGRESS_ALLOWED_CIDRS=
 CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
 AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
 AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
@@ -287,11 +446,20 @@ SUPADUPA_BACKUP_TARGET_AUTO_TEST=false
 SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS=false
 SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP=false
 EOF
+chmod 600 "$env_tmp"
+mv "$env_tmp" .env
+trap - EXIT
 
 echo "Wrote .env"
 echo "Created runtime directories under $runtime_dir"
 echo "Ensured Docker network supadupa-ingress exists"
+echo "Configured control-plane container user $control_plane_user and Docker proxy socket group $docker_gid"
 echo "Project defaults will seed from SUPADUPA_APPS_DOMAIN on first startup"
+if [[ "$expose_db" == "true" ]]; then
+  echo
+  echo "Warning: --expose-db publishes raw Postgres and pooler ingress on $postgres_addr and $pooler_addr."
+  echo "Only use this when external database clients need direct access; keep firewall rules or SUPADUPA_DB_INGRESS_ALLOWED_CIDRS aligned with trusted client networks."
+fi
 if [[ "$mode" == "offline" ]]; then
   echo "Generated local TLS CA and certificate under $runtime_dir/certs/local"
 fi
@@ -299,7 +467,7 @@ echo
 if [[ "$mode" == "local" ]]; then
   cat <<'TXT'
 Next:
-  docker compose -f deploy/compose.yaml up -d --build
+  docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml up -d --build
   open http://localhost:3000
 
 For project URLs with TLS, rerun setup in --mode vps and start with --profile edge.
@@ -315,7 +483,7 @@ Next:
   2. Trust the local CA if you want browser trust:
      $runtime_dir/certs/local/supadupa-local-ca.crt
   3. Start:
-     docker compose -f deploy/compose.yaml --profile edge up -d --build
+     docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
   4. Open:
      https://$admin_host
 TXT
@@ -326,9 +494,10 @@ Next:
      $admin_host -> this server
      $api_host -> this server
      *.$apps_domain -> this server
-  2. Make sure ports 80, 443, 5432, and 6543 are reachable.
+  2. Make sure ports 80 and 443 are reachable.
+     If you used --expose-db, also allow 5432 and 6543 intentionally and restrict them to trusted client IPs.
   3. Start:
-     docker compose -f deploy/compose.yaml --profile edge up -d --build
+     docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
   4. Open:
      https://$admin_host
 TXT

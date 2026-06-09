@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -111,12 +108,8 @@ func (r *projectDatabaseExtensionResource) Schema(ctx context.Context, req resou
 }
 
 func (r *projectDatabaseExtensionResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -187,16 +180,7 @@ func (r *projectDatabaseExtensionResource) Delete(ctx context.Context, req resou
 }
 
 func (r *projectDatabaseExtensionResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, name, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, name, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name, for example alpha/pg_cron.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(name))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "name", "Use ref/name, for example alpha/pg_cron.")
 }
 
 func (r *projectDatabaseExtensionResource) findDatabaseExtension(ctx context.Context, ref string, name string) (ProjectDatabaseExtension, error) {
@@ -204,12 +188,7 @@ func (r *projectDatabaseExtensionResource) findDatabaseExtension(ctx context.Con
 	if err != nil {
 		return ProjectDatabaseExtension{}, err
 	}
-	for _, extension := range extensions {
-		if extension.Name == name {
-			return extension, nil
-		}
-	}
-	return ProjectDatabaseExtension{}, ErrNotFound
+	return findInList(extensions, func(extension ProjectDatabaseExtension) bool { return extension.Name == name })
 }
 
 func databaseExtensionInputFromModel(model projectDatabaseExtensionResourceModel) ProjectDatabaseExtensionInput {

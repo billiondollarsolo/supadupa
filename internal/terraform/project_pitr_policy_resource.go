@@ -2,10 +2,7 @@ package terraform
 
 import (
 	"context"
-	"fmt"
-	"time"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -92,12 +89,8 @@ func (r *projectPITRPolicyResource) Schema(ctx context.Context, req resource.Sch
 }
 
 func (r *projectPITRPolicyResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -161,11 +154,7 @@ func (r *projectPITRPolicyResource) Delete(ctx context.Context, req resource.Del
 }
 
 func (r *projectPITRPolicyResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	if req.ID == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use project ref, for example alpha.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), req.ID)...)
+	setOnePartImportState(ctx, req.ID, resp, "ref", "Use project ref, for example alpha.")
 }
 
 func projectPITRPolicyInputFromModel(model projectPITRPolicyResourceModel) ProjectPITRPolicyInput {
@@ -188,11 +177,4 @@ func setProjectPITRPolicyState(model *projectPITRPolicyResourceModel, policy Pro
 	model.RetentionDays = types.Int64Value(int64(policy.RetentionDays))
 	model.LastArchiveAt = optionalTimePointerString(policy.LastArchiveAt)
 	model.UpdatedAt = optionalTimeString(policy.UpdatedAt)
-}
-
-func optionalTimePointerString(value *time.Time) types.String {
-	if value == nil || value.IsZero() {
-		return types.StringValue("")
-	}
-	return types.StringValue(value.Format("2006-01-02T15:04:05Z07:00"))
 }

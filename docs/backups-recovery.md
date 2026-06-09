@@ -32,7 +32,7 @@ SUPADUPA_BACKUP_TARGET_FORCE_PATH_STYLE=false
 SUPADUPA_BACKUP_TARGET_AUTO_TEST=false
 ```
 
-If backup target env is present on startup, Supadupa creates or updates the named default target. Set `SUPADUPA_BACKUP_TARGET_AUTO_TEST=true` to test it during startup.
+Generated blank/default placeholders are ignored on startup. Supadupa creates or updates the named default target only after meaningful backup target values are supplied, such as a target name, bucket, endpoint, credentials, non-default region/prefix, or `SUPADUPA_BACKUP_TARGET_FORCE_PATH_STYLE=true`. Set `SUPADUPA_BACKUP_TARGET_AUTO_TEST=true` to test a configured target during startup.
 
 ## Project Backups
 

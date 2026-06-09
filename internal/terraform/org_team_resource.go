@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -73,12 +71,8 @@ func (r *orgTeamResource) Schema(ctx context.Context, req resource.SchemaRequest
 }
 
 func (r *orgTeamResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -135,16 +129,7 @@ func (r *orgTeamResource) Delete(ctx context.Context, req resource.DeleteRequest
 }
 
 func (r *orgTeamResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	orgID, slug, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		orgID, slug, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(orgID) == "" || strings.TrimSpace(slug) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use org_id/slug, for example org_123/platform.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), strings.TrimSpace(orgID))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("slug"), strings.TrimSpace(slug))...)
+	setTwoPartImportState(ctx, req.ID, resp, "org_id", "slug", "Use org_id/slug, for example org_123/platform.")
 }
 
 func (r *orgTeamResource) findOrgTeam(ctx context.Context, orgID string, slug string) (OrgTeam, error) {
@@ -153,12 +138,7 @@ func (r *orgTeamResource) findOrgTeam(ctx context.Context, orgID string, slug st
 		return OrgTeam{}, err
 	}
 	normalized := strings.ToLower(strings.TrimSpace(slug))
-	for _, team := range teams {
-		if team.Slug == normalized {
-			return team, nil
-		}
-	}
-	return OrgTeam{}, ErrNotFound
+	return findInList(teams, func(team OrgTeam) bool { return team.Slug == normalized })
 }
 
 func setOrgTeamState(model *orgTeamResourceModel, team OrgTeam) {

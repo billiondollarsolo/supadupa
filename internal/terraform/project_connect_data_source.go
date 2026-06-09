@@ -2,7 +2,6 @@ package terraform
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	datasourceschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -114,12 +113,8 @@ func (d *projectConnectDataSource) Schema(ctx context.Context, req datasource.Sc
 }
 
 func (d *projectConnectDataSource) Configure(ctx context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	d.client = client
@@ -161,9 +156,8 @@ func setProjectConnectDataSourceState(ctx context.Context, model *projectConnect
 	model.FunctionsURL = types.StringValue(connect.FunctionsURL)
 	model.StorageURL = types.StringValue(connect.StorageURL)
 	model.StorageS3URL = types.StringValue(connect.StorageS3URL)
-	customAPIURLs, diags := types.ListValueFrom(ctx, types.StringType, connect.CustomAPIURLs)
-	if diags.HasError() {
-		addError("Unable to encode custom API URLs", diags.Errors()[0].Detail())
+	customAPIURLs, ok := stringListStateValue(ctx, "custom_api_urls", connect.CustomAPIURLs, addError)
+	if !ok {
 		customAPIURLs = types.ListNull(types.StringType)
 	}
 	model.CustomAPIURLs = customAPIURLs

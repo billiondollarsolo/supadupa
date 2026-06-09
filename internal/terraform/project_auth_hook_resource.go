@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -137,12 +134,8 @@ func (r *projectAuthHookResource) Schema(ctx context.Context, req resource.Schem
 }
 
 func (r *projectAuthHookResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -232,16 +225,7 @@ func (r *projectAuthHookResource) Delete(ctx context.Context, req resource.Delet
 }
 
 func (r *projectAuthHookResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, hookType, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, hookType, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(hookType) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/hook_type, for example alpha/custom_access_token.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("hook_type"), strings.TrimSpace(hookType))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "hook_type", "Use ref/hook_type, for example alpha/custom_access_token.")
 }
 
 func (r *projectAuthHookResource) findAuthHook(ctx context.Context, ref string, hookType string) (ProjectAuthHook, error) {
@@ -249,12 +233,7 @@ func (r *projectAuthHookResource) findAuthHook(ctx context.Context, ref string, 
 	if err != nil {
 		return ProjectAuthHook{}, err
 	}
-	for _, hook := range hooks {
-		if hook.HookType == hookType {
-			return hook, nil
-		}
-	}
-	return ProjectAuthHook{}, ErrNotFound
+	return findInList(hooks, func(hook ProjectAuthHook) bool { return hook.HookType == hookType })
 }
 
 func authHookInputFromModel(ctx context.Context, model projectAuthHookResourceModel, addError func(string, string)) (ProjectAuthHookInput, bool) {
@@ -289,9 +268,8 @@ func setProjectAuthHookState(ctx context.Context, model *projectAuthHookResource
 	model.CreatedAt = optionalTimeString(hook.CreatedAt)
 	model.UpdatedAt = optionalTimeString(hook.UpdatedAt)
 
-	headers, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(hook.Headers, previousHeaders))
-	if diags.HasError() {
-		addError("Unable to encode headers map", diags.Errors()[0].Detail())
+	headers, ok := sensitiveStringMapStateValue(ctx, "headers", hook.Headers, previousHeaders, addError)
+	if !ok {
 		return
 	}
 	model.Headers = headers

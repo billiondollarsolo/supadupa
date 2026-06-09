@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -47,6 +48,9 @@ func normalizePlatformSSOInput(input PlatformSSOConfigInput) (PlatformSSOConfig,
 		return PlatformSSOConfig{}, fmt.Errorf("email_domain must be a domain, not an email address")
 	}
 	if config.Enabled {
+		if !platformSSOJSONAdapterEnabled() {
+			return PlatformSSOConfig{}, fmt.Errorf("platform sso uses a normalized signed JSON adapter; set SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER=true only for development or controlled compatibility testing")
+		}
 		if config.IDPEntityID == "" {
 			return PlatformSSOConfig{}, fmt.Errorf("idp_entity_id is required when platform sso is enabled")
 		}
@@ -75,10 +79,22 @@ func normalizePlatformSSOInput(input PlatformSSOConfigInput) (PlatformSSOConfig,
 		}
 	}
 	if strings.TrimSpace(input.SCIMToken) != "" {
+		if len(strings.TrimSpace(input.SCIMToken)) < 24 {
+			return PlatformSSOConfig{}, fmt.Errorf("scim_token must be at least 24 characters")
+		}
 		config.SCIMTokenHash = HashPlatformSCIMToken(input.SCIMToken)
 		config.SCIMTokenConfigured = true
 	}
 	return config, nil
+}
+
+func platformSSOJSONAdapterEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizedPlatformSSOConfig(config PlatformSSOConfig) PlatformSSOConfig {
@@ -98,8 +114,9 @@ func normalizedPlatformSSOConfig(config PlatformSSOConfig) PlatformSSOConfig {
 }
 
 func HashPlatformSCIMToken(token string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
-	return hex.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, []byte(AuthSecretFromEnv(os.Getenv)))
+	_, _ = mac.Write([]byte(strings.TrimSpace(token)))
+	return "hmac-sha256$" + hex.EncodeToString(mac.Sum(nil))
 }
 
 func VerifyPlatformSCIMToken(config PlatformSSOConfig, token string) bool {
@@ -108,16 +125,35 @@ func VerifyPlatformSCIMToken(config PlatformSSOConfig, token string) bool {
 	if !config.SCIMEnabled || config.SCIMTokenHash == "" || token == "" {
 		return false
 	}
-	return hmac.Equal([]byte(config.SCIMTokenHash), []byte(HashPlatformSCIMToken(token)))
+	if hash := strings.TrimPrefix(config.SCIMTokenHash, "hmac-sha256$"); hash != config.SCIMTokenHash {
+		expected := strings.TrimPrefix(HashPlatformSCIMToken(token), "hmac-sha256$")
+		return hmac.Equal([]byte(hash), []byte(expected))
+	}
+	return hmac.Equal([]byte(config.SCIMTokenHash), []byte(legacyPlatformSCIMTokenHash(token)))
+}
+
+func PlatformSCIMTokenNeedsRehash(config PlatformSSOConfig, token string) bool {
+	config = normalizedPlatformSSOConfig(config)
+	token = strings.TrimSpace(token)
+	return VerifyPlatformSCIMToken(config, token) &&
+		!strings.HasPrefix(config.SCIMTokenHash, "hmac-sha256$") &&
+		len(token) >= 24
+}
+
+func legacyPlatformSCIMTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
 }
 
 func PlatformSSOAssertionSignaturePayload(assertion PlatformSSOAssertion) []byte {
 	email := strings.ToLower(strings.TrimSpace(assertion.Email))
+	role := strings.ToLower(strings.TrimSpace(assertion.Role))
 	payload := strings.Join([]string{
 		strings.TrimSpace(assertion.Issuer),
 		strings.TrimSpace(assertion.Audience),
 		email,
 		strings.TrimSpace(assertion.NameID),
+		role,
 		assertion.NotOnOrAfter.UTC().Format(time.RFC3339),
 	}, "\n")
 	return []byte(payload)

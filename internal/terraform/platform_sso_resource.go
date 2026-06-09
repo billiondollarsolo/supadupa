@@ -2,9 +2,7 @@ package terraform
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -21,7 +19,7 @@ type platformSSOResource struct {
 type platformSSOResourceModel struct {
 	ID            types.String `tfsdk:"id"`
 	Enabled       types.Bool   `tfsdk:"enabled"`
-	Provider      types.String `tfsdk:"provider"`
+	SSOProvider   types.String `tfsdk:"sso_provider"`
 	IDPEntityID   types.String `tfsdk:"idp_entity_id"`
 	SSOURL        types.String `tfsdk:"sso_url"`
 	Certificate   types.String `tfsdk:"certificate_pem"`
@@ -58,7 +56,7 @@ func (r *platformSSOResource) Schema(ctx context.Context, req resource.SchemaReq
 				Default:     booldefault.StaticBool(false),
 				Description: "Whether platform SAML SSO is enabled.",
 			},
-			"provider": resourceschema.StringAttribute{
+			"sso_provider": resourceschema.StringAttribute{
 				Computed:    true,
 				Description: "SSO provider. Currently saml.",
 				PlanModifiers: []planmodifier.String{
@@ -126,12 +124,8 @@ func (r *platformSSOResource) Schema(ctx context.Context, req resource.SchemaReq
 }
 
 func (r *platformSSOResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -190,7 +184,7 @@ func (r *platformSSOResource) Delete(ctx context.Context, req resource.DeleteReq
 }
 
 func (r *platformSSOResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	setOnePartImportState(ctx, req.ID, resp, "id", "Use platform-sso.")
 }
 
 func platformSSOInputFromModel(model platformSSOResourceModel) PlatformSSOConfigInput {
@@ -214,21 +208,14 @@ func defaultPlatformSSOInput() PlatformSSOConfigInput {
 func setPlatformSSOState(model *platformSSOResourceModel, config PlatformSSOConfig, previousCertificate string) {
 	model.ID = types.StringValue("platform-sso")
 	model.Enabled = types.BoolValue(config.Enabled)
-	model.Provider = types.StringValue(config.Provider)
+	model.SSOProvider = types.StringValue(config.Provider)
 	model.IDPEntityID = types.StringValue(config.IDPEntityID)
 	model.SSOURL = types.StringValue(config.SSOURL)
-	model.Certificate = types.StringValue(preserveMaskedValue(config.Certificate, previousCertificate))
+	model.Certificate = types.StringValue(preserveMaskedSensitiveValue(config.Certificate, previousCertificate))
 	model.ACSURL = types.StringValue(config.ACSURL)
 	model.MetadataURL = types.StringValue(config.MetadataURL)
 	model.EmailDomain = types.StringValue(config.EmailDomain)
 	model.AutoProvision = types.BoolValue(config.AutoProvision)
 	model.DefaultRole = types.StringValue(config.DefaultRole)
 	model.UpdatedAt = optionalTimeString(config.UpdatedAt)
-}
-
-func preserveMaskedValue(value string, previous string) string {
-	if value == "********" && previous != "" {
-		return previous
-	}
-	return value
 }

@@ -34,12 +34,15 @@ func TestLoadMigrationsSorted(t *testing.T) {
 	if migrations[0].Version != "0001_first" || migrations[1].Version != "0002_second" {
 		t.Fatalf("unexpected migration order: %#v", migrations)
 	}
+	if migrations[0].Name != "first" || migrations[1].Name != "second" {
+		t.Fatalf("unexpected migration names: %#v", migrations)
+	}
 }
 
 func TestApplyMigrationsSkipsAlreadyAppliedVersions(t *testing.T) {
 	db := openFakeDB(t)
 	state := fakeMigrationStateFor(db)
-	state.applied["0001_first"] = true
+	state.applied["0001_first"] = migrationChecksum("CREATE TABLE first (id text);")
 
 	err := Apply(context.Background(), db, []Migration{
 		{Version: "0001_first", SQL: "CREATE TABLE first (id text);"},
@@ -48,8 +51,14 @@ func TestApplyMigrationsSkipsAlreadyAppliedVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if !state.applied["0001_first"] || !state.applied["0002_second"] {
+	if _, ok := state.applied["0001_first"]; !ok {
+		t.Fatalf("expected first migration recorded: %#v", state.applied)
+	}
+	if _, ok := state.applied["0002_second"]; !ok {
 		t.Fatalf("expected both migrations recorded: %#v", state.applied)
+	}
+	if state.names["0002_second"] != "second" {
+		t.Fatalf("expected second migration name recorded, got %#v", state.names)
 	}
 	execLog := strings.Join(state.execs, "\n")
 	if strings.Contains(execLog, "CREATE TABLE first") {
@@ -57,6 +66,50 @@ func TestApplyMigrationsSkipsAlreadyAppliedVersions(t *testing.T) {
 	}
 	if !strings.Contains(execLog, "CREATE TABLE second") {
 		t.Fatalf("expected second migration applied, exec log:\n%s", execLog)
+	}
+}
+
+func TestApplyMigrationsFailsOnChecksumDrift(t *testing.T) {
+	db := openFakeDB(t)
+	state := fakeMigrationStateFor(db)
+	state.applied["0001_first"] = migrationChecksum("CREATE TABLE first (id text);")
+
+	err := Apply(context.Background(), db, []Migration{
+		{Version: "0001_first", SQL: "CREATE TABLE first (id integer);"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch, got %v", err)
+	}
+}
+
+func TestApplyMigrationsRecordsChecksumForLegacyRows(t *testing.T) {
+	db := openFakeDB(t)
+	state := fakeMigrationStateFor(db)
+	state.applied["0001_first"] = ""
+
+	sql := "CREATE TABLE first (id text);"
+	if err := Apply(context.Background(), db, []Migration{{Version: "0001_first", SQL: sql}}); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if state.applied["0001_first"] != migrationChecksum(sql) {
+		t.Fatalf("expected legacy row checksum recorded, got %#v", state.applied)
+	}
+	if state.names["0001_first"] != "first" {
+		t.Fatalf("expected legacy row name recorded, got %#v", state.names)
+	}
+}
+
+func TestApplyMigrationsBackfillsMissingNameForAppliedRows(t *testing.T) {
+	db := openFakeDB(t)
+	state := fakeMigrationStateFor(db)
+	sql := "CREATE TABLE first (id text);"
+	state.applied["0001_first"] = migrationChecksum(sql)
+
+	if err := Apply(context.Background(), db, []Migration{{Version: "0001_first", SQL: sql}}); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if state.names["0001_first"] != "first" {
+		t.Fatalf("expected applied row name backfilled, got %#v", state.names)
 	}
 }
 
@@ -68,7 +121,8 @@ var (
 
 type fakeMigrationState struct {
 	mu      sync.Mutex
-	applied map[string]bool
+	applied map[string]string
+	names   map[string]string
 	execs   []string
 }
 
@@ -78,7 +132,7 @@ func openFakeDB(t *testing.T) *sql.DB {
 		sql.Register("metadb_fake", fakeMigrationDriver{})
 	})
 	dsn := t.Name()
-	state := &fakeMigrationState{applied: map[string]bool{}}
+	state := &fakeMigrationState{applied: map[string]string{}, names: map[string]string{}}
 	fakeDriversMu.Lock()
 	fakeDrivers[dsn] = state
 	fakeDriversMu.Unlock()
@@ -141,7 +195,31 @@ func (conn fakeMigrationConn) ExecContext(_ context.Context, query string, args 
 	conn.state.execs = append(conn.state.execs, trimmed)
 	if strings.HasPrefix(trimmed, "INSERT INTO schema_migrations") && len(args) > 0 {
 		if version, ok := args[0].Value.(string); ok {
-			conn.state.applied[version] = true
+			checksum := ""
+			if len(args) > 1 {
+				checksum, _ = args[1].Value.(string)
+			}
+			conn.state.applied[version] = checksum
+			if len(args) > 2 {
+				name, _ := args[2].Value.(string)
+				conn.state.names[version] = name
+			}
+		}
+	}
+	if strings.HasPrefix(trimmed, "UPDATE schema_migrations") && len(args) > 1 {
+		if version, ok := args[0].Value.(string); ok {
+			if strings.Contains(trimmed, "checksum") {
+				checksum, _ := args[1].Value.(string)
+				conn.state.applied[version] = checksum
+			}
+			nameArg := 1
+			if strings.Contains(trimmed, "checksum") {
+				nameArg = 2
+			}
+			if len(args) > nameArg && strings.Contains(trimmed, "name") {
+				name, _ := args[nameArg].Value.(string)
+				conn.state.names[version] = name
+			}
 		}
 	}
 	return driver.RowsAffected(1), nil
@@ -154,7 +232,11 @@ func (conn fakeMigrationConn) QueryContext(_ context.Context, query string, args
 	if len(args) > 0 {
 		version, _ = args[0].Value.(string)
 	}
-	return &fakeRows{values: []driver.Value{conn.state.applied[version]}}, nil
+	checksum, ok := conn.state.applied[version]
+	if !ok {
+		return &fakeRows{}, nil
+	}
+	return &fakeRows{values: []driver.Value{checksum, conn.state.names[version]}}, nil
 }
 
 type fakeMigrationTx struct{}
@@ -173,7 +255,7 @@ type fakeRows struct {
 }
 
 func (fakeRows) Columns() []string {
-	return []string{"exists"}
+	return []string{"checksum", "name"}
 }
 
 func (rows *fakeRows) Close() error {
@@ -181,7 +263,7 @@ func (rows *fakeRows) Close() error {
 }
 
 func (rows *fakeRows) Next(dest []driver.Value) error {
-	if rows.read {
+	if rows.read || len(rows.values) == 0 {
 		return io.EOF
 	}
 	rows.read = true

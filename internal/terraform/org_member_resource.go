@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -80,12 +78,8 @@ func (r *orgMemberResource) Schema(ctx context.Context, req resource.SchemaReque
 }
 
 func (r *orgMemberResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -153,16 +147,7 @@ func (r *orgMemberResource) Delete(ctx context.Context, req resource.DeleteReque
 }
 
 func (r *orgMemberResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	orgID, email, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		orgID, email, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(orgID) == "" || strings.TrimSpace(email) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use org_id/email, for example org_123/admin@example.com.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), strings.TrimSpace(orgID))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("email"), strings.TrimSpace(email))...)
+	setTwoPartImportState(ctx, req.ID, resp, "org_id", "email", "Use org_id/email, for example org_123/admin@example.com.")
 }
 
 func (r *orgMemberResource) findOrgMember(ctx context.Context, orgID string, email string) (OrgMember, error) {
@@ -171,12 +156,7 @@ func (r *orgMemberResource) findOrgMember(ctx context.Context, orgID string, ema
 		return OrgMember{}, err
 	}
 	normalized := strings.ToLower(strings.TrimSpace(email))
-	for _, member := range members {
-		if member.Email == normalized {
-			return member, nil
-		}
-	}
-	return OrgMember{}, ErrNotFound
+	return findInList(members, func(member OrgMember) bool { return member.Email == normalized })
 }
 
 func setOrgMemberState(model *orgMemberResourceModel, member OrgMember) {

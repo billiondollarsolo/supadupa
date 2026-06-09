@@ -41,6 +41,13 @@ var secretKindPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 var envAliasPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,62}$`)
 
 var allowedConfigAreas = map[string]map[string]string{
+	"general": {
+		// Declared production-intent for the project. The security advisor holds
+		// "production" projects to full severity and keeps "development" projects
+		// quiet (posture gaps reported as info), so a greenfield fleet isn't a
+		// wall of red. Defaults to development so projects opt in to enforcement.
+		"environment": "development",
+	},
 	"database": {
 		"pg_graphql_enabled":       "true",
 		"database_webhooks":        "true",
@@ -54,6 +61,11 @@ var allowedConfigAreas = map[string]map[string]string{
 		"extension_toggle_ui":      "false",
 		"performance_advisor_mode": "studio",
 		"orioledb_profile":         "off",
+		// When on, the control plane enables RLS on platform-created internal
+		// tables (e.g. Realtime's Oban job tables) that otherwise land in the
+		// API-exposed public schema. Secure by default; user tables are left to
+		// the user. Applied on project create and whenever this config is saved.
+		"rls_enforce_system_tables": "true",
 	},
 	"auth": {
 		"email_enabled":            "true",
@@ -179,8 +191,15 @@ var allowedConfigAreas = map[string]map[string]string{
 		"session_port":             "5432",
 	},
 	"network": {
-		"ip_allowlist": "",
-		"ssl_enforced": "true",
+		// Two independent allowlists, both default-open (empty = allow all):
+		// http_allowlist gates HTTP/Studio/API edge routes; db_allowlist gates the
+		// public database/pooler ports. Restricting one never affects the other.
+		"http_allowlist": "",
+		"db_allowlist":   "",
+		"ssl_enforced":   "true",
+		// Per-project database exposure: "private" | "allowlisted" | "public".
+		// Defaults to private so every project stays off until explicitly opened.
+		"db_ingress_mode": "private",
 	},
 	"smtp": {
 		"host":            "",
@@ -425,7 +444,7 @@ var allowedMembershipRoles = map[string]struct{}{
 
 var defaultPlatformFeatureFlags = map[string]bool{
 	"single_org_mode":       true,
-	"multi_org":             true,
+	"multi_org":             false,
 	"team_rbac":             true,
 	"project_access_grants": true,
 	"project_self_service":  true,
@@ -443,12 +462,29 @@ var defaultPlatformFeatureFlags = map[string]bool{
 	"billing":               false,
 	"platform_sso_scim":     false,
 	"kubernetes_operator":   false,
+	// Master switch: publish project databases through the edge router. Off by
+	// default so nothing is externally reachable until an operator enables it.
+	"database_external_access": false,
+	// When on, the security advisor holds platform-wide recovery posture
+	// (backup-target guards and recovery-ready targets) to full severity. Off by
+	// default so a local/MVP deploy isn't a wall of high-severity findings.
+	"production_posture": false,
 }
 
+// Bounds for optional exact-size overrides on project creation. These cap what
+// an advanced user can request per dimension; a zero value falls back to the
+// tier preset.
+const (
+	maxProjectCPU    = 64     // cores
+	minProjectRAMMB  = 256    // MB
+	maxProjectRAMMB  = 262144 // 256 GB
+	maxProjectDiskGB = 16384  // 16 TB
+)
+
 var resourceTierReservations = map[ResourceTier]HostCapacity{
-	ResourceTierSmall:  {CPU: 1, RAMMB: 2048, DiskGB: 20, DiskIOPS: 3000, Project: 1},
-	ResourceTierMedium: {CPU: 2, RAMMB: 4096, DiskGB: 50, DiskIOPS: 6000, Project: 1},
-	ResourceTierLarge:  {CPU: 4, RAMMB: 8192, DiskGB: 100, DiskIOPS: 12000, Project: 1},
+	ResourceTierSmall:  {CPU: 1, RAMMB: 2048, DiskGB: 20, Project: 1},
+	ResourceTierMedium: {CPU: 2, RAMMB: 4096, DiskGB: 50, Project: 1},
+	ResourceTierLarge:  {CPU: 4, RAMMB: 8192, DiskGB: 100, Project: 1},
 }
 
 type Store interface {
@@ -458,6 +494,7 @@ type Store interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	GetUserByID(ctx context.Context, id string) (User, error)
 	AuthenticateUser(ctx context.Context, email string, password string) (User, error)
+	VerifyUserMFA(ctx context.Context, userID string, code string) (User, error)
 	GetUserMFAStatus(ctx context.Context, userID string) (MFAStatus, error)
 	BeginUserMFAEnrollment(ctx context.Context, userID string) (MFAEnrollment, error)
 	ConfirmUserMFA(ctx context.Context, userID string, code string) (MFAStatus, error)
@@ -588,6 +625,7 @@ type Store interface {
 	DeleteProjectNetworkConnection(ctx context.Context, ref string, id string) error
 	ListProjectLogDrains(ctx context.Context, ref string) ([]LogDrain, error)
 	CreateProjectLogDrain(ctx context.Context, ref string, input LogDrainInput) (LogDrain, error)
+	UpdateProjectLogDrain(ctx context.Context, ref string, id string, input LogDrainInput) (LogDrain, error)
 	DeleteProjectLogDrain(ctx context.Context, ref string, id string) error
 	EnsureProjectSecrets(ctx context.Context, ref string) ([]ProjectSecret, error)
 	ListProjectSecrets(ctx context.Context, ref string) ([]ProjectSecret, error)
@@ -623,6 +661,7 @@ type Store interface {
 	GetFleetMetrics(ctx context.Context) (FleetMetrics, error)
 	GetProjectMetrics(ctx context.Context, ref string) (ProjectMetrics, error)
 	RecordProjectTelemetry(ctx context.Context, ref string, input TelemetrySampleInput) (TelemetrySample, error)
+	RecordNodeTelemetry(ctx context.Context, hostID string, input NodeTelemetrySampleInput) (NodeTelemetrySample, error)
 }
 
 type User struct {
@@ -635,6 +674,7 @@ type User struct {
 	MFAPendingSecret string    `json:"-"`
 	MFAConfirmedAt   time.Time `json:"-"`
 	MFAUpdatedAt     time.Time `json:"-"`
+	MFALastCounter   int64     `json:"-"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 
@@ -690,7 +730,6 @@ type OrgQuota struct {
 	MaxCPU      int          `json:"max_cpu"`
 	MaxRAMMB    int          `json:"max_ram_mb"`
 	MaxDiskGB   int          `json:"max_disk_gb"`
-	MaxDiskIOPS int          `json:"max_disk_iops"`
 	Used        HostCapacity `json:"used"`
 	UpdatedAt   time.Time    `json:"updated_at"`
 }
@@ -700,7 +739,6 @@ type OrgQuotaInput struct {
 	MaxCPU      int `json:"max_cpu"`
 	MaxRAMMB    int `json:"max_ram_mb"`
 	MaxDiskGB   int `json:"max_disk_gb"`
-	MaxDiskIOPS int `json:"max_disk_iops"`
 }
 
 type OrgUsage struct {
@@ -784,45 +822,59 @@ type BillingInvoiceInput struct {
 }
 
 type FleetMetrics struct {
-	Orgs                  int             `json:"orgs"`
-	Users                 int             `json:"users"`
-	Hosts                 int             `json:"hosts"`
-	Projects              int             `json:"projects"`
-	ReadReplicas          int             `json:"read_replicas"`
-	ProjectsByStatus      map[string]int  `json:"projects_by_status"`
-	HostCapacity          HostCapacity    `json:"host_capacity"`
-	HostUsed              HostCapacity    `json:"host_used"`
-	Observed              TelemetryRollup `json:"observed"`
-	Routes                int             `json:"routes"`
-	CustomDomains         int             `json:"custom_domains"`
-	LogDrains             int             `json:"log_drains"`
-	FunctionDeployments   int             `json:"function_deployments"`
-	FunctionRegions       int             `json:"function_regions"`
-	FunctionStorageMounts int             `json:"function_storage_mounts"`
-	ReplicationPipelines  int             `json:"replication_pipelines"`
-	EmbeddingJobs         int             `json:"embedding_jobs"`
-	AuthClients           int             `json:"auth_clients"`
-	AuthHooks             int             `json:"auth_hooks"`
-	DatabaseExtensions    int             `json:"database_extensions"`
-	DatabaseCronJobs      int             `json:"database_cron_jobs"`
-	DatabaseQueues        int             `json:"database_queues"`
-	DatabaseWebhooks      int             `json:"database_webhooks"`
-	DatabaseSchemas       int             `json:"database_schemas"`
-	DatabaseRoles         int             `json:"database_roles"`
-	StorageBuckets        int             `json:"storage_buckets"`
-	VectorBuckets         int             `json:"vector_buckets"`
-	AnalyticsBuckets      int             `json:"analytics_buckets"`
-	CDNEnabledProjects    int             `json:"cdn_enabled_projects"`
-	CDNInvalidations      int             `json:"cdn_invalidations"`
-	NetworkConnections    int             `json:"network_connections"`
-	Backups               int             `json:"backups"`
-	BackupStorageBytes    int64           `json:"backup_storage_bytes"`
-	WALArchives           int             `json:"wal_archives"`
-	WALArchiveBytes       int64           `json:"wal_archive_bytes"`
-	ProjectLogEvents      int             `json:"project_log_events"`
-	AuditEvents           int             `json:"audit_events"`
-	AuditVerified         bool            `json:"audit_verified"`
-	SampledAt             time.Time       `json:"sampled_at"`
+	Orgs                  int                   `json:"orgs"`
+	Users                 int                   `json:"users"`
+	Hosts                 int                   `json:"hosts"`
+	Projects              int                   `json:"projects"`
+	ReadReplicas          int                   `json:"read_replicas"`
+	ProjectsByStatus      map[string]int        `json:"projects_by_status"`
+	HostCapacity          HostCapacity          `json:"host_capacity"`
+	HostUsed              HostCapacity          `json:"host_used"`
+	DatabaseIngress       DatabaseIngressStatus `json:"database_ingress"`
+	NodeObserved          []NodeTelemetrySample `json:"node_observed"`
+	Observed              TelemetryRollup       `json:"observed"`
+	Routes                int                   `json:"routes"`
+	CustomDomains         int                   `json:"custom_domains"`
+	LogDrains             int                   `json:"log_drains"`
+	FunctionDeployments   int                   `json:"function_deployments"`
+	FunctionRegions       int                   `json:"function_regions"`
+	FunctionStorageMounts int                   `json:"function_storage_mounts"`
+	ReplicationPipelines  int                   `json:"replication_pipelines"`
+	EmbeddingJobs         int                   `json:"embedding_jobs"`
+	AuthClients           int                   `json:"auth_clients"`
+	AuthHooks             int                   `json:"auth_hooks"`
+	DatabaseExtensions    int                   `json:"database_extensions"`
+	DatabaseCronJobs      int                   `json:"database_cron_jobs"`
+	DatabaseQueues        int                   `json:"database_queues"`
+	DatabaseWebhooks      int                   `json:"database_webhooks"`
+	DatabaseSchemas       int                   `json:"database_schemas"`
+	DatabaseRoles         int                   `json:"database_roles"`
+	StorageBuckets        int                   `json:"storage_buckets"`
+	VectorBuckets         int                   `json:"vector_buckets"`
+	AnalyticsBuckets      int                   `json:"analytics_buckets"`
+	CDNEnabledProjects    int                   `json:"cdn_enabled_projects"`
+	CDNInvalidations      int                   `json:"cdn_invalidations"`
+	NetworkConnections    int                   `json:"network_connections"`
+	Backups               int                   `json:"backups"`
+	BackupStorageBytes    int64                 `json:"backup_storage_bytes"`
+	WALArchives           int                   `json:"wal_archives"`
+	WALArchiveBytes       int64                 `json:"wal_archive_bytes"`
+	ProjectLogEvents      int                   `json:"project_log_events"`
+	AuditEvents           int                   `json:"audit_events"`
+	AuditVerified         bool                  `json:"audit_verified"`
+	SampledAt             time.Time             `json:"sampled_at"`
+}
+
+type DatabaseIngressStatus struct {
+	Mode                string   `json:"mode"`
+	Public              bool     `json:"public"`
+	PostgresAddr        string   `json:"postgres_addr"`
+	PoolerAddr          string   `json:"pooler_addr"`
+	PostgresPublic      bool     `json:"postgres_public"`
+	PoolerPublic        bool     `json:"pooler_public"`
+	AllowlistConfigured bool     `json:"allowlist_configured"`
+	AllowedCIDRs        []string `json:"allowed_cidrs"`
+	Warnings            []string `json:"warnings"`
 }
 
 type ProjectMetrics struct {
@@ -908,6 +960,39 @@ type TelemetryRollup struct {
 	OldestSampledAt   time.Time `json:"oldest_sampled_at,omitempty"`
 	StaleProjects     int       `json:"stale_projects"`
 	StaleAfterSeconds int       `json:"stale_after_seconds"`
+}
+
+type NodeTelemetrySample struct {
+	HostID             string    `json:"host_id"`
+	Source             string    `json:"source"`
+	CPUPercent         float64   `json:"cpu_percent"`
+	CPUUsedCores       float64   `json:"cpu_used_cores"`
+	CPUCapacityCores   int       `json:"cpu_capacity_cores"`
+	MemoryUsedBytes    int64     `json:"memory_used_bytes"`
+	MemoryTotalBytes   int64     `json:"memory_total_bytes"`
+	DiskUsedBytes      int64     `json:"disk_used_bytes"`
+	DiskTotalBytes     int64     `json:"disk_total_bytes"`
+	DiskAvailableBytes int64     `json:"disk_available_bytes"`
+	NetworkSampled     bool      `json:"network_sampled"`
+	NetworkRxBytes     int64     `json:"network_rx_bytes"`
+	NetworkTxBytes     int64     `json:"network_tx_bytes"`
+	SampledAt          time.Time `json:"sampled_at"`
+}
+
+type NodeTelemetrySampleInput struct {
+	Source             string
+	CPUPercent         float64
+	CPUUsedCores       float64
+	CPUCapacityCores   int
+	MemoryUsedBytes    int64
+	MemoryTotalBytes   int64
+	DiskUsedBytes      int64
+	DiskTotalBytes     int64
+	DiskAvailableBytes int64
+	NetworkSampled     bool
+	NetworkRxBytes     int64
+	NetworkTxBytes     int64
+	SampledAt          time.Time
 }
 
 type Membership struct {
@@ -1007,16 +1092,20 @@ type Project struct {
 }
 
 type CreateProjectRequest struct {
-	OrgID        string            `json:"-"`
-	Ref          string            `json:"ref"`
-	Name         string            `json:"name"`
-	HostID       string            `json:"host_id"`
-	Domain       string            `json:"domain"`
-	StackVersion string            `json:"stack_version"`
-	Profile      StackProfile      `json:"profile"`
-	ResourceTier ResourceTier      `json:"resource_tier"`
-	Services     map[string]bool   `json:"services"`
-	Environment  map[string]string `json:"environment"`
+	OrgID         string            `json:"-"`
+	Ref           string            `json:"ref"`
+	Name          string            `json:"name"`
+	HostID        string            `json:"host_id"`
+	Domain        string            `json:"domain"`
+	StackVersion  string            `json:"stack_version"`
+	Profile       StackProfile      `json:"profile"`
+	ResourceTier  ResourceTier      `json:"resource_tier"`
+	CPU           int               `json:"cpu,omitempty"`
+	RAMMB         int               `json:"ram_mb,omitempty"`
+	DiskGB        int               `json:"disk_gb,omitempty"`
+	EnforceLimits bool              `json:"enforce_limits,omitempty"`
+	Services      map[string]bool   `json:"services"`
+	Environment   map[string]string `json:"environment"`
 }
 
 type ProjectServices struct {
@@ -1030,24 +1119,26 @@ type ProjectServicesInput struct {
 }
 
 type PlatformDefaults struct {
-	Domain         string          `json:"domain"`
-	StackVersion   string          `json:"stack_version"`
-	Profile        StackProfile    `json:"profile"`
-	ResourceTier   ResourceTier    `json:"resource_tier"`
-	BackupSchedule string          `json:"backup_schedule"`
-	FeatureFlags   map[string]bool `json:"feature_flags"`
-	SMTP           PlatformSMTP    `json:"smtp"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	Domain                      string          `json:"domain"`
+	StackVersion                string          `json:"stack_version"`
+	Profile                     StackProfile    `json:"profile"`
+	ResourceTier                ResourceTier    `json:"resource_tier"`
+	BackupSchedule              string          `json:"backup_schedule"`
+	FeatureFlags                map[string]bool `json:"feature_flags"`
+	DatabaseIngressAllowedCIDRs []string        `json:"database_ingress_allowed_cidrs"`
+	SMTP                        PlatformSMTP    `json:"smtp"`
+	UpdatedAt                   time.Time       `json:"updated_at"`
 }
 
 type PlatformDefaultsInput struct {
-	Domain         string          `json:"domain"`
-	StackVersion   string          `json:"stack_version"`
-	Profile        StackProfile    `json:"profile"`
-	ResourceTier   ResourceTier    `json:"resource_tier"`
-	BackupSchedule string          `json:"backup_schedule"`
-	FeatureFlags   map[string]bool `json:"feature_flags"`
-	SMTP           PlatformSMTP    `json:"smtp"`
+	Domain                      string          `json:"domain"`
+	StackVersion                string          `json:"stack_version"`
+	Profile                     StackProfile    `json:"profile"`
+	ResourceTier                ResourceTier    `json:"resource_tier"`
+	BackupSchedule              string          `json:"backup_schedule"`
+	FeatureFlags                map[string]bool `json:"feature_flags"`
+	DatabaseIngressAllowedCIDRs []string        `json:"database_ingress_allowed_cidrs"`
+	SMTP                        PlatformSMTP    `json:"smtp"`
 }
 
 type PlatformSMTP struct {
@@ -1123,11 +1214,10 @@ type Host struct {
 }
 
 type HostCapacity struct {
-	CPU      int `json:"cpu"`
-	RAMMB    int `json:"ram_mb"`
-	DiskGB   int `json:"disk_gb"`
-	DiskIOPS int `json:"disk_iops"`
-	Project  int `json:"projects"`
+	CPU     int `json:"cpu"`
+	RAMMB   int `json:"ram_mb"`
+	DiskGB  int `json:"disk_gb"`
+	Project int `json:"projects"`
 }
 
 type CreateHostRequest struct {
@@ -2106,6 +2196,7 @@ type MemoryStore struct {
 	walArchives           []WALArchive
 	projectLogs           []ProjectLog
 	telemetry             map[string]TelemetrySample
+	nodeTelemetry         map[string]NodeTelemetrySample
 	auditEvents           []AuditEvent
 }
 
@@ -2155,6 +2246,7 @@ func NewMemoryStore() *MemoryStore {
 		pitrPolicies:          map[string]PITRPolicy{},
 		platformBackups:       []PlatformBackup{},
 		telemetry:             map[string]TelemetrySample{},
+		nodeTelemetry:         map[string]NodeTelemetrySample{},
 	}
 }
 
@@ -2203,8 +2295,8 @@ func (s *MemoryStore) CreateUser(ctx context.Context, req CreateUserRequest) (Us
 	if email == "" {
 		return User{}, fmt.Errorf("email is required")
 	}
-	if len(req.Password) < 8 {
-		return User{}, fmt.Errorf("password must be at least 8 characters")
+	if err := validateUserPassword(req.Password, true); err != nil {
+		return User{}, err
 	}
 	role := req.Role
 	if role == "" {
@@ -2240,8 +2332,8 @@ func (s *MemoryStore) UpdateUser(ctx context.Context, id string, req UpdateUserR
 	if nextRole == "" {
 		nextRole = "member"
 	}
-	if req.Password != "" && len(req.Password) < 8 {
-		return User{}, fmt.Errorf("password must be at least 8 characters")
+	if err := validateUserPassword(req.Password, false); err != nil {
+		return User{}, err
 	}
 
 	s.mu.Lock()
@@ -2366,9 +2458,42 @@ func (s *MemoryStore) AuthenticateUser(ctx context.Context, email string, passwo
 	s.mu.RLock()
 	user, ok := s.users[email]
 	s.mu.RUnlock()
-	if !ok || !verifyPassword(password, user.PasswordHash) {
+	verified, needsRehash := verifyPasswordWithRehash(password, user.PasswordHash)
+	if !ok || !verified {
 		return User{}, fmt.Errorf("%w: invalid credentials", ErrNotFound)
 	}
+	if needsRehash {
+		s.mu.Lock()
+		if current, ok := s.users[email]; ok && current.PasswordHash == user.PasswordHash {
+			user.PasswordHash = hashPassword(password)
+			current.PasswordHash = user.PasswordHash
+			s.users[email] = current
+		}
+		s.mu.Unlock()
+	}
+	return user, nil
+}
+
+func (s *MemoryStore) VerifyUserMFA(ctx context.Context, userID string, code string) (User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.userByIDLocked(userID)
+	if !ok {
+		return User{}, fmt.Errorf("%w: user %s", ErrNotFound, userID)
+	}
+	if !user.MFAEnabled || user.MFASecret == "" {
+		return User{}, fmt.Errorf("mfa is not enabled")
+	}
+	counter, ok := VerifyTOTPCodeCounter(user.MFASecret, code, time.Now().UTC())
+	if !ok {
+		return User{}, fmt.Errorf("invalid mfa code")
+	}
+	if int64(counter) <= user.MFALastCounter {
+		return User{}, fmt.Errorf("mfa code has already been used")
+	}
+	user.MFALastCounter = int64(counter)
+	user.MFAUpdatedAt = time.Now().UTC()
+	s.users[user.Email] = user
 	return user, nil
 }
 
@@ -2415,7 +2540,8 @@ func (s *MemoryStore) ConfirmUserMFA(ctx context.Context, userID string, code st
 	if user.MFAPendingSecret == "" {
 		return MFAStatus{}, fmt.Errorf("mfa enrollment is not pending")
 	}
-	if !VerifyTOTPCode(user.MFAPendingSecret, code, time.Now().UTC()) {
+	counter, ok := VerifyTOTPCodeCounter(user.MFAPendingSecret, code, time.Now().UTC())
+	if !ok {
 		return MFAStatus{}, fmt.Errorf("invalid mfa code")
 	}
 	now := time.Now().UTC()
@@ -2424,6 +2550,7 @@ func (s *MemoryStore) ConfirmUserMFA(ctx context.Context, userID string, code st
 	user.MFAEnabled = true
 	user.MFAConfirmedAt = now
 	user.MFAUpdatedAt = now
+	user.MFALastCounter = int64(counter)
 	s.users[user.Email] = user
 	return mfaStatusForUser(user), nil
 }
@@ -2441,14 +2568,19 @@ func (s *MemoryStore) DisableUserMFA(ctx context.Context, userID string, code st
 		s.users[user.Email] = user
 		return mfaStatusForUser(user), nil
 	}
-	if !VerifyTOTPCode(user.MFASecret, code, time.Now().UTC()) {
+	counter, ok := VerifyTOTPCodeCounter(user.MFASecret, code, time.Now().UTC())
+	if !ok {
 		return MFAStatus{}, fmt.Errorf("invalid mfa code")
+	}
+	if int64(counter) <= user.MFALastCounter {
+		return MFAStatus{}, fmt.Errorf("mfa code has already been used")
 	}
 	user.MFAEnabled = false
 	user.MFASecret = ""
 	user.MFAPendingSecret = ""
 	user.MFAConfirmedAt = time.Time{}
 	user.MFAUpdatedAt = time.Now().UTC()
+	user.MFALastCounter = 0
 	s.users[user.Email] = user
 	return mfaStatusForUser(user), nil
 }
@@ -2575,7 +2707,7 @@ func (s *MemoryStore) GetOrgQuota(ctx context.Context, orgID string) (OrgQuota, 
 }
 
 func (s *MemoryStore) UpdateOrgQuota(ctx context.Context, orgID string, input OrgQuotaInput) (OrgQuota, error) {
-	if input.MaxProjects < 0 || input.MaxCPU < 0 || input.MaxRAMMB < 0 || input.MaxDiskGB < 0 || input.MaxDiskIOPS < 0 {
+	if input.MaxProjects < 0 || input.MaxCPU < 0 || input.MaxRAMMB < 0 || input.MaxDiskGB < 0 {
 		return OrgQuota{}, fmt.Errorf("quota limits cannot be negative")
 	}
 
@@ -2590,7 +2722,6 @@ func (s *MemoryStore) UpdateOrgQuota(ctx context.Context, orgID string, input Or
 		MaxCPU:      input.MaxCPU,
 		MaxRAMMB:    input.MaxRAMMB,
 		MaxDiskGB:   input.MaxDiskGB,
-		MaxDiskIOPS: input.MaxDiskIOPS,
 		UpdatedAt:   time.Now().UTC(),
 	}
 	s.orgQuotas[orgID] = quota
@@ -2787,71 +2918,12 @@ func (s *MemoryStore) orgMeteringLocked(orgID string, sampledAt time.Time) OrgUs
 			continue
 		}
 		projectRefs[project.Ref] = struct{}{}
-		usage.Resources = addHostCapacity(usage.Resources, resourceReservationForTier(project.Spec.ResourceTier))
+		usage.Resources = addHostCapacity(usage.Resources, resourceReservationForSpec(project.Spec))
 		usage.ProjectsByStatus[string(project.Status)]++
-		if domains := s.domains[project.Ref]; len(domains) > 0 {
-			usage.CustomDomains += len(domains)
-		}
-		if drains := s.logDrains[project.Ref]; len(drains) > 0 {
-			usage.LogDrains += len(drains)
-		}
-		if functions := s.functions[project.Ref]; len(functions) > 0 {
-			usage.FunctionDeployments += len(functions)
-		}
-		if regions := s.functionRegions[project.Ref]; len(regions) > 0 {
-			usage.FunctionRegions += len(regions)
-		}
-		if mounts := s.functionStorageMounts[project.Ref]; len(mounts) > 0 {
-			usage.FunctionStorageMounts += len(mounts)
-		}
-		if pipelines := s.replicationPipelines[project.Ref]; len(pipelines) > 0 {
-			usage.ReplicationPipelines += len(pipelines)
-		}
-		if jobs := s.embeddingJobs[project.Ref]; len(jobs) > 0 {
-			usage.EmbeddingJobs += len(jobs)
-		}
-		if clients := s.authClients[project.Ref]; len(clients) > 0 {
-			usage.AuthClients += len(clients)
-		}
-		if hooks := s.authHooks[project.Ref]; len(hooks) > 0 {
-			usage.AuthHooks += len(hooks)
-		}
+		s.addRegisteredProjectChildOrgUsageLocked(project.Ref, &usage)
 		usage.DatabaseExtensions += countEnabledDatabaseExtensions(project.Ref, s.databaseExtensions[project.Ref])
-		if jobs := s.databaseCronJobs[project.Ref]; len(jobs) > 0 {
-			usage.DatabaseCronJobs += len(jobs)
-		}
-		if queues := s.databaseQueues[project.Ref]; len(queues) > 0 {
-			usage.DatabaseQueues += len(queues)
-		}
-		if webhooks := s.databaseWebhooks[project.Ref]; len(webhooks) > 0 {
-			usage.DatabaseWebhooks += len(webhooks)
-		}
-		if schemas := s.databaseSchemas[project.Ref]; len(schemas) > 0 {
-			usage.DatabaseSchemas += len(schemas)
-		}
-		if roles := s.databaseRoles[project.Ref]; len(roles) > 0 {
-			usage.DatabaseRoles += len(roles)
-		}
-		if buckets := s.storageBuckets[project.Ref]; len(buckets) > 0 {
-			usage.StorageBuckets += len(buckets)
-		}
-		if buckets := s.vectorBuckets[project.Ref]; len(buckets) > 0 {
-			usage.VectorBuckets += len(buckets)
-		}
-		if buckets := s.analyticsBuckets[project.Ref]; len(buckets) > 0 {
-			usage.AnalyticsBuckets += len(buckets)
-		}
 		if policy, ok := s.cdnPolicies[project.Ref]; ok && policy.Enabled {
 			usage.CDNEnabledProjects++
-		}
-		if invalidations := s.cdnInvalidations[project.Ref]; len(invalidations) > 0 {
-			usage.CDNInvalidations += len(invalidations)
-		}
-		if connections := s.networkConnections[project.Ref]; len(connections) > 0 {
-			usage.NetworkConnections += len(connections)
-		}
-		if secrets := s.secrets[project.Ref]; len(secrets) > 0 {
-			usage.Secrets += len(secrets)
 		}
 	}
 	for ref, replicas := range s.replicas {
@@ -2894,7 +2966,6 @@ func billingLineItemsForUsage(usage OrgUsage) []BillingLineItem {
 		billingLineItem("cpu", "Allocated vCPU", int64(usage.Resources.CPU), "vCPU", 500),
 		billingLineItem("ram", "Allocated RAM", int64(usage.Resources.RAMMB+1023)/1024, "GB", 100),
 		billingLineItem("disk", "Allocated database disk", int64(usage.Resources.DiskGB), "GB", 10),
-		billingLineItem("disk_iops", "Provisioned disk IOPS", int64(usage.Resources.DiskIOPS+999)/1000, "1k IOPS", 50),
 		billingLineItem("storage", "Object storage", bytesToBillableGiB(usage.StorageBytes), "GB", 2),
 		billingLineItem("egress", "Network egress", bytesToBillableGiB(usage.EgressBytes), "GB", 9),
 		billingLineItem("function_invocations", "Edge Function invocations", (usage.FunctionInvocations+99999)/100000, "100k calls", 20),
@@ -3295,14 +3366,14 @@ func (s *MemoryStore) ListProjectAccess(ctx context.Context, ref string) ([]Proj
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	grants := append([]ProjectAccessGrant(nil), s.projectAccess[ref]...)
-	sort.Slice(grants, func(i, j int) bool {
-		if grants[i].SubjectType == grants[j].SubjectType {
-			return grants[i].SubjectName < grants[j].SubjectName
+	return cloneAndSortProjectChildList(s.projectAccess[ref], func(grants []ProjectAccessGrant) []ProjectAccessGrant {
+		return append([]ProjectAccessGrant(nil), grants...)
+	}, func(left, right ProjectAccessGrant) bool {
+		if left.SubjectType == right.SubjectType {
+			return left.SubjectName < right.SubjectName
 		}
-		return grants[i].SubjectType < grants[j].SubjectType
-	})
-	return grants, nil
+		return left.SubjectType < right.SubjectType
+	}), nil
 }
 
 func (s *MemoryStore) UpsertProjectAccess(ctx context.Context, ref string, input ProjectAccessInput) (ProjectAccessGrant, error) {
@@ -3446,7 +3517,7 @@ func (s *MemoryStore) CreateHost(ctx context.Context, req CreateHostRequest) (Ho
 	if address == "" {
 		return Host{}, fmt.Errorf("host address is required")
 	}
-	if req.Capacity.CPU < 0 || req.Capacity.RAMMB < 0 || req.Capacity.DiskGB < 0 || req.Capacity.DiskIOPS < 0 || req.Capacity.Project < 0 {
+	if req.Capacity.CPU < 0 || req.Capacity.RAMMB < 0 || req.Capacity.DiskGB < 0 || req.Capacity.Project < 0 {
 		return Host{}, fmt.Errorf("host capacity cannot be negative")
 	}
 	host := Host{
@@ -3494,7 +3565,7 @@ func (s *MemoryStore) DeleteHost(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("%w: host %s", ErrNotFound, id)
 	}
-	if host.Used.CPU > 0 || host.Used.RAMMB > 0 || host.Used.DiskGB > 0 || host.Used.DiskIOPS > 0 || host.Used.Project > 0 {
+	if host.Used.CPU > 0 || host.Used.RAMMB > 0 || host.Used.DiskGB > 0 || host.Used.Project > 0 {
 		return fmt.Errorf("%w: host %s still has reserved capacity", ErrConflict, id)
 	}
 	delete(s.hosts, id)
@@ -3519,12 +3590,14 @@ func (s *MemoryStore) CreateProject(ctx context.Context, req CreateProjectReques
 	if err := s.validateGeneratedProjectHostReservationsLocked(req.Ref, req.Domain); err != nil {
 		return Project{}, err
 	}
-	reservation := resourceReservationForTier(req.ResourceTier)
+	spec := req.toSpec()
+	reservation := resourceReservationForSpec(spec)
 	if err := s.validateOrgQuotaLocked(req.OrgID, reservation); err != nil {
 		return Project{}, err
 	}
 	if req.HostID == "" {
 		req.HostID = s.defaultHostForReservationLocked(reservation)
+		spec.HostID = req.HostID
 	}
 	if req.HostID != "" {
 		host, ok := s.hosts[req.HostID]
@@ -3532,12 +3605,11 @@ func (s *MemoryStore) CreateProject(ctx context.Context, req CreateProjectReques
 			return Project{}, fmt.Errorf("%w: host %s", ErrNotFound, req.HostID)
 		}
 		if !hostHasCapacity(host, reservation) {
-			return Project{}, fmt.Errorf("%w: host %s has insufficient capacity for %s tier", ErrConflict, req.HostID, req.ResourceTier)
+			return Project{}, fmt.Errorf("%w: host %s has insufficient capacity", ErrConflict, req.HostID)
 		}
 		host.Used = addHostCapacity(host.Used, reservation)
 		s.hosts[host.ID] = host
 	}
-	spec := req.toSpec()
 	project := Project{
 		ID:        newID(),
 		Ref:       req.Ref,
@@ -3646,16 +3718,20 @@ func (s *MemoryStore) CreateProjectBranch(ctx context.Context, sourceRef string,
 	environment := cloneStringMap(source.Spec.Environment)
 	environment["SUPADUPA_BRANCH_SOURCE_REF"] = source.Ref
 	req := CreateProjectRequest{
-		OrgID:        source.OrgID,
-		Ref:          branchRef,
-		Name:         name,
-		HostID:       source.Spec.HostID,
-		Domain:       source.Spec.Domain,
-		StackVersion: source.Spec.StackVersion,
-		Profile:      source.Spec.Profile,
-		ResourceTier: source.Spec.ResourceTier,
-		Services:     serviceEnabledMap(source.Spec.Services),
-		Environment:  environment,
+		OrgID:         source.OrgID,
+		Ref:           branchRef,
+		Name:          name,
+		HostID:        source.Spec.HostID,
+		Domain:        source.Spec.Domain,
+		StackVersion:  source.Spec.StackVersion,
+		Profile:       source.Spec.Profile,
+		ResourceTier:  source.Spec.ResourceTier,
+		CPU:           source.Spec.CPU,
+		RAMMB:         source.Spec.RAMMB,
+		DiskGB:        source.Spec.DiskGB,
+		EnforceLimits: source.Spec.EnforceLimits,
+		Services:      serviceEnabledMap(source.Spec.Services),
+		Environment:   environment,
 	}
 	if err := validateCreateProject(req); err != nil {
 		return ProjectBranch{}, Project{}, err
@@ -3675,7 +3751,7 @@ func (s *MemoryStore) CreateProjectBranch(ctx context.Context, sourceRef string,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	reservation := resourceReservationForTier(project.Spec.ResourceTier)
+	reservation := resourceReservationForSpec(project.Spec)
 	if err := s.validateOrgQuotaLocked(project.OrgID, reservation); err != nil {
 		return ProjectBranch{}, Project{}, err
 	}
@@ -4116,7 +4192,7 @@ func (s *MemoryStore) UpdateProjectResourceTier(ctx context.Context, ref string,
 	if !ok {
 		return Project{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	oldReservation := resourceReservationForTier(project.Spec.ResourceTier)
+	oldReservation := resourceReservationForSpec(project.Spec)
 	newReservation := resourceReservationForTier(tier)
 	if err := s.validateProjectScaleQuotaLocked(project.OrgID, oldReservation, newReservation); err != nil {
 		return Project{}, err
@@ -4137,6 +4213,11 @@ func (s *MemoryStore) UpdateProjectResourceTier(ctx context.Context, ref string,
 		s.hosts[host.ID] = host
 	}
 	project.Spec.ResourceTier = tier
+	// Scaling by preset resets any exact per-dimension overrides so the new
+	// tier's defaults take effect cleanly.
+	project.Spec.CPU = 0
+	project.Spec.RAMMB = 0
+	project.Spec.DiskGB = 0
 	project.Message = "resource tier updated"
 	project.UpdatedAt = time.Now().UTC()
 	s.projects[ref] = project
@@ -4189,33 +4270,11 @@ func (s *MemoryStore) deleteProjectLocked(ref string) error {
 	project := s.projects[ref]
 	if project.Spec.HostID != "" {
 		if host, ok := s.hosts[project.Spec.HostID]; ok {
-			host.Used = subtractHostCapacity(host.Used, resourceReservationForTier(project.Spec.ResourceTier))
+			host.Used = subtractHostCapacity(host.Used, resourceReservationForSpec(project.Spec))
 			s.hosts[host.ID] = host
 		}
 	}
 	delete(s.projects, ref)
-	delete(s.routes, ref)
-	delete(s.domains, ref)
-	delete(s.configs, ref)
-	delete(s.authClients, ref)
-	delete(s.authHooks, ref)
-	delete(s.functions, ref)
-	delete(s.functionRegions, ref)
-	delete(s.functionStorageMounts, ref)
-	delete(s.replicationPipelines, ref)
-	delete(s.embeddingJobs, ref)
-	delete(s.databaseExtensions, ref)
-	delete(s.databaseCronJobs, ref)
-	delete(s.databaseQueues, ref)
-	delete(s.databaseWebhooks, ref)
-	delete(s.databaseSchemas, ref)
-	delete(s.databaseRoles, ref)
-	delete(s.storageBuckets, ref)
-	delete(s.vectorBuckets, ref)
-	delete(s.analyticsBuckets, ref)
-	delete(s.cdnPolicies, ref)
-	delete(s.cdnInvalidations, ref)
-	delete(s.networkConnections, ref)
 	delete(s.branches, ref)
 	for _, replica := range s.replicas[ref] {
 		if replica.HostID != "" {
@@ -4239,12 +4298,7 @@ func (s *MemoryStore) deleteProjectLocked(ref string) error {
 			s.branches[sourceRef] = filtered
 		}
 	}
-	delete(s.logDrains, ref)
-	delete(s.secrets, ref)
-	delete(s.policies, ref)
-	delete(s.pitrPolicies, ref)
-	delete(s.projectAccess, ref)
-	delete(s.telemetry, ref)
+	s.cleanupRegisteredProjectChildrenLocked(ref)
 	return nil
 }
 
@@ -4612,6 +4666,11 @@ func (s *MemoryStore) UpdateProjectConfig(ctx context.Context, ref string, area 
 	for key, value := range configMap {
 		base[key] = value
 	}
+	if normalizedArea == "general" {
+		if err := validateGeneralConfig(base); err != nil {
+			return ProjectConfig{}, err
+		}
+	}
 	if normalizedArea == "network" {
 		if err := validateNetworkConfig(base); err != nil {
 			return ProjectConfig{}, err
@@ -4664,14 +4723,9 @@ func (s *MemoryStore) ListProjectAuthClients(ctx context.Context, ref string) ([
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	clients := cloneAuthClients(s.authClients[ref])
-	sort.Slice(clients, func(i, j int) bool {
-		return clients[i].Name < clients[j].Name
-	})
-	if clients == nil {
-		clients = []ProjectAuthClient{}
-	}
-	return clients, nil
+	return cloneAndSortProjectChildList(s.authClients[ref], cloneAuthClients, func(left, right ProjectAuthClient) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectAuthClient(ctx context.Context, ref string, input ProjectAuthClientInput) (ProjectAuthClient, error) {
@@ -4724,14 +4778,9 @@ func (s *MemoryStore) ListProjectAuthHooks(ctx context.Context, ref string) ([]P
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	hooks := cloneAuthHooks(s.authHooks[ref])
-	sort.Slice(hooks, func(i, j int) bool {
-		return hooks[i].HookType < hooks[j].HookType
-	})
-	if hooks == nil {
-		hooks = []ProjectAuthHook{}
-	}
-	return hooks, nil
+	return cloneAndSortProjectChildList(s.authHooks[ref], cloneAuthHooks, func(left, right ProjectAuthHook) bool {
+		return left.HookType < right.HookType
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectAuthHook(ctx context.Context, ref string, input ProjectAuthHookInput) (ProjectAuthHook, error) {
@@ -4786,14 +4835,9 @@ func (s *MemoryStore) ListProjectFunctions(ctx context.Context, ref string) ([]P
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	functions := cloneProjectFunctions(s.functions[ref])
-	if functions == nil {
-		functions = []ProjectFunction{}
-	}
-	sort.Slice(functions, func(i, j int) bool {
-		return functions[i].Name < functions[j].Name
-	})
-	return functions, nil
+	return cloneAndSortProjectChildList(s.functions[ref], cloneProjectFunctions, func(left, right ProjectFunction) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) DeployProjectFunction(ctx context.Context, ref string, input ProjectFunctionInput) (ProjectFunction, error) {
@@ -4885,17 +4929,12 @@ func (s *MemoryStore) ListProjectFunctionRegions(ctx context.Context, ref string
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	regions := cloneProjectFunctionRegions(s.functionRegions[ref])
-	if regions == nil {
-		regions = []ProjectFunctionRegion{}
-	}
-	sort.Slice(regions, func(i, j int) bool {
-		if regions[i].FunctionName != regions[j].FunctionName {
-			return regions[i].FunctionName < regions[j].FunctionName
+	return cloneAndSortProjectChildList(s.functionRegions[ref], cloneProjectFunctionRegions, func(left, right ProjectFunctionRegion) bool {
+		if left.FunctionName != right.FunctionName {
+			return left.FunctionName < right.FunctionName
 		}
-		return regions[i].Region < regions[j].Region
-	})
-	return regions, nil
+		return left.Region < right.Region
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectFunctionRegion(ctx context.Context, ref string, input ProjectFunctionRegionInput) (ProjectFunctionRegion, error) {
@@ -4958,17 +4997,12 @@ func (s *MemoryStore) ListProjectFunctionStorageMounts(ctx context.Context, ref 
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	mounts := cloneProjectFunctionStorageMounts(s.functionStorageMounts[ref])
-	if mounts == nil {
-		mounts = []ProjectFunctionStorageMount{}
-	}
-	sort.Slice(mounts, func(i, j int) bool {
-		if mounts[i].FunctionName != mounts[j].FunctionName {
-			return mounts[i].FunctionName < mounts[j].FunctionName
+	return cloneAndSortProjectChildList(s.functionStorageMounts[ref], cloneProjectFunctionStorageMounts, func(left, right ProjectFunctionStorageMount) bool {
+		if left.FunctionName != right.FunctionName {
+			return left.FunctionName < right.FunctionName
 		}
-		return mounts[i].MountPath < mounts[j].MountPath
-	})
-	return mounts, nil
+		return left.MountPath < right.MountPath
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectFunctionStorageMount(ctx context.Context, ref string, input ProjectFunctionStorageMountInput) (ProjectFunctionStorageMount, error) {
@@ -5026,14 +5060,9 @@ func (s *MemoryStore) ListProjectReplicationPipelines(ctx context.Context, ref s
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	pipelines := cloneReplicationPipelines(s.replicationPipelines[ref])
-	sort.Slice(pipelines, func(i, j int) bool {
-		return pipelines[i].CreatedAt.Before(pipelines[j].CreatedAt)
-	})
-	if pipelines == nil {
-		pipelines = []ProjectReplicationPipeline{}
-	}
-	return pipelines, nil
+	return cloneAndSortProjectChildList(s.replicationPipelines[ref], cloneReplicationPipelines, func(left, right ProjectReplicationPipeline) bool {
+		return left.CreatedAt.Before(right.CreatedAt)
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectReplicationPipeline(ctx context.Context, ref string, input ProjectReplicationPipelineInput) (ProjectReplicationPipeline, error) {
@@ -5141,14 +5170,9 @@ func (s *MemoryStore) ListProjectEmbeddingJobs(ctx context.Context, ref string) 
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	jobs := cloneEmbeddingJobs(s.embeddingJobs[ref])
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].CreatedAt.Before(jobs[j].CreatedAt)
-	})
-	if jobs == nil {
-		jobs = []ProjectEmbeddingJob{}
-	}
-	return jobs, nil
+	return cloneAndSortProjectChildList(s.embeddingJobs[ref], cloneEmbeddingJobs, func(left, right ProjectEmbeddingJob) bool {
+		return left.CreatedAt.Before(right.CreatedAt)
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectEmbeddingJob(ctx context.Context, ref string, input ProjectEmbeddingJobInput) (ProjectEmbeddingJob, error) {
@@ -5238,14 +5262,9 @@ func (s *MemoryStore) ListProjectDatabaseCronJobs(ctx context.Context, ref strin
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	jobs := cloneDatabaseCronJobs(s.databaseCronJobs[ref])
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].Name < jobs[j].Name
-	})
-	if jobs == nil {
-		jobs = []ProjectDatabaseCronJob{}
-	}
-	return jobs, nil
+	return cloneAndSortProjectChildList(s.databaseCronJobs[ref], cloneDatabaseCronJobs, func(left, right ProjectDatabaseCronJob) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectDatabaseCronJob(ctx context.Context, ref string, input ProjectDatabaseCronJobInput) (ProjectDatabaseCronJob, error) {
@@ -5298,14 +5317,9 @@ func (s *MemoryStore) ListProjectDatabaseQueues(ctx context.Context, ref string)
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	queues := cloneDatabaseQueues(s.databaseQueues[ref])
-	sort.Slice(queues, func(i, j int) bool {
-		return queues[i].Name < queues[j].Name
-	})
-	if queues == nil {
-		queues = []ProjectDatabaseQueue{}
-	}
-	return queues, nil
+	return cloneAndSortProjectChildList(s.databaseQueues[ref], cloneDatabaseQueues, func(left, right ProjectDatabaseQueue) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectDatabaseQueue(ctx context.Context, ref string, input ProjectDatabaseQueueInput) (ProjectDatabaseQueue, error) {
@@ -5358,14 +5372,9 @@ func (s *MemoryStore) ListProjectDatabaseWebhooks(ctx context.Context, ref strin
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	webhooks := cloneDatabaseWebhooks(s.databaseWebhooks[ref])
-	sort.Slice(webhooks, func(i, j int) bool {
-		return webhooks[i].Name < webhooks[j].Name
-	})
-	if webhooks == nil {
-		webhooks = []ProjectDatabaseWebhook{}
-	}
-	return webhooks, nil
+	return cloneAndSortProjectChildList(s.databaseWebhooks[ref], cloneDatabaseWebhooks, func(left, right ProjectDatabaseWebhook) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectDatabaseWebhook(ctx context.Context, ref string, input ProjectDatabaseWebhookInput) (ProjectDatabaseWebhook, error) {
@@ -5418,20 +5427,15 @@ func (s *MemoryStore) ListProjectDatabaseSchemas(ctx context.Context, ref string
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	schemas := cloneDatabaseSchemas(s.databaseSchemas[ref])
-	sort.Slice(schemas, func(i, j int) bool {
-		if schemas[i].ApplyOrder == schemas[j].ApplyOrder {
-			if schemas[i].Name == schemas[j].Name {
-				return schemas[i].Version < schemas[j].Version
+	return cloneAndSortProjectChildList(s.databaseSchemas[ref], cloneDatabaseSchemas, func(left, right ProjectDatabaseSchema) bool {
+		if left.ApplyOrder == right.ApplyOrder {
+			if left.Name == right.Name {
+				return left.Version < right.Version
 			}
-			return schemas[i].Name < schemas[j].Name
+			return left.Name < right.Name
 		}
-		return schemas[i].ApplyOrder < schemas[j].ApplyOrder
-	})
-	if schemas == nil {
-		schemas = []ProjectDatabaseSchema{}
-	}
-	return schemas, nil
+		return left.ApplyOrder < right.ApplyOrder
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectDatabaseSchema(ctx context.Context, ref string, input ProjectDatabaseSchemaInput) (ProjectDatabaseSchema, error) {
@@ -5488,14 +5492,9 @@ func (s *MemoryStore) ListProjectDatabaseRoles(ctx context.Context, ref string) 
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	roles := cloneDatabaseRoles(s.databaseRoles[ref])
-	sort.Slice(roles, func(i, j int) bool {
-		return roles[i].Name < roles[j].Name
-	})
-	if roles == nil {
-		roles = []ProjectDatabaseRole{}
-	}
-	return roles, nil
+	return cloneAndSortProjectChildList(s.databaseRoles[ref], cloneDatabaseRoles, func(left, right ProjectDatabaseRole) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectDatabaseRole(ctx context.Context, ref string, input ProjectDatabaseRoleInput) (ProjectDatabaseRole, error) {
@@ -5548,14 +5547,9 @@ func (s *MemoryStore) ListProjectStorageBuckets(ctx context.Context, ref string)
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	buckets := cloneStorageBuckets(s.storageBuckets[ref])
-	sort.Slice(buckets, func(i, j int) bool {
-		return buckets[i].Name < buckets[j].Name
-	})
-	if buckets == nil {
-		buckets = []ProjectStorageBucket{}
-	}
-	return buckets, nil
+	return cloneAndSortProjectChildList(s.storageBuckets[ref], cloneStorageBuckets, func(left, right ProjectStorageBucket) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectStorageBucket(ctx context.Context, ref string, input ProjectStorageBucketInput) (ProjectStorageBucket, error) {
@@ -5609,14 +5603,9 @@ func (s *MemoryStore) ListProjectVectorBuckets(ctx context.Context, ref string) 
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	buckets := cloneVectorBuckets(s.vectorBuckets[ref])
-	sort.Slice(buckets, func(i, j int) bool {
-		return buckets[i].Name < buckets[j].Name
-	})
-	if buckets == nil {
-		buckets = []ProjectVectorBucket{}
-	}
-	return buckets, nil
+	return cloneAndSortProjectChildList(s.vectorBuckets[ref], cloneVectorBuckets, func(left, right ProjectVectorBucket) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectVectorBucket(ctx context.Context, ref string, input ProjectVectorBucketInput) (ProjectVectorBucket, error) {
@@ -5669,14 +5658,9 @@ func (s *MemoryStore) ListProjectAnalyticsBuckets(ctx context.Context, ref strin
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	buckets := cloneAnalyticsBuckets(s.analyticsBuckets[ref])
-	sort.Slice(buckets, func(i, j int) bool {
-		return buckets[i].Name < buckets[j].Name
-	})
-	if buckets == nil {
-		buckets = []ProjectAnalyticsBucket{}
-	}
-	return buckets, nil
+	return cloneAndSortProjectChildList(s.analyticsBuckets[ref], cloneAnalyticsBuckets, func(left, right ProjectAnalyticsBucket) bool {
+		return left.Name < right.Name
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectAnalyticsBucket(ctx context.Context, ref string, input ProjectAnalyticsBucketInput) (ProjectAnalyticsBucket, error) {
@@ -5758,14 +5742,9 @@ func (s *MemoryStore) ListProjectCDNInvalidations(ctx context.Context, ref strin
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	invalidations := cloneCDNInvalidations(s.cdnInvalidations[ref])
-	sort.Slice(invalidations, func(i, j int) bool {
-		return invalidations[i].CreatedAt.After(invalidations[j].CreatedAt)
-	})
-	if invalidations == nil {
-		invalidations = []CDNInvalidation{}
-	}
-	return invalidations, nil
+	return cloneAndSortProjectChildList(s.cdnInvalidations[ref], cloneCDNInvalidations, func(left, right CDNInvalidation) bool {
+		return left.CreatedAt.After(right.CreatedAt)
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectCDNInvalidation(ctx context.Context, ref string, input CDNInvalidationInput) (CDNInvalidation, error) {
@@ -5839,14 +5818,9 @@ func (s *MemoryStore) ListProjectNetworkConnections(ctx context.Context, ref str
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	connections := cloneNetworkConnections(s.networkConnections[ref])
-	sort.Slice(connections, func(i, j int) bool {
-		return connections[i].CreatedAt.Before(connections[j].CreatedAt)
-	})
-	if connections == nil {
-		connections = []ProjectNetworkConnection{}
-	}
-	return connections, nil
+	return cloneAndSortProjectChildList(s.networkConnections[ref], cloneNetworkConnections, func(left, right ProjectNetworkConnection) bool {
+		return left.CreatedAt.Before(right.CreatedAt)
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectNetworkConnection(ctx context.Context, ref string, input ProjectNetworkConnectionInput) (ProjectNetworkConnection, error) {
@@ -5898,14 +5872,9 @@ func (s *MemoryStore) ListProjectLogDrains(ctx context.Context, ref string) ([]L
 	if _, ok := s.projects[ref]; !ok {
 		return nil, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
-	drains := append([]LogDrain{}, s.logDrains[ref]...)
-	sort.Slice(drains, func(i, j int) bool {
-		return drains[i].CreatedAt.Before(drains[j].CreatedAt)
-	})
-	for index := range drains {
-		drains[index].Config = cloneStringMap(drains[index].Config)
-	}
-	return drains, nil
+	return cloneAndSortProjectChildList(s.logDrains[ref], cloneLogDrains, func(left, right LogDrain) bool {
+		return left.CreatedAt.Before(right.CreatedAt)
+	}), nil
 }
 
 func (s *MemoryStore) CreateProjectLogDrain(ctx context.Context, ref string, input LogDrainInput) (LogDrain, error) {
@@ -5935,6 +5904,41 @@ func (s *MemoryStore) CreateProjectLogDrain(ctx context.Context, ref string, inp
 	}
 	s.logDrains[ref] = append(s.logDrains[ref], drain)
 	return cloneLogDrain(drain), nil
+}
+
+func (s *MemoryStore) UpdateProjectLogDrain(ctx context.Context, ref string, id string, input LogDrainInput) (LogDrain, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return LogDrain{}, fmt.Errorf("log drain id is required")
+	}
+	target, err := normalizeLogDrainTarget(input.Target)
+	if err != nil {
+		return LogDrain{}, err
+	}
+	config, err := normalizeConfigValues(input.Config)
+	if err != nil {
+		return LogDrain{}, err
+	}
+	if err := validateLogDrainConfig(target, config); err != nil {
+		return LogDrain{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.projects[ref]; !ok {
+		return LogDrain{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+	drains := s.logDrains[ref]
+	for index, drain := range drains {
+		if drain.ID == id {
+			drain.Target = target
+			drain.Config = config
+			drains[index] = drain
+			s.logDrains[ref] = drains
+			return cloneLogDrain(drain), nil
+		}
+	}
+	return LogDrain{}, fmt.Errorf("%w: log drain %s for project %s", ErrNotFound, id, ref)
 }
 
 func (s *MemoryStore) DeleteProjectLogDrain(ctx context.Context, ref string, id string) error {
@@ -6842,6 +6846,51 @@ func (s *MemoryStore) RecordProjectTelemetry(ctx context.Context, ref string, in
 	return sample, nil
 }
 
+func (s *MemoryStore) RecordNodeTelemetry(ctx context.Context, hostID string, input NodeTelemetrySampleInput) (NodeTelemetrySample, error) {
+	hostID = strings.TrimSpace(hostID)
+	source := strings.TrimSpace(input.Source)
+	if source == "" {
+		source = "unknown"
+	}
+	if input.CPUPercent < 0 || input.CPUUsedCores < 0 {
+		return NodeTelemetrySample{}, fmt.Errorf("node cpu usage cannot be negative")
+	}
+	if input.CPUCapacityCores < 0 || input.MemoryUsedBytes < 0 || input.MemoryTotalBytes < 0 || input.DiskUsedBytes < 0 || input.DiskTotalBytes < 0 || input.DiskAvailableBytes < 0 || input.NetworkRxBytes < 0 || input.NetworkTxBytes < 0 {
+		return NodeTelemetrySample{}, fmt.Errorf("node telemetry counters cannot be negative")
+	}
+	sampledAt := input.SampledAt.UTC()
+	if sampledAt.IsZero() {
+		sampledAt = time.Now().UTC()
+	}
+	sample := NodeTelemetrySample{
+		HostID:             hostID,
+		Source:             source,
+		CPUPercent:         input.CPUPercent,
+		CPUUsedCores:       input.CPUUsedCores,
+		CPUCapacityCores:   input.CPUCapacityCores,
+		MemoryUsedBytes:    input.MemoryUsedBytes,
+		MemoryTotalBytes:   input.MemoryTotalBytes,
+		DiskUsedBytes:      input.DiskUsedBytes,
+		DiskTotalBytes:     input.DiskTotalBytes,
+		DiskAvailableBytes: input.DiskAvailableBytes,
+		NetworkSampled:     input.NetworkSampled,
+		NetworkRxBytes:     input.NetworkRxBytes,
+		NetworkTxBytes:     input.NetworkTxBytes,
+		SampledAt:          sampledAt,
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.hosts[hostID]; !ok {
+		return NodeTelemetrySample{}, fmt.Errorf("%w: host %s", ErrNotFound, hostID)
+	}
+	if s.nodeTelemetry == nil {
+		s.nodeTelemetry = map[string]NodeTelemetrySample{}
+	}
+	s.nodeTelemetry[hostID] = sample
+	return sample, nil
+}
+
 func (s *MemoryStore) GetFleetMetrics(ctx context.Context) (FleetMetrics, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -6851,6 +6900,7 @@ func (s *MemoryStore) GetFleetMetrics(ctx context.Context) (FleetMetrics, error)
 		Hosts:            len(s.hosts),
 		Projects:         len(s.projects),
 		ProjectsByStatus: map[string]int{},
+		NodeObserved:     []NodeTelemetrySample{},
 		ProjectLogEvents: len(s.projectLogs),
 		AuditEvents:      len(s.auditEvents),
 		AuditVerified:    true,
@@ -6865,75 +6915,22 @@ func (s *MemoryStore) GetFleetMetrics(ctx context.Context) (FleetMetrics, error)
 	for _, host := range s.hosts {
 		metrics.HostCapacity = addHostCapacity(metrics.HostCapacity, host.Capacity)
 		metrics.HostUsed = addHostCapacity(metrics.HostUsed, host.Used)
+		if sample, ok := s.nodeTelemetry[host.ID]; ok {
+			metrics.NodeObserved = append(metrics.NodeObserved, sample)
+		}
 	}
+	sort.Slice(metrics.NodeObserved, func(i, j int) bool {
+		return metrics.NodeObserved[i].SampledAt.After(metrics.NodeObserved[j].SampledAt)
+	})
 	metrics.Observed = telemetryRollup(s.projects, s.telemetry, time.Now().UTC())
-	for _, routes := range s.routes {
-		metrics.Routes += len(routes)
-	}
-	for _, domains := range s.domains {
-		metrics.CustomDomains += len(domains)
-	}
-	for _, drains := range s.logDrains {
-		metrics.LogDrains += len(drains)
-	}
-	for _, functions := range s.functions {
-		metrics.FunctionDeployments += len(functions)
-	}
-	for _, regions := range s.functionRegions {
-		metrics.FunctionRegions += len(regions)
-	}
-	for _, mounts := range s.functionStorageMounts {
-		metrics.FunctionStorageMounts += len(mounts)
-	}
-	for _, pipelines := range s.replicationPipelines {
-		metrics.ReplicationPipelines += len(pipelines)
-	}
-	for _, jobs := range s.embeddingJobs {
-		metrics.EmbeddingJobs += len(jobs)
-	}
-	for _, clients := range s.authClients {
-		metrics.AuthClients += len(clients)
-	}
-	for _, hooks := range s.authHooks {
-		metrics.AuthHooks += len(hooks)
-	}
+	s.addRegisteredProjectChildFleetMetricsLocked(&metrics)
 	for ref := range s.projects {
 		metrics.DatabaseExtensions += countEnabledDatabaseExtensions(ref, s.databaseExtensions[ref])
-	}
-	for _, jobs := range s.databaseCronJobs {
-		metrics.DatabaseCronJobs += len(jobs)
-	}
-	for _, queues := range s.databaseQueues {
-		metrics.DatabaseQueues += len(queues)
-	}
-	for _, webhooks := range s.databaseWebhooks {
-		metrics.DatabaseWebhooks += len(webhooks)
-	}
-	for _, schemas := range s.databaseSchemas {
-		metrics.DatabaseSchemas += len(schemas)
-	}
-	for _, roles := range s.databaseRoles {
-		metrics.DatabaseRoles += len(roles)
-	}
-	for _, buckets := range s.storageBuckets {
-		metrics.StorageBuckets += len(buckets)
-	}
-	for _, buckets := range s.vectorBuckets {
-		metrics.VectorBuckets += len(buckets)
-	}
-	for _, buckets := range s.analyticsBuckets {
-		metrics.AnalyticsBuckets += len(buckets)
 	}
 	for ref, policy := range s.cdnPolicies {
 		if _, ok := s.projects[ref]; ok && policy.Enabled {
 			metrics.CDNEnabledProjects++
 		}
-	}
-	for _, invalidations := range s.cdnInvalidations {
-		metrics.CDNInvalidations += len(invalidations)
-	}
-	for _, connections := range s.networkConnections {
-		metrics.NetworkConnections += len(connections)
 	}
 	for _, backup := range s.backups {
 		metrics.Backups++
@@ -6968,37 +6965,17 @@ func (s *MemoryStore) GetProjectMetrics(ctx context.Context, ref string) (Projec
 		OrgID:        project.OrgID,
 		Status:       project.Status,
 		ResourceTier: project.Spec.ResourceTier,
-		Resources:    resourceReservationForTier(project.Spec.ResourceTier),
+		Resources:    resourceReservationForSpec(project.Spec),
 		SampledAt:    time.Now().UTC(),
 	}
 	if sample, ok := s.telemetry[ref]; ok {
 		metrics.Observed = &sample
 	}
-	metrics.Routes = len(s.routes[ref])
-	metrics.CustomDomains = len(s.domains[ref])
-	metrics.LogDrains = len(s.logDrains[ref])
-	metrics.FunctionDeployments = len(s.functions[ref])
-	metrics.FunctionRegions = len(s.functionRegions[ref])
-	metrics.FunctionStorageMounts = len(s.functionStorageMounts[ref])
-	metrics.ReplicationPipelines = len(s.replicationPipelines[ref])
-	metrics.EmbeddingJobs = len(s.embeddingJobs[ref])
-	metrics.AuthClients = len(s.authClients[ref])
-	metrics.AuthHooks = len(s.authHooks[ref])
+	s.addRegisteredProjectChildMetricsLocked(ref, &metrics)
 	metrics.DatabaseExtensions = countEnabledDatabaseExtensions(ref, s.databaseExtensions[ref])
-	metrics.DatabaseCronJobs = len(s.databaseCronJobs[ref])
-	metrics.DatabaseQueues = len(s.databaseQueues[ref])
-	metrics.DatabaseWebhooks = len(s.databaseWebhooks[ref])
-	metrics.DatabaseSchemas = len(s.databaseSchemas[ref])
-	metrics.DatabaseRoles = len(s.databaseRoles[ref])
-	metrics.StorageBuckets = len(s.storageBuckets[ref])
-	metrics.VectorBuckets = len(s.vectorBuckets[ref])
-	metrics.AnalyticsBuckets = len(s.analyticsBuckets[ref])
-	metrics.CDNInvalidations = len(s.cdnInvalidations[ref])
 	if policy, ok := s.cdnPolicies[ref]; ok {
 		metrics.CDNEnabled = policy.Enabled
 	}
-	metrics.NetworkConnections = len(s.networkConnections[ref])
-	metrics.Secrets = len(s.secrets[ref])
 	for _, replica := range s.replicas[ref] {
 		metrics.ReadReplicas++
 		metrics.Resources = addHostCapacity(metrics.Resources, replicaReservationForTier(replica.Tier))
@@ -7028,7 +7005,7 @@ func (s *MemoryStore) GetProjectMetrics(ctx context.Context, ref string) (Projec
 			metrics.ActivityEvents++
 		}
 	}
-	metrics.DBAllocatedBytes = int64(resourceReservationForTier(project.Spec.ResourceTier).DiskGB) * 1024 * 1024 * 1024
+	metrics.DBAllocatedBytes = int64(resourceReservationForSpec(project.Spec).DiskGB) * 1024 * 1024 * 1024
 	metrics.StorageBytes = metrics.BackupStorageBytes + metrics.WALArchiveBytes
 	return metrics, nil
 }
@@ -7094,8 +7071,33 @@ func validateCreateProject(req CreateProjectRequest) error {
 	if err := validateResourceTier(req.ResourceTier); err != nil {
 		return err
 	}
+	if err := validateResourceSizing(req.CPU, req.RAMMB, req.DiskGB); err != nil {
+		return err
+	}
 	if _, err := normalizeProjectServices(req.Services); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateResourceSizing bounds optional exact-size overrides. A zero value
+// means "use the tier preset" and is always valid; non-zero values must fall
+// within sane platform limits.
+func validateResourceSizing(cpu, ramMB, diskGB int) error {
+	if cpu < 0 || ramMB < 0 || diskGB < 0 {
+		return fmt.Errorf("resource sizing cannot be negative")
+	}
+	if cpu > maxProjectCPU {
+		return fmt.Errorf("cpu cannot exceed %d cores", maxProjectCPU)
+	}
+	if ramMB > 0 && ramMB < minProjectRAMMB {
+		return fmt.Errorf("ram cannot be below %d MB", minProjectRAMMB)
+	}
+	if ramMB > maxProjectRAMMB {
+		return fmt.Errorf("ram cannot exceed %d MB", maxProjectRAMMB)
+	}
+	if diskGB > maxProjectDiskGB {
+		return fmt.Errorf("disk cannot exceed %d GB", maxProjectDiskGB)
 	}
 	return nil
 }
@@ -7207,15 +7209,34 @@ func normalizeConfigValues(values map[string]string) (map[string]string, error) 
 	return out, nil
 }
 
+func validateGeneralConfig(config map[string]string) error {
+	switch strings.ToLower(strings.TrimSpace(config["environment"])) {
+	case "", "development", "production":
+		return nil
+	default:
+		return fmt.Errorf("environment must be development or production")
+	}
+}
+
 func validateNetworkConfig(config map[string]string) error {
-	for _, entry := range splitAllowlist(config["ip_allowlist"]) {
-		if _, err := netip.ParsePrefix(entry); err == nil {
-			continue
+	for _, key := range []string{"http_allowlist", "db_allowlist"} {
+		for _, entry := range splitAllowlist(config[key]) {
+			if _, err := netip.ParsePrefix(entry); err == nil {
+				continue
+			}
+			if _, err := netip.ParseAddr(entry); err == nil {
+				continue
+			}
+			return fmt.Errorf("invalid %s entry %q", key, entry)
 		}
-		if _, err := netip.ParseAddr(entry); err == nil {
-			continue
-		}
-		return fmt.Errorf("invalid ip allowlist entry %q", entry)
+	}
+	switch strings.ToLower(strings.TrimSpace(config["db_ingress_mode"])) {
+	case "", "private", "allowlisted", "public":
+	default:
+		return fmt.Errorf("db_ingress_mode must be private, allowlisted, or public")
+	}
+	if strings.EqualFold(strings.TrimSpace(config["db_ingress_mode"]), "allowlisted") && len(splitAllowlist(config["db_allowlist"])) == 0 {
+		return fmt.Errorf("allowlisted database ingress requires at least one db_allowlist entry")
 	}
 	return nil
 }
@@ -7509,6 +7530,33 @@ func resourceReservationForTier(tier ResourceTier) HostCapacity {
 	return reservation
 }
 
+// resourceReservationForSpec starts from the project's tier preset and applies
+// any exact per-dimension overrides (CPU cores / RAM MB / disk GB) carried on
+// the spec. A zero override means "use the preset", so presets and exact sizing
+// compose cleanly.
+func resourceReservationForSpec(spec ProjectSpec) HostCapacity {
+	reservation := resourceReservationForTier(spec.ResourceTier)
+	if spec.CPU > 0 {
+		reservation.CPU = spec.CPU
+	}
+	if spec.RAMMB > 0 {
+		reservation.RAMMB = spec.RAMMB
+	}
+	if spec.DiskGB > 0 {
+		reservation.DiskGB = spec.DiskGB
+	}
+	return reservation
+}
+
+// EffectiveResourceSizing resolves the CPU cores, RAM (MB), and disk (GB) for a
+// spec by combining its tier preset with any exact per-dimension overrides. It
+// is the single source of truth shared by capacity accounting and the
+// provisioner's optional runtime-limit enforcement.
+func EffectiveResourceSizing(spec ProjectSpec) (cpu int, ramMB int, diskGB int) {
+	reservation := resourceReservationForSpec(spec)
+	return reservation.CPU, reservation.RAMMB, reservation.DiskGB
+}
+
 func replicaReservationForTier(tier ResourceTier) HostCapacity {
 	reservation := resourceReservationForTier(tier)
 	reservation.Project = 0
@@ -7618,7 +7666,6 @@ func hostHasCapacity(host Host, reservation HostCapacity) bool {
 	return capacityWithinLimit(next.CPU, host.Capacity.CPU) &&
 		capacityWithinLimit(next.RAMMB, host.Capacity.RAMMB) &&
 		capacityWithinLimit(next.DiskGB, host.Capacity.DiskGB) &&
-		capacityWithinLimit(next.DiskIOPS, host.Capacity.DiskIOPS) &&
 		capacityWithinLimit(next.Project, host.Capacity.Project)
 }
 
@@ -7645,9 +7692,6 @@ func (s *MemoryStore) validateOrgQuotaLocked(orgID string, reservation HostCapac
 	if !quotaWithinLimit(next.DiskGB, quota.MaxDiskGB) {
 		return fmt.Errorf("%w: org %s disk quota exceeded", ErrConflict, orgID)
 	}
-	if !quotaWithinLimit(next.DiskIOPS, quota.MaxDiskIOPS) {
-		return fmt.Errorf("%w: org %s disk iops quota exceeded", ErrConflict, orgID)
-	}
 	return nil
 }
 
@@ -7662,9 +7706,6 @@ func (s *MemoryStore) validateOrgReplicaQuotaLocked(orgID string, reservation Ho
 	}
 	if !quotaWithinLimit(next.DiskGB, quota.MaxDiskGB) {
 		return fmt.Errorf("%w: org %s disk quota exceeded", ErrConflict, orgID)
-	}
-	if !quotaWithinLimit(next.DiskIOPS, quota.MaxDiskIOPS) {
-		return fmt.Errorf("%w: org %s disk iops quota exceeded", ErrConflict, orgID)
 	}
 	return nil
 }
@@ -7684,9 +7725,6 @@ func (s *MemoryStore) validateProjectScaleQuotaLocked(orgID string, oldReservati
 	if !quotaWithinLimit(next.DiskGB, quota.MaxDiskGB) {
 		return fmt.Errorf("%w: org %s disk quota exceeded", ErrConflict, orgID)
 	}
-	if !quotaWithinLimit(next.DiskIOPS, quota.MaxDiskIOPS) {
-		return fmt.Errorf("%w: org %s disk iops quota exceeded", ErrConflict, orgID)
-	}
 	return nil
 }
 
@@ -7704,7 +7742,7 @@ func (s *MemoryStore) orgUsageLocked(orgID string) HostCapacity {
 	usage := HostCapacity{}
 	for _, project := range s.projects {
 		if project.OrgID == orgID {
-			usage = addHostCapacity(usage, resourceReservationForTier(project.Spec.ResourceTier))
+			usage = addHostCapacity(usage, resourceReservationForSpec(project.Spec))
 		}
 	}
 	for ref, replicas := range s.replicas {
@@ -7779,21 +7817,19 @@ func hashAuditEvent(event AuditEvent) string {
 
 func addHostCapacity(left HostCapacity, right HostCapacity) HostCapacity {
 	return HostCapacity{
-		CPU:      left.CPU + right.CPU,
-		RAMMB:    left.RAMMB + right.RAMMB,
-		DiskGB:   left.DiskGB + right.DiskGB,
-		DiskIOPS: left.DiskIOPS + right.DiskIOPS,
-		Project:  left.Project + right.Project,
+		CPU:     left.CPU + right.CPU,
+		RAMMB:   left.RAMMB + right.RAMMB,
+		DiskGB:  left.DiskGB + right.DiskGB,
+		Project: left.Project + right.Project,
 	}
 }
 
 func subtractHostCapacity(left HostCapacity, right HostCapacity) HostCapacity {
 	return HostCapacity{
-		CPU:      maxInt(0, left.CPU-right.CPU),
-		RAMMB:    maxInt(0, left.RAMMB-right.RAMMB),
-		DiskGB:   maxInt(0, left.DiskGB-right.DiskGB),
-		DiskIOPS: maxInt(0, left.DiskIOPS-right.DiskIOPS),
-		Project:  maxInt(0, left.Project-right.Project),
+		CPU:     maxInt(0, left.CPU-right.CPU),
+		RAMMB:   maxInt(0, left.RAMMB-right.RAMMB),
+		DiskGB:  maxInt(0, left.DiskGB-right.DiskGB),
+		Project: maxInt(0, left.Project-right.Project),
 	}
 }
 
@@ -9313,6 +9349,17 @@ func normalizeNetworkCIDRs(input []string) ([]string, error) {
 	return out, nil
 }
 
+func normalizeOptionalNetworkCIDRs(input []string) ([]string, error) {
+	out, err := normalizeNetworkCIDRs(input)
+	if err != nil {
+		if strings.Contains(err.Error(), "at least one cidr is required") {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
 func isSensitiveProjectConfigKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "api_key", "token", "secret", "password", "access_key", "secret_key", "access_token", "bearer_token", "authorization", "x-api-key":
@@ -9827,6 +9874,25 @@ func cloneAnalyticsBucket(bucket ProjectAnalyticsBucket) ProjectAnalyticsBucket 
 	return bucket
 }
 
+func cloneLogDrains(drains []LogDrain) []LogDrain {
+	out := append([]LogDrain(nil), drains...)
+	for index := range out {
+		out[index] = cloneLogDrain(out[index])
+	}
+	return out
+}
+
+func cloneAndSortProjectChildList[T any](input []T, clone func([]T) []T, less func(T, T) bool) []T {
+	out := clone(input)
+	sort.Slice(out, func(i, j int) bool {
+		return less(out[i], out[j])
+	})
+	if out == nil {
+		return []T{}
+	}
+	return out
+}
+
 func maskFunctionSecrets(secrets map[string]string) map[string]string {
 	masked := map[string]string{}
 	for key, value := range secrets {
@@ -9884,42 +9950,48 @@ func (req CreateProjectRequest) toSpec() ProjectSpec {
 	}
 
 	return ProjectSpec{
-		Ref:          req.Ref,
-		OrgID:        req.OrgID,
-		Name:         req.Name,
-		HostID:       req.HostID,
-		Domain:       strings.TrimSuffix(strings.ToLower(strings.TrimSpace(req.Domain)), "."),
-		StackVersion: strings.TrimSpace(req.StackVersion),
-		Profile:      req.Profile,
-		ResourceTier: req.ResourceTier,
-		Services:     services,
-		Environment:  req.Environment,
+		Ref:           req.Ref,
+		OrgID:         req.OrgID,
+		Name:          req.Name,
+		HostID:        req.HostID,
+		Domain:        strings.TrimSuffix(strings.ToLower(strings.TrimSpace(req.Domain)), "."),
+		StackVersion:  strings.TrimSpace(req.StackVersion),
+		Profile:       req.Profile,
+		ResourceTier:  req.ResourceTier,
+		CPU:           req.CPU,
+		RAMMB:         req.RAMMB,
+		DiskGB:        req.DiskGB,
+		EnforceLimits: req.EnforceLimits,
+		Services:      services,
+		Environment:   req.Environment,
 	}
 }
 
 func defaultPlatformDefaults() PlatformDefaults {
 	now := time.Now().UTC()
 	return PlatformDefaults{
-		Domain:         "supadupa.test",
-		StackVersion:   "latest",
-		Profile:        StackProfileFull,
-		ResourceTier:   ResourceTierSmall,
-		BackupSchedule: "daily",
-		FeatureFlags:   cloneBoolMap(defaultPlatformFeatureFlags),
-		SMTP:           defaultPlatformSMTP(),
-		UpdatedAt:      now,
+		Domain:                      "supadupa.test",
+		StackVersion:                "latest",
+		Profile:                     StackProfileFull,
+		ResourceTier:                ResourceTierSmall,
+		BackupSchedule:              "daily",
+		FeatureFlags:                cloneBoolMap(defaultPlatformFeatureFlags),
+		DatabaseIngressAllowedCIDRs: []string{},
+		SMTP:                        defaultPlatformSMTP(),
+		UpdatedAt:                   now,
 	}
 }
 
 func normalizedPlatformDefaults(defaults PlatformDefaults) PlatformDefaults {
 	input := PlatformDefaultsInput{
-		Domain:         defaults.Domain,
-		StackVersion:   defaults.StackVersion,
-		Profile:        defaults.Profile,
-		ResourceTier:   defaults.ResourceTier,
-		BackupSchedule: defaults.BackupSchedule,
-		FeatureFlags:   defaults.FeatureFlags,
-		SMTP:           defaults.SMTP,
+		Domain:                      defaults.Domain,
+		StackVersion:                defaults.StackVersion,
+		Profile:                     defaults.Profile,
+		ResourceTier:                defaults.ResourceTier,
+		BackupSchedule:              defaults.BackupSchedule,
+		FeatureFlags:                defaults.FeatureFlags,
+		DatabaseIngressAllowedCIDRs: defaults.DatabaseIngressAllowedCIDRs,
+		SMTP:                        defaults.SMTP,
 	}
 	normalized, err := normalizePlatformDefaults(input)
 	if err != nil {
@@ -9979,15 +10051,20 @@ func normalizePlatformDefaults(input PlatformDefaultsInput) (PlatformDefaults, e
 	if err != nil {
 		return PlatformDefaults{}, err
 	}
+	databaseIngressAllowedCIDRs, err := normalizeOptionalNetworkCIDRs(input.DatabaseIngressAllowedCIDRs)
+	if err != nil {
+		return PlatformDefaults{}, fmt.Errorf("database ingress allowlist: %w", err)
+	}
 	return PlatformDefaults{
-		Domain:         normalizedDomain,
-		StackVersion:   stackVersion,
-		Profile:        profile,
-		ResourceTier:   tier,
-		BackupSchedule: schedule,
-		FeatureFlags:   featureFlags,
-		SMTP:           smtp,
-		UpdatedAt:      time.Now().UTC(),
+		Domain:                      normalizedDomain,
+		StackVersion:                stackVersion,
+		Profile:                     profile,
+		ResourceTier:                tier,
+		BackupSchedule:              schedule,
+		FeatureFlags:                featureFlags,
+		DatabaseIngressAllowedCIDRs: databaseIngressAllowedCIDRs,
+		SMTP:                        smtp,
+		UpdatedAt:                   time.Now().UTC(),
 	}, nil
 }
 

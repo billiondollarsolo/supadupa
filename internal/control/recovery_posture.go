@@ -2,8 +2,8 @@ package control
 
 import (
 	"context"
-	"os"
-	"strings"
+
+	"supadupa2026/internal/env"
 )
 
 type recoveryPosture struct {
@@ -19,8 +19,8 @@ func fleetRecoveryPosture(ctx context.Context, store Store) (recoveryPosture, er
 		return recoveryPosture{}, err
 	}
 	posture := recoveryPosture{
-		RecoveryGuardEnabled:       envBoolForPosture("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS"),
-		DurableUpgradeGuardEnabled: envBoolForPosture("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP"),
+		RecoveryGuardEnabled:       env.Bool("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS"),
+		DurableUpgradeGuardEnabled: env.Bool("SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP"),
 	}
 	for _, target := range targets {
 		if target.RecoveryReady {
@@ -31,13 +31,4 @@ func fleetRecoveryPosture(ctx context.Context, store Store) (recoveryPosture, er
 		}
 	}
 	return posture, nil
-}
-
-func envBoolForPosture(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
 }

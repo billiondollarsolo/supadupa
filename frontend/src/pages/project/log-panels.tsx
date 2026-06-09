@@ -1,13 +1,39 @@
 import type { FormEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import type { ColumnDef } from "@tanstack/react-table";
-import { ArrowLeft, Plus, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, Search, X } from "lucide-react";
 import { createProjectLogDrain, deleteProjectLogDrain, streamProjectLogs } from "../../api";
+import { AppPanel } from "../../components/app/app-panel";
 import { DataTable } from "../../components/data-table";
-import { formatDateTime, formatTime } from "../../lib/format";
+import { Button } from "../../components/ui/button";
+import { EmptyState } from "../../components/ui/empty-state";
+import { Field } from "../../components/ui/field";
+import { Input } from "../../components/ui/input";
+import { NativeSelect } from "../../components/ui/native-select";
+import { StatusPill } from "../../components/ui/status-pill";
+import { formatDateTime, formatRelativeTime, formatTime } from "../../lib/format";
+import { statusTone } from "../../lib/status";
 import type { LogDrain, Project, ProjectLog } from "../../types";
+
+// Per-target labels so the generic destination/credential pair reads correctly
+// for the selected target instead of a vague "URL"/"Token".
+const drainTargetFields: Record<string, { destination: { label: string; hint: string; placeholder: string }; credential: { label: string; hint: string; placeholder: string } | null }> = {
+  https: { destination: { label: "Endpoint URL", hint: "HTTPS endpoint that receives log batches", placeholder: "https://logs.example.com/ingest" }, credential: { label: "Bearer token", hint: "Sent as the Authorization header", placeholder: "token" } },
+  loki: { destination: { label: "Push URL", hint: "Loki push API URL", placeholder: "https://loki.example.com/loki/api/v1/push" }, credential: { label: "Token", hint: "Optional bearer token", placeholder: "token" } },
+  datadog: { destination: { label: "Datadog site", hint: "e.g. datadoghq.com or us5.datadoghq.com", placeholder: "datadoghq.com" }, credential: { label: "API key", hint: "Datadog API key", placeholder: "api key" } },
+  sentry: { destination: { label: "DSN", hint: "Sentry ingest DSN", placeholder: "https://key@o0.ingest.sentry.io/0" }, credential: { label: "Token", hint: "Optional auth token", placeholder: "token" } },
+  axiom: { destination: { label: "Ingest URL", hint: "Axiom dataset ingest URL", placeholder: "https://api.axiom.co/v1/datasets/logs/ingest" }, credential: { label: "API token", hint: "Axiom API token", placeholder: "token" } },
+  s3: { destination: { label: "Bucket", hint: "S3 bucket name for archived logs", placeholder: "my-log-bucket" }, credential: { label: "Key prefix", hint: "Optional object key prefix", placeholder: "logs/" } },
+};
+
+// Turn a stored drain config into a human destination summary instead of the
+// opaque "configured" fallback.
+function drainDestination(drain: LogDrain): string {
+  const config = drain.config ?? {};
+  return config.url || config.bucket || config.site || config.dsn || config.endpoint || `${drain.target} export`;
+}
 
 export function LogDrainsPanel({ project, drains, item, loading, enabled }: { project?: Project; drains: LogDrain[]; loading: boolean; enabled: boolean; item?: string }) {
   const queryClient = useQueryClient();
@@ -53,7 +79,7 @@ export function LogDrainsPanel({ project, drains, item, loading, enabled }: { pr
         size: 360,
         cell: ({ row }) => (
           <>
-            <p className="truncate font-mono text-xs text-muted">{row.original.config.url ?? row.original.config.bucket ?? row.original.config.site ?? "configured"}</p>
+            <p className="truncate font-mono text-xs text-muted">{drainDestination(row.original)}</p>
             {row.original.config.prefix ? <p className="cell-sub font-mono">{row.original.config.prefix}</p> : null}
           </>
         ),
@@ -62,23 +88,22 @@ export function LogDrainsPanel({ project, drains, item, loading, enabled }: { pr
         header: "Created",
         accessorKey: "created_at",
         size: 160,
-        cell: ({ row }) => formatDateTime(row.original.created_at),
+        cell: ({ row }) => formatRelativeTime(row.original.created_at),
       },
       {
         header: "",
         id: "actions",
         size: 56,
         cell: ({ row }) => (
-          <button className="icon-button" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, id: row.original.id })} title="Delete drain" type="button">
+          <Button variant="ghost" size="icon" disabled={!project || deleteMutation.isPending} onClick={() => project && deleteMutation.mutate({ ref: project.ref, id: row.original.id })} title="Delete drain" type="button">
             <X size={14} />
-          </button>
+          </Button>
         ),
       },
     ],
     [deleteMutation.isPending, project],
   );
-  const destinationLabel = target === "s3" ? "Bucket" : target === "datadog" ? "Site" : "URL";
-  const credentialLabel = target === "datadog" ? "API key" : target === "s3" ? "Prefix" : "Token";
+  const fields = drainTargetFields[target] ?? drainTargetFields.https;
   const showingCreate = item === "new";
 
   function submit(event: FormEvent) {
@@ -107,68 +132,100 @@ export function LogDrainsPanel({ project, drains, item, loading, enabled }: { pr
   }
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Log drains</p>
-          <h2>{showingCreate ? "New drain" : "External exports"}</h2>
-          <p className="mt-1 text-sm text-muted">{showingCreate ? "Create one external log export." : "Project log exports to external destinations."}</p>
-        </div>
-        {showingCreate ? (
-          <button className="icon-button" onClick={closeCreate} title="Back to drains" type="button">
-            <ArrowLeft size={14} />
-          </button>
-        ) : (
-          <button className="icon-button" disabled={!enabled || !project} onClick={openCreate} title="Add log drain" type="button">
-            <Plus size={14} />
-          </button>
-        )}
-      </div>
+    <AppPanel
+      eyebrow="Log drains"
+      title="External exports"
+      description="Ship this project's logs to external destinations like Datadog, Loki, or an S3 bucket."
+      actions={
+        <Button variant="secondary" disabled={!enabled || !project} onClick={() => (showingCreate ? closeCreate() : openCreate())} type="button">
+          {showingCreate ? <ChevronDown size={14} /> : <Plus size={14} />}
+          Add drain
+        </Button>
+      }
+    >
+      {/* Inline disclosure form so existing drains stay visible while adding. */}
       {showingCreate ? (
-      <form className="mt-4 grid gap-2" onSubmit={submit}>
-        {!enabled ? (
-          <div className="rounded-md border border-border bg-bg p-3">
-            <p className="text-sm font-medium">Log drains disabled</p>
-            <p className="mt-1 text-sm text-muted">Enable the log_drains feature flag for this org before adding external exports.</p>
+        <form className="mt-4 grid gap-2 rounded-md border border-border bg-bg p-3" onSubmit={submit}>
+          {!enabled ? (
+            <div className="rounded-md border border-border bg-surface p-3">
+              <p className="text-sm font-medium">Log drains disabled</p>
+              <p className="mt-1 text-sm text-muted">Enable the log_drains feature flag for this org before adding external exports.</p>
+            </div>
+          ) : null}
+          <div className="grid grid-cols-[160px_minmax(0,1fr)] gap-2 max-sm:grid-cols-1">
+            <Field label="Target type" hint="Where logs are shipped">
+              <NativeSelect disabled={!enabled} value={target} onChange={(event) => setTarget(event.target.value)}>
+                <option value="https">HTTPS</option>
+                <option value="loki">Loki</option>
+                <option value="datadog">Datadog</option>
+                <option value="sentry">Sentry</option>
+                <option value="axiom">Axiom</option>
+                <option value="s3">S3</option>
+              </NativeSelect>
+            </Field>
+            <Field label={fields.destination.label} hint={fields.destination.hint}>
+              <Input className="font-mono" disabled={!enabled} placeholder={fields.destination.placeholder} value={destination} onChange={(event) => setDestination(event.target.value)} />
+            </Field>
           </div>
-        ) : null}
-        <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-2 max-sm:grid-cols-1">
-          <select className="input" disabled={!enabled} value={target} onChange={(event) => setTarget(event.target.value)}>
-            <option value="https">HTTPS</option>
-            <option value="loki">Loki</option>
-            <option value="datadog">Datadog</option>
-            <option value="sentry">Sentry</option>
-            <option value="axiom">Axiom</option>
-            <option value="s3">S3</option>
-          </select>
-          <input className="input font-mono" disabled={!enabled} placeholder={destinationLabel} value={destination} onChange={(event) => setDestination(event.target.value)} />
-        </div>
-        <div className="flex gap-2 max-sm:flex-col">
-          <input className="input font-mono" disabled={!enabled} placeholder={credentialLabel} value={credential} onChange={(event) => setCredential(event.target.value)} />
-          <button className="button secondary justify-center" disabled={!enabled || !project || createMutation.isPending || destination.trim().length === 0} type="submit">
-            <Plus size={14} />
-            Add
-          </button>
-        </div>
-      </form>
-      ) : (
-        <div className="mt-4">
-          <DataTable columns={drainColumns} data={drains} emptyText={loading ? "Loading log drains..." : "No log drains configured."} minWidth={760} />
-        </div>
-      )}
-      <div className="mt-3 grid gap-2">
-        {loading ? <p className="text-sm text-muted">Loading log drains...</p> : null}
+          {fields.credential ? (
+            <Field label={fields.credential.label} hint={fields.credential.hint}>
+              <Input className="font-mono" disabled={!enabled} placeholder={fields.credential.placeholder} value={credential} onChange={(event) => setCredential(event.target.value)} />
+            </Field>
+          ) : null}
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" disabled={createMutation.isPending} onClick={closeCreate} type="button">Cancel</Button>
+            <Button disabled={!enabled || !project || createMutation.isPending || destination.trim().length === 0} type="submit">
+              <Plus size={14} />
+              Add drain
+            </Button>
+          </div>
+        </form>
+      ) : null}
+
+      <div className="mt-4 grid gap-2">
+        {!loading && drains.length === 0 ? (
+          <EmptyState
+            title="No log drains configured"
+            description="Ship this project's logs to an external destination like Datadog, Loki, or an S3 bucket."
+            action={
+              <Button variant="secondary" disabled={!enabled || !project} onClick={openCreate} type="button">
+                <Plus size={14} />
+                Add drain
+              </Button>
+            }
+          />
+        ) : (
+          <DataTable columns={drainColumns} data={drains} emptyText={loading ? "Loading log drains..." : ""} minWidth={760} />
+        )}
         {createMutation.error ? <p className="text-sm text-danger">{createMutation.error.message}</p> : null}
         {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
       </div>
-    </section>
+    </AppPanel>
   );
+}
+
+const LOG_LEVELS = ["error", "warning", "info"] as const;
+
+function streamPill(state: "idle" | "connecting" | "live" | "error"): { tone: "success" | "info" | "danger" | "neutral"; label: string } {
+  switch (state) {
+    case "live":
+      return { tone: "success", label: "streaming live" };
+    case "connecting":
+      return { tone: "info", label: "connecting" };
+    case "error":
+      return { tone: "danger", label: "stream offline" };
+    default:
+      return { tone: "neutral", label: "idle" };
+  }
 }
 
 export function ProjectLogsPanel({ project, logs, loading }: { project?: Project; logs: ProjectLog[]; loading: boolean }) {
   const [liveLogs, setLiveLogs] = useState<ProjectLog[]>([]);
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [streamError, setStreamError] = useState("");
+  const [levelFilter, setLevelFilter] = useState("all");
+  const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const projectRef = project?.ref ?? "";
   useEffect(() => {
     setLiveLogs([]);
@@ -185,7 +242,7 @@ export function ProjectLogsPanel({ project, logs, loading }: { project?: Project
         if (current.some((existing) => existing.id === entry.id)) {
           return current;
         }
-        return [entry, ...current].slice(0, 100);
+        return [entry, ...current].slice(0, 200);
       });
     }, controller.signal).catch((error: Error) => {
       if (error.name === "AbortError") {
@@ -196,79 +253,118 @@ export function ProjectLogsPanel({ project, logs, loading }: { project?: Project
     });
     return () => controller.abort();
   }, [projectRef]);
+
+  // Merge live + historical, dedupe, keep a usable scrollback rather than 20 rows.
   const mergedLogs = useMemo(() => {
     const seen = new Set<string>();
     const next: ProjectLog[] = [];
     for (const entry of [...liveLogs, ...logs]) {
-      if (seen.has(entry.id)) {
-        continue;
-      }
+      if (seen.has(entry.id)) continue;
       seen.add(entry.id);
       next.push(entry);
     }
-    return next.slice(0, 20);
+    return next.slice(0, 200);
   }, [liveLogs, logs]);
-  const streamLabel = streamState === "live" ? "live" : streamState === "connecting" ? "connecting" : streamState === "error" ? "stream offline" : "idle";
-  const logColumns = useMemo<ColumnDef<ProjectLog>[]>(
-    () => [
-      {
-        header: "Level",
-        accessorKey: "level",
-        size: 110,
-        cell: ({ row }) => (
-          <span className="inline-flex items-center gap-2">
-            <span className={`level-dot ${row.original.level}`} />
-            <span className={`pill ${row.original.level === "error" ? "error" : row.original.level === "warning" ? "warning" : "healthy"}`}>{row.original.level}</span>
-          </span>
-        ),
-      },
-      {
-        header: "Event",
-        accessorKey: "message",
-        size: 420,
-        cell: ({ row }) => (
-          <>
-            <p className="cell-main truncate">{row.original.message}</p>
-            {Object.keys(row.original.metadata ?? {}).length > 0 ? (
-              <p className="cell-sub truncate font-mono">{formatMetadata(row.original.metadata)}</p>
-            ) : null}
-          </>
-        ),
-      },
-      {
-        header: "Project",
-        accessorKey: "project_ref",
-        size: 130,
-        cell: ({ row }) => <p className="font-mono text-xs text-muted">{row.original.project_ref}</p>,
-      },
-      {
-        header: "Time",
-        accessorKey: "created_at",
-        size: 120,
-        cell: ({ row }) => <time className="text-xs text-faint">{formatTime(row.original.created_at)}</time>,
-      },
-    ],
-    [],
-  );
+
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return mergedLogs.filter((entry) => {
+      if (levelFilter !== "all" && entry.level !== levelFilter) return false;
+      if (!normalized) return true;
+      const haystack = [entry.message, ...Object.entries(entry.metadata ?? {}).flatMap(([key, value]) => [key, value])];
+      return haystack.some((value) => value.toLowerCase().includes(normalized));
+    });
+  }, [mergedLogs, levelFilter, query]);
+
+  const pill = streamPill(streamState);
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Logs</p>
-          <h2>Project events</h2>
+    <AppPanel eyebrow="Logs" title="Project events" actions={<StatusPill tone={pill.tone} label={pill.label} />}>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <div className="relative w-full max-w-xs">
+          <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" size={14} />
+          <Input aria-label="Search logs" className="pl-8" onChange={(event) => setQuery(event.target.value)} placeholder="Search message or metadata" value={query} />
         </div>
-        <span className={`pill ${streamState === "live" ? "healthy" : streamState === "error" ? "error" : "provisioning"}`}>{streamLabel}</span>
+        <NativeSelect aria-label="Filter by level" className="w-auto" onChange={(event) => setLevelFilter(event.target.value)} value={levelFilter}>
+          <option value="all">All levels</option>
+          {LOG_LEVELS.map((level) => (
+            <option key={level} value={level}>{level}</option>
+          ))}
+        </NativeSelect>
+        <span className="ml-auto text-xs text-faint">Showing {filtered.length} of {mergedLogs.length} events</span>
       </div>
-      <div className="mt-4 grid gap-2">
+
+      <div className="mt-3 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading project logs...</p> : null}
         {streamError ? <p className="text-sm text-danger">{streamError}</p> : null}
-        <DataTable columns={logColumns} data={mergedLogs} emptyText={loading ? "Loading project logs..." : "No project logs yet."} minWidth={780} rowClassName={(entry) => entry.level === "error" ? "table-row-error" : entry.level === "warning" ? "table-row-warning" : ""} />
+        {filtered.length === 0 ? (
+          mergedLogs.length === 0 ? (
+            <EmptyState title="No project logs yet" description="Function invocations, config changes, and backup jobs will stream here as they happen." />
+          ) : (
+            <p className="text-sm text-muted">No logs match the filter.</p>
+          )
+        ) : (
+          <div className="data-table-wrap max-h-[520px] overflow-auto">
+            <table className="data-table w-full" style={{ minWidth: 640 }}>
+              <thead>
+                <tr>
+                  <th style={{ width: 36 }} />
+                  <th style={{ width: 110 }}>Level</th>
+                  <th style={{ width: 420 }}>Event</th>
+                  <th style={{ width: 120 }}>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((entry) => {
+                  const metaEntries = Object.entries(entry.metadata ?? {});
+                  const hasMeta = metaEntries.length > 0;
+                  const open = Boolean(expanded[entry.id]);
+                  const rowClass = entry.level === "error" ? "table-row-error" : entry.level === "warning" ? "table-row-warning" : "";
+                  return (
+                    <Fragment key={entry.id}>
+                      <tr className={rowClass}>
+                        <td>
+                          {hasMeta ? (
+                            <Button aria-expanded={open} aria-label={open ? "Hide metadata" : "Show metadata"} variant="ghost" size="icon" onClick={() => setExpanded((prev) => ({ ...prev, [entry.id]: !prev[entry.id] }))} type="button">
+                              {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </Button>
+                          ) : null}
+                        </td>
+                        <td>
+                          <span className="inline-flex items-center gap-2">
+                            <span className={`level-dot ${entry.level}`} />
+                            <StatusPill tone={statusTone(entry.level)} label={entry.level} />
+                          </span>
+                        </td>
+                        <td>
+                          <p className="cell-main truncate">{entry.message}</p>
+                          {hasMeta && !open ? <p className="cell-sub truncate font-mono">{metaEntries.length} metadata {metaEntries.length === 1 ? "field" : "fields"}</p> : null}
+                        </td>
+                        <td><time className="text-xs text-faint" title={formatDateTime(entry.created_at)}>{formatTime(entry.created_at)}</time></td>
+                      </tr>
+                      {open && hasMeta ? (
+                        <tr className={rowClass}>
+                          <td />
+                          <td colSpan={3}>
+                            <div className="grid grid-cols-[160px_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-md border border-border bg-bg p-3 text-xs">
+                              {metaEntries.map(([key, value]) => (
+                                <Fragment key={key}>
+                                  <span className="text-faint">{key}</span>
+                                  <span className="font-mono break-all text-muted">{value}</span>
+                                </Fragment>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
-    </section>
+    </AppPanel>
   );
-}
-
-function formatMetadata(metadata: Record<string, string>) {
-  return Object.entries(metadata).map(([key, value]) => `${key}=${value}`).join(" · ");
 }

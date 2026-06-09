@@ -3,13 +3,26 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import type { ColumnDef } from "@tanstack/react-table";
-import { ArrowLeft, Play, Plus, Save, ShieldCheck, SlidersHorizontal, TestTube2, Trash2 } from "lucide-react";
+import { ArrowLeft, History, Plus, Save, ShieldCheck, SlidersHorizontal, TestTube2, Trash2 } from "lucide-react";
 import { createBackupStorageTarget, deleteBackupStorageTarget, restorePlatformBackup, testBackupStorageTarget, triggerPlatformBackup, updateBackupStorageTarget, updatePlatformDefaults, updatePlatformSSOConfig, type BackupStorageTargetInput } from "../../api";
 import { DataTable } from "../../components/data-table";
+import { Modal } from "../../components/modal";
+import { AppPanel } from "../../components/app/app-panel";
+import { MetricCard } from "../../components/app/metric-card";
+import { CardButton } from "../../components/ui/card-button";
+import { StatusPill } from "../../components/ui/status-pill";
+import { EmptyState } from "../../components/ui/empty-state";
+import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
+import { NativeSelect } from "../../components/ui/native-select";
+import { Textarea } from "../../components/ui/textarea";
+import { type Tone } from "../../lib/status";
 import { featureFlagGroups } from "../../lib/feature-flags";
 import { formatBytes, formatDateTime, shortChecksum } from "../../lib/format";
+import { parseLines } from "../../lib/parse";
 import { platformSettingsSections, type PlatformSettingsSection } from "../../lib/project-config";
-import type { BackupStorageTarget, PlatformBackup, PlatformDefaults, PlatformSSOConfig, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest } from "../../types";
+import type { BackupStorageTarget, FleetMetrics, PlatformBackup, PlatformDefaults, PlatformSSOConfig, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest } from "../../types";
 
 function backupTargetReadinessLabel(target: BackupStorageTarget) {
   switch (target.readiness_status) {
@@ -28,16 +41,41 @@ function backupTargetReadinessLabel(target: BackupStorageTarget) {
   }
 }
 
-function backupTargetReadinessClass(target: BackupStorageTarget) {
-  if (target.recovery_ready) return "healthy";
-  if (target.readiness_status === "validation-failed" || target.readiness_status === "local-or-loopback" || target.readiness_status === "missing-secret") return "error";
+function backupTargetReadinessTone(target: BackupStorageTarget): Tone {
+  if (target.recovery_ready) return "success";
+  if (target.readiness_status === "validation-failed" || target.readiness_status === "local-or-loopback" || target.readiness_status === "missing-secret") return "danger";
   return "warning";
 }
+
+// One-line explanation per feature flag. Toggling these gates whole UI surfaces
+// and API availability, so each gets a plain-language summary of what it turns on.
+const featureFlagDescriptions: Record<string, string> = {
+  multi_org: "Show the Organizations area (orgs, teams, members, quotas, billing). Off for single-tenant / MVP installs.",
+  team_rbac: "Enable team-scoped roles and permissions within orgs.",
+  project_access_grants: "Grant individual users scoped access to specific projects.",
+  project_self_service: "Let non-admins create and manage their own projects.",
+  supabase_cli_compat: "Expose Supabase-CLI-compatible endpoints for local tooling.",
+  service_toggles: "Allow enabling/disabling individual project services (Auth, Storage, etc.).",
+  custom_domains: "Let projects attach and verify custom domains.",
+  network_restrictions: "Expose per-project IP allowlists for database and API access.",
+  log_drains: "Forward project logs to external sinks (e.g. Datadog, S3).",
+  pitr: "Enable point-in-time recovery and WAL-based restore for projects.",
+  production_posture: "Hold platform-wide recovery posture (backup-target guards, recovery-ready targets) to full advisor severity. Off keeps local/MVP installs from showing high-severity recovery findings.",
+  preview_branches: "Spin up ephemeral database branches for previews.",
+  read_replicas: "Provision and route to read-only Postgres replicas.",
+  edge_functions: "Deploy and manage edge functions per project.",
+  ai_integrations: "Surface AI/vector tooling and embedding jobs.",
+  usage_metering: "Track and display per-project resource usage.",
+  billing: "Enable invoicing and billing surfaces.",
+  platform_sso_scim: "Enable platform-wide SAML SSO and SCIM provisioning for admins.",
+  kubernetes_operator: "Use the Kubernetes operator provisioner instead of Compose.",
+};
 
 export function SettingsPanel({
   defaults,
   sso,
   backupStorageTargets,
+  fleetMetrics,
   platformBackups,
   stackReleases,
   provisionerStatus,
@@ -52,6 +90,7 @@ export function SettingsPanel({
   defaults?: PlatformDefaults;
   sso?: PlatformSSOConfig;
   backupStorageTargets: BackupStorageTarget[];
+  fleetMetrics?: FleetMetrics;
   platformBackups: PlatformBackup[];
   stackReleases: StackReleaseManifest[];
   provisionerStatus?: ProvisionerStatus;
@@ -72,6 +111,7 @@ export function SettingsPanel({
     resource_tier: "small",
     backup_schedule: "daily",
     feature_flags: {} as Record<string, boolean>,
+    database_ingress_allowed_cidrs: "",
     smtp: {
       enabled: false,
       host: "",
@@ -97,6 +137,11 @@ export function SettingsPanel({
     scim_token_configured: false,
     scim_token: "",
   });
+  const [restoreTarget, setRestoreTarget] = useState<PlatformBackup | null>(null);
+  const [restoreConfirmText, setRestoreConfirmText] = useState("");
+  // Target value (true=enabling, false=disabling) for the external-access master
+  // switch confirmation; null when the dialog is closed.
+  const [externalAccessConfirm, setExternalAccessConfirm] = useState<boolean | null>(null);
   const [backupTargetForm, setBackupTargetForm] = useState<BackupStorageTargetInput>({
     name: "",
     type: "s3",
@@ -119,6 +164,7 @@ export function SettingsPanel({
       resource_tier: defaults.resource_tier,
       backup_schedule: defaults.backup_schedule,
       feature_flags: defaults.feature_flags ?? {},
+      database_ingress_allowed_cidrs: (defaults.database_ingress_allowed_cidrs ?? []).join("\n"),
       smtp: {
         enabled: defaults.smtp?.enabled ?? false,
         host: defaults.smtp?.host ?? "",
@@ -187,6 +233,7 @@ export function SettingsPanel({
     mutationFn: updatePlatformDefaults,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["platform-defaults"] });
+      void queryClient.invalidateQueries({ queryKey: ["fleet-metrics"] });
       void queryClient.invalidateQueries({ queryKey: ["audit-events"] });
     },
   });
@@ -281,6 +328,24 @@ export function SettingsPanel({
   const scimAuthScheme = scimServiceProviderConfig?.authenticationSchemes?.[0];
   const provisioner = provisionerStatus?.provisioner ?? "loading";
   const provisionerMode = provisioner === "kubernetes" ? "Kubernetes operator" : provisioner === "compose" ? "Docker Compose" : provisioner;
+  const databaseIngress = fleetMetrics?.database_ingress;
+  const databaseIngressCIDRs = parseLines(form.database_ingress_allowed_cidrs);
+  const databaseIngressPublic = databaseIngress?.public ?? false;
+  const databaseIngressAllowlisted = databaseIngressCIDRs.length > 0;
+  // Host-level bind status. Exposure of an individual database is controlled
+  // per project (Config -> Network), so a published host port is informational,
+  // not a fleet-wide alarm.
+  const databaseIngressTitle = databaseIngressPublic ? "Host ports published" : "Loopback only";
+  const databaseIngressTone: Tone = !databaseIngress ? "neutral" : databaseIngressPublic ? "info" : "neutral";
+  const databaseIngressModeDetail = databaseIngressPublic
+    ? "Database/pooler ports are reachable at the host. Each project is private until opened under its Config → Network."
+    : "Database/pooler ports are loopback-bound, so no project is reachable externally regardless of its per-project setting.";
+  const databaseIngressChangeMode = provisioner === "compose" ? "Deploy-time in Compose" : provisioner === "kubernetes" ? "Cluster networking" : "Provisioner pending";
+  const databaseIngressChangeDetail = provisioner === "compose"
+    ? "Per-project exposure (private / allowlisted / public) is set on each project's Config → Network. This host-level listener bind comes from SUPADUPA_POSTGRES_ADDR / SUPADUPA_POOLER_ADDR and is set at deploy time."
+    : provisioner === "kubernetes"
+      ? "Per-project exposure is set on each project's Config → Network. Host-level direct access is exposed through a Kubernetes service or ingress policy at the cluster level."
+      : "Provisioner status has not loaded yet.";
   const runtimeBackup = runtimeConfig?.backup;
   const recoveryGuardOn = runtimeConfig?.recovery.require_recovery_ready_targets ?? false;
   const durableUpgradeGuardOn = runtimeConfig?.upgrade.require_durable_backup ?? false;
@@ -289,29 +354,29 @@ export function SettingsPanel({
   const recoveryReadyTargets = backupStorageTargets.filter((target) => target.recovery_ready);
   const defaultRecoveryTarget = backupStorageTargets.find((target) => target.default && target.recovery_ready);
   const hostedRecoveryMode = recoveryGuardOn && durableUpgradeGuardOn && backupCommandsReady && backupDryRunOff && recoveryReadyTargets.length > 0;
-  const runtimeGuardRows = [
+  const runtimeGuardRows: Array<{ label: string; value: string; tone: Tone; detail: string }> = [
     {
       label: "Recovery guard",
       value: recoveryGuardOn ? "enforced" : "off",
-      state: recoveryGuardOn ? "healthy" : "warning",
+      tone: recoveryGuardOn ? "success" : "warning",
       detail: recoveryGuardOn ? "Physical backups and WAL archives require tested off-host targets." : "Set SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS=true and restart the API.",
     },
     {
       label: "Upgrade guard",
       value: durableUpgradeGuardOn ? "enforced" : "off",
-      state: durableUpgradeGuardOn ? "healthy" : "warning",
+      tone: durableUpgradeGuardOn ? "success" : "warning",
       detail: durableUpgradeGuardOn ? "Stack upgrades require durable pre-upgrade backup artifacts." : "Set SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP=true for production upgrades.",
     },
     {
       label: "Backup runtime",
       value: backupCommandsReady && backupDryRunOff ? "ready" : runtimeConfig ? "incomplete" : "loading",
-      state: backupCommandsReady && backupDryRunOff ? "healthy" : "warning",
+      tone: backupCommandsReady && backupDryRunOff ? "success" : runtimeConfig ? "warning" : "info",
       detail: runtimeConfig ? `${runtimeConfig.provisioner} · ${runtimeBackup?.compose_defaults ? "Compose defaults" : "custom commands"}${backupDryRunOff ? "" : " · dry-run enabled"}` : "Runtime configuration has not loaded yet.",
     },
     {
       label: "Off-host target",
       value: defaultRecoveryTarget?.name ?? (recoveryReadyTargets.length > 0 ? `${recoveryReadyTargets.length} ready` : "not ready"),
-      state: recoveryReadyTargets.length > 0 ? "healthy" : "warning",
+      tone: recoveryReadyTargets.length > 0 ? "success" : "warning",
       detail: defaultRecoveryTarget ? "Default target is tested and recovery-ready." : recoveryReadyTargets.length > 0 ? "A target is ready; make one default for platform backups." : "Add and test an off-host S3/R2 target.",
     },
   ];
@@ -335,7 +400,7 @@ export function SettingsPanel({
         header: "Status",
         accessorKey: "status",
         size: 120,
-        cell: ({ row }) => <span className={`pill ${row.original.status === "completed" ? "healthy" : "provisioning"}`}>{row.original.status}</span>,
+        cell: ({ row }) => <StatusPill status={row.original.status} />,
       },
       {
         header: "Started",
@@ -369,11 +434,14 @@ export function SettingsPanel({
       {
         header: "",
         id: "actions",
-        size: 52,
+        size: 132,
         cell: ({ row }) => (
-          <button className="icon-button" disabled={platformRestoreMutation.isPending || row.original.status !== "completed"} onClick={() => confirmPlatformRestore(row.original)} title="Restore control plane" type="button">
-            <Play size={14} />
-          </button>
+          <div className="flex justify-end">
+            <Button variant="secondary" disabled={platformRestoreMutation.isPending || row.original.status !== "completed"} onClick={() => openRestoreConfirm(row.original)} title="Restore control plane from this backup" type="button">
+              <History size={14} />
+              Restore
+            </Button>
+          </div>
         ),
       },
     ],
@@ -409,7 +477,7 @@ export function SettingsPanel({
         size: 190,
         cell: ({ row }) => (
           <>
-            <span className={`pill ${backupTargetReadinessClass(row.original)}`}>{backupTargetReadinessLabel(row.original)}</span>
+            <StatusPill tone={backupTargetReadinessTone(row.original)} label={backupTargetReadinessLabel(row.original)} />
             <p className="cell-sub truncate">{row.original.default ? "default" : "available"} · {row.original.secret_configured ? "secret set" : "secret missing"}</p>
             {row.original.readiness_message ? <p className="cell-sub truncate">{row.original.readiness_message}</p> : null}
           </>
@@ -439,12 +507,12 @@ export function SettingsPanel({
         size: 96,
         cell: ({ row }) => (
           <div className="flex justify-end gap-2">
-            <button className="icon-button" disabled={testTargetMutation.isPending} onClick={() => testTargetMutation.mutate(row.original.id)} title="Test target" type="button">
+            <Button variant="ghost" size="icon" disabled={testTargetMutation.isPending} onClick={() => testTargetMutation.mutate(row.original.id)} title="Test target" type="button">
               <TestTube2 size={14} />
-            </button>
-            <button className="icon-button" disabled={deleteTargetMutation.isPending} onClick={() => deleteTargetMutation.mutate(row.original.id)} title="Delete target" type="button">
+            </Button>
+            <Button variant="ghost" size="icon" disabled={deleteTargetMutation.isPending} onClick={() => deleteTargetMutation.mutate(row.original.id)} title="Delete target" type="button">
               <Trash2 size={14} />
-            </button>
+            </Button>
           </div>
         ),
       },
@@ -452,15 +520,58 @@ export function SettingsPanel({
     [deleteTargetMutation.isPending, testTargetMutation.isPending],
   );
 
-  function submit(event: FormEvent) {
+  // The defaults endpoint is a full PUT, so a section save must not silently
+  // clobber fields another section owns. Each section builds its payload from
+  // the persisted server `defaults` (not the in-memory form, which may carry
+  // unsaved edits from elsewhere) and overrides only the fields it edits.
+  function persistedDefaultsPayload(): Omit<PlatformDefaults, "updated_at"> {
+    return {
+      domain: defaults?.domain ?? form.domain,
+      stack_version: defaults?.stack_version ?? form.stack_version,
+      profile: defaults?.profile ?? form.profile,
+      resource_tier: defaults?.resource_tier ?? form.resource_tier,
+      backup_schedule: defaults?.backup_schedule ?? form.backup_schedule,
+      feature_flags: defaults?.feature_flags ?? {},
+      database_ingress_allowed_cidrs: defaults?.database_ingress_allowed_cidrs ?? [],
+      smtp: {
+        enabled: defaults?.smtp?.enabled ?? false,
+        host: defaults?.smtp?.host ?? "",
+        port: defaults?.smtp?.port ?? 587,
+        sender_name: defaults?.smtp?.sender_name ?? "",
+        sender_email: defaults?.smtp?.sender_email ?? "",
+        username: defaults?.smtp?.username ?? "",
+        password_handle: defaults?.smtp?.password_handle ?? "",
+        tls_mode: defaults?.smtp?.tls_mode ?? "starttls",
+      },
+    };
+  }
+
+  function submitDefaults(event: FormEvent) {
     event.preventDefault();
     mutation.mutate({
+      ...persistedDefaultsPayload(),
       domain: form.domain,
       stack_version: form.stack_version,
       profile: form.profile,
       resource_tier: form.resource_tier,
       backup_schedule: form.backup_schedule,
-      feature_flags: form.feature_flags,
+    });
+  }
+
+  function submitFeatureFlags(event: FormEvent) {
+    event.preventDefault();
+    mutation.mutate({ ...persistedDefaultsPayload(), feature_flags: form.feature_flags });
+  }
+
+  function submitDatabaseIngress(event: FormEvent) {
+    event.preventDefault();
+    mutation.mutate({ ...persistedDefaultsPayload(), database_ingress_allowed_cidrs: parseLines(form.database_ingress_allowed_cidrs) });
+  }
+
+  function submitSMTP(event: FormEvent) {
+    event.preventDefault();
+    mutation.mutate({
+      ...persistedDefaultsPayload(),
       smtp: {
         enabled: form.smtp.enabled,
         host: form.smtp.host,
@@ -476,6 +587,13 @@ export function SettingsPanel({
 
   const setSMTPForm = (patch: Partial<typeof form.smtp>) => setForm({ ...form, smtp: { ...form.smtp, ...patch } });
   const setFeatureFlag = (key: string, value: boolean) => setForm({ ...form, feature_flags: { ...form.feature_flags, [key]: value } });
+  const externalAccessEnabled = Boolean(form.feature_flags.database_external_access);
+  function applyExternalAccess(next: boolean) {
+    const feature_flags = { ...form.feature_flags, database_external_access: next };
+    setForm({ ...form, feature_flags });
+    mutation.mutate({ ...persistedDefaultsPayload(), feature_flags });
+    setExternalAccessConfirm(null);
+  }
 
   function submitSSO(event: FormEvent) {
     event.preventDefault();
@@ -546,10 +664,25 @@ export function SettingsPanel({
     createTargetMutation.mutate(input);
   }
 
-  function confirmPlatformRestore(backup: PlatformBackup) {
-    const confirmation = window.prompt(`Restore Supadupa control-plane state from ${backup.id}? Type restore-control-plane to continue.`);
-    if (confirmation !== "restore-control-plane") return;
-    platformRestoreMutation.mutate(backup.id);
+  function openRestoreConfirm(backup: PlatformBackup) {
+    setRestoreConfirmText("");
+    setRestoreTarget(backup);
+  }
+
+  function closeRestoreConfirm() {
+    if (platformRestoreMutation.isPending) return;
+    setRestoreTarget(null);
+    setRestoreConfirmText("");
+  }
+
+  function confirmPlatformRestore() {
+    if (!restoreTarget || restoreConfirmText.trim() !== "restore-control-plane") return;
+    platformRestoreMutation.mutate(restoreTarget.id, {
+      onSuccess: () => {
+        setRestoreTarget(null);
+        setRestoreConfirmText("");
+      },
+    });
   }
 
   function openSection(target: PlatformSettingsSection) {
@@ -561,78 +694,163 @@ export function SettingsPanel({
   }
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Settings</p>
-          <h2>{activeSection.label}</h2>
-          <p className="mt-1 text-sm text-muted">{activeSection.description}</p>
-        </div>
-        <SlidersHorizontal size={15} className="text-faint" />
-      </div>
+    <AppPanel eyebrow="Settings" title={activeSection.label} actions={<SlidersHorizontal size={15} className="text-faint" />}>
+      <p className="mt-1 text-sm text-muted">{activeSection.description}</p>
 
       {section === "overview" ? (
         <div className="mt-4 grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-md:grid-cols-1">
-          <SummaryCard label="Defaults" title={`${form.profile} / ${form.resource_tier}`} detail={`${form.domain} · ${form.stack_version} · ${form.backup_schedule} backups`} onClick={() => openSection("defaults")} />
-          <SummaryCard label="Feature flags" title={`${enabledFeatures} enabled`} detail="Local, Compose, and enterprise feature availability." onClick={() => openSection("features")} />
-          <SummaryCard label="Backups" title={`${backupStorageTargets.length} targets`} detail={`${platformBackups.length} control-plane backups · ${backupStorageTargets.filter((target) => target.default).length} default target`} status={backupStorageTargets.length > 0 ? "healthy" : "paused"} onClick={() => openSection("backups")} />
-          <SummaryCard label="Platform SMTP" title={form.smtp.enabled ? "Enabled" : "Disabled"} detail={form.smtp.enabled ? `${form.smtp.host || "host pending"}:${form.smtp.port} · ${form.smtp.tls_mode}` : "Control-plane mail is not configured."} status={form.smtp.enabled ? "healthy" : "paused"} onClick={() => openSection("smtp")} />
-          <SummaryCard label="Platform SSO" title={ssoForm.enabled ? "Enabled" : "Disabled"} detail={ssoForm.enabled ? `${ssoForm.idp_entity_id || "IdP pending"} · ${ssoForm.email_domain || "any domain"}` : "Password login only."} status={ssoForm.enabled ? "healthy" : "paused"} onClick={() => openSection("sso")} />
-          <SummaryCard label="SCIM" title={ssoForm.scim_enabled ? "Enabled" : "Disabled"} detail={`${scimUsers?.totalResults ?? 0} users · ${scimGroups?.totalResults ?? 0} groups · ${ssoForm.scim_token_configured ? "token set" : "token missing"}`} status={ssoForm.scim_enabled && ssoForm.scim_token_configured ? "healthy" : "paused"} onClick={() => openSection("scim")} />
-          <SummaryCard label="Hosts" title={provisionerMode} detail="Operator-owned capacity and provisioner inventory." status={provisioner === "unconfigured" ? "warning" : provisioner === "loading" ? "paused" : "healthy"} onClick={() => openSection("hosts")} />
+            <SummaryCard
+              label="Database ingress"
+              title={databaseIngressTitle}
+              detail={databaseIngressModeDetail}
+              tone={databaseIngressTone}
+              statusLabel={databaseIngressPublic ? "published" : "loopback"}
+              onClick={() => openSection("db-ingress")}
+            />
+            <SummaryCard
+              label="Backups"
+              title={`${backupStorageTargets.length} ${backupStorageTargets.length === 1 ? "target" : "targets"}`}
+              tone={recoveryReadyTargets.length > 0 ? "success" : backupStorageTargets.length > 0 ? "warning" : "neutral"}
+              statusLabel={recoveryReadyTargets.length > 0 ? "recovery ready" : backupStorageTargets.length > 0 ? "not ready" : "not configured"}
+              metrics={[
+                { label: "Targets", value: String(backupStorageTargets.length) },
+                { label: "Default", value: String(backupStorageTargets.filter((target) => target.default).length) },
+                { label: "Backups", value: String(platformBackups.length) },
+              ]}
+              onClick={() => openSection("backups")}
+            />
+            <SummaryCard
+              label="Platform SMTP"
+              title={defaults?.smtp?.enabled ? "Enabled" : "Disabled"}
+              detail={defaults?.smtp?.enabled ? `${defaults.smtp.host || "host pending"}:${defaults.smtp.port} · ${defaults.smtp.tls_mode}` : "Control-plane mail is not configured."}
+              tone={defaults?.smtp?.enabled ? "success" : "neutral"}
+              statusLabel={defaults?.smtp?.enabled ? "enabled" : "not configured"}
+              onClick={() => openSection("smtp")}
+            />
+            {Boolean(defaults?.feature_flags?.platform_sso_scim) ? (
+              <>
+                <SummaryCard
+                  label="Platform SSO"
+                  title={sso?.enabled ? "Enabled" : "Disabled"}
+                  detail={sso?.enabled ? `${sso.idp_entity_id || "IdP pending"} · ${sso.email_domain || "any domain"}` : "Password login only."}
+                  tone={sso?.enabled ? "success" : "neutral"}
+                  statusLabel={sso?.enabled ? "enabled" : "not configured"}
+                  onClick={() => openSection("sso")}
+                />
+                <SummaryCard
+                  label="SCIM"
+                  title={sso?.scim_enabled ? "Enabled" : "Disabled"}
+                  tone={sso?.scim_enabled ? (sso.scim_token_configured ? "success" : "warning") : "neutral"}
+                  statusLabel={sso?.scim_enabled ? (sso.scim_token_configured ? "enabled" : "token missing") : "not configured"}
+                  metrics={[
+                    { label: "Users", value: String(scimUsers?.totalResults ?? 0) },
+                    { label: "Groups", value: String(scimGroups?.totalResults ?? 0) },
+                    { label: "Token", value: sso?.scim_token_configured ? "set" : "missing" },
+                  ]}
+                  onClick={() => openSection("scim")}
+                />
+              </>
+            ) : null}
+            <SummaryCard label="Defaults" title={`${form.profile} / ${form.resource_tier}`} detail={`${form.domain} · ${form.stack_version} · ${form.backup_schedule} backups`} onClick={() => openSection("defaults")} />
+            <SummaryCard label="Feature flags" title={`${enabledFeatures} of ${Object.keys(form.feature_flags).length || enabledFeatures} enabled`} detail={provisionerMode} onClick={() => openSection("features")} />
         </div>
       ) : null}
 
       {section === "defaults" ? (
-        <form className="mt-4 grid gap-3" onSubmit={submit}>
+        <form className="mt-4 grid gap-3" onSubmit={submitDefaults}>
           <div className="usage-row">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">Provisioner substrate</p>
               <p className="truncate text-xs text-muted">{provisionerMode} · selected by SUPADUPA_PROVISIONER</p>
             </div>
-            <span className={`pill ${provisioner === "unconfigured" ? "warning" : provisioner === "loading" ? "paused" : "healthy"}`}>{provisioner}</span>
+            <StatusPill tone={provisioner === "unconfigured" ? "warning" : provisioner === "loading" ? "info" : "success"} label={provisioner === "loading" ? "loading" : provisioner} />
           </div>
           <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
             <label className="grid gap-1">
               <span className="label">Base domain</span>
-              <input className="input" value={form.domain} onChange={(event) => setForm({ ...form, domain: event.target.value })} />
+              <Input value={form.domain} onChange={(event) => setForm({ ...form, domain: event.target.value })} />
             </label>
             <label className="grid gap-1">
               <span className="label">Stack version</span>
-              <select className="input font-mono" value={form.stack_version} onChange={(event) => setForm({ ...form, stack_version: event.target.value })}>
+              <NativeSelect className="font-mono" value={form.stack_version} onChange={(event) => setForm({ ...form, stack_version: event.target.value })}>
                 <option value="latest">latest{latestRelease ? ` (${latestRelease.version})` : ""}</option>
                 {stackReleases.map((release) => (
                   <option key={release.version} value={release.version}>{release.version}</option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
             <label className="grid gap-1">
               <span className="label">Profile</span>
-              <select className="input" value={form.profile} onChange={(event) => setForm({ ...form, profile: event.target.value })}>
+              <NativeSelect value={form.profile} onChange={(event) => setForm({ ...form, profile: event.target.value })}>
                 <option value="full">Full</option>
                 <option value="essential">Essential</option>
                 <option value="orioledb">OrioleDB</option>
-              </select>
+              </NativeSelect>
             </label>
             <label className="grid gap-1">
               <span className="label">Tier</span>
-              <select className="input" value={form.resource_tier} onChange={(event) => setForm({ ...form, resource_tier: event.target.value })}>
+              <NativeSelect value={form.resource_tier} onChange={(event) => setForm({ ...form, resource_tier: event.target.value })}>
                 <option value="small">Small</option>
                 <option value="medium">Medium</option>
                 <option value="large">Large</option>
-              </select>
+              </NativeSelect>
             </label>
             <label className="grid gap-1">
               <span className="label">Backup schedule</span>
-              <select className="input" value={form.backup_schedule} onChange={(event) => setForm({ ...form, backup_schedule: event.target.value })}>
+              <NativeSelect value={form.backup_schedule} onChange={(event) => setForm({ ...form, backup_schedule: event.target.value })}>
                 <option value="daily">Daily</option>
                 <option value="hourly">Hourly</option>
-              </select>
+              </NativeSelect>
             </label>
           </div>
           <SaveRow disabled={!canSave || mutation.isPending} detail={`${form.stack_version} · ${form.profile} · ${form.resource_tier} · ${form.backup_schedule}`} title="New project defaults" />
           {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
         </form>
+      ) : null}
+
+      {section === "db-ingress" ? (
+        <div className="mt-4 grid gap-3">
+          <div className="rounded-md border border-border bg-bg p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">External database access</p>
+                <p className="mt-0.5 text-xs text-muted">Master switch. When off, every project's database is private fleet-wide regardless of its own setting. When on, each project's own exposure (set per project) applies.</p>
+              </div>
+              <StatusPill tone={externalAccessEnabled ? "warning" : "neutral"} label={externalAccessEnabled ? "enabled" : "disabled"} />
+            </div>
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <p className="text-xs text-faint">Per-project exposure and IP allowlists are configured on each project's Config → Network.</p>
+              <Button
+                variant={externalAccessEnabled ? "secondary" : "default"}
+                disabled={mutation.isPending}
+                onClick={() => setExternalAccessConfirm(!externalAccessEnabled)}
+                type="button"
+              >
+                {externalAccessEnabled ? "Disable external access" : "Enable external access"}
+              </Button>
+            </div>
+          </div>
+          <div className="usage-row">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">Listener exposure</p>
+              <p className="truncate text-xs text-muted">Postgres {databaseIngress?.postgres_addr ?? (loading ? "loading…" : "unknown")} · Pooler {databaseIngress?.pooler_addr ?? (loading ? "loading…" : "unknown")}</p>
+            </div>
+            <StatusPill tone={databaseIngressTone} label={databaseIngressTitle} />
+          </div>
+          <div className="usage-row">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">Exposure mode change</p>
+              <p className="truncate text-xs text-muted">{databaseIngressChangeDetail}</p>
+            </div>
+            <StatusPill tone={provisioner === "compose" ? "warning" : provisioner === "loading" ? "info" : "neutral"} label={databaseIngressChangeMode} />
+          </div>
+          {databaseIngress?.warnings?.length ? (
+            <div className="rounded-md border border-border bg-bg px-3 py-2 text-xs text-muted">
+              {databaseIngress.warnings.join(" · ")}
+            </div>
+          ) : null}
+          {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
+        </div>
       ) : null}
 
       {section === "backups" ? (
@@ -645,14 +863,14 @@ export function SettingsPanel({
               </p>
               <p className="truncate text-xs text-muted">{hostedRecoveryMode ? "Durable off-host backups, WAL archives, PITR, and upgrades are guarded." : "This control plane is still in local/dev recovery mode until every guard below is ready."}</p>
             </div>
-            <span className={`pill ${hostedRecoveryMode ? "healthy" : "warning"}`}>{hostedRecoveryMode ? "production ready" : "not production"}</span>
+            <StatusPill tone={hostedRecoveryMode ? "success" : "warning"} label={hostedRecoveryMode ? "production ready" : "not production"} />
           </div>
           <div className="grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
             {runtimeGuardRows.map((row) => (
               <div className="rounded-md border border-border bg-bg px-3 py-2" key={row.label}>
                 <div className="flex items-center justify-between gap-2">
                   <p className="label">{row.label}</p>
-                  <span className={`pill ${row.state}`}>{row.value}</span>
+                  <StatusPill tone={row.tone} label={row.value} />
                 </div>
                 <p className="mt-2 text-xs text-muted">{row.detail}</p>
               </div>
@@ -663,10 +881,10 @@ export function SettingsPanel({
               <p className="truncate text-sm font-medium">Supadupa control-plane backup</p>
               <p className="truncate text-xs text-muted">{backupStorageTargets.some((target) => target.default) ? "Uses the default S3-compatible target after writing the local encrypted checkpoint artifact." : "Writes a local encrypted checkpoint artifact; add a default target to copy it off-host."}</p>
             </div>
-            <button className="button secondary justify-center" disabled={platformBackupMutation.isPending} onClick={() => platformBackupMutation.mutate()} type="button">
+            <Button variant="secondary" disabled={platformBackupMutation.isPending} onClick={() => platformBackupMutation.mutate()} type="button">
               <Save size={14} />
               {platformBackupMutation.isPending ? "Backing up..." : "Back up now"}
-            </button>
+            </Button>
           </div>
           <div className="grid gap-2">
             <DataTable columns={platformBackupColumns} data={platformBackups.slice(0, 4)} emptyText="No control-plane backups have been recorded." minWidth={980} />
@@ -695,7 +913,7 @@ export function SettingsPanel({
                     <p className="truncate text-sm font-medium">{editingBackupTarget ? `Editing ${editingBackupTarget.name}` : "New S3-compatible target"}</p>
                     <p className="truncate text-xs text-muted">{editingBackupTarget?.secret_configured ? "Secret is configured; leave it blank to keep the current value." : "Secret key is accepted on save and never rendered back."}</p>
                   </div>
-                  <span className="pill">{backupStorageTargets.length} targets</span>
+                  <Badge variant="muted">{backupStorageTargets.length} targets</Badge>
                 </div>
                 <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
                   <BackupTargetInput label="Name" value={backupTargetForm.name} onChange={(value) => setBackupTargetForm({ ...backupTargetForm, name: value })} />
@@ -706,7 +924,7 @@ export function SettingsPanel({
                   <BackupTargetInput label="Access key ID" value={backupTargetForm.access_key_id} onChange={(value) => setBackupTargetForm({ ...backupTargetForm, access_key_id: value })} mono />
                   <label className="grid gap-1">
                     <span className="label">Secret access key</span>
-                    <input className="input font-mono" placeholder={editingBackupTarget ? "unchanged" : ""} type="password" value={backupTargetForm.secret_access_key ?? ""} onChange={(event) => setBackupTargetForm({ ...backupTargetForm, secret_access_key: event.target.value })} />
+                    <Input className="font-mono" placeholder={editingBackupTarget ? "unchanged" : ""} type="password" value={backupTargetForm.secret_access_key ?? ""} onChange={(event) => setBackupTargetForm({ ...backupTargetForm, secret_access_key: event.target.value })} />
                   </label>
                   <div className="grid gap-2 rounded-md border border-border px-3 py-2">
                     <label className="flex items-center justify-between gap-3 text-sm text-muted">
@@ -725,11 +943,11 @@ export function SettingsPanel({
                     <p className="truncate font-mono text-xs text-muted">{backupTargetForm.bucket ? `s3://${backupTargetForm.bucket}/${backupTargetForm.prefix ? `${backupTargetForm.prefix.replace(/^\/+|\/+$/g, "")}/` : ""}projects/{ref}/backups/...` : "Bucket pending"}</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button className="button secondary justify-center" onClick={closeBackupTargetForm} type="button">Cancel</button>
-                    <button className="button secondary justify-center" disabled={!canSaveBackupTarget || createTargetMutation.isPending || updateTargetMutation.isPending} type="submit">
+                    <Button variant="secondary" onClick={closeBackupTargetForm} type="button">Cancel</Button>
+                    <Button variant="secondary" disabled={!canSaveBackupTarget || createTargetMutation.isPending || updateTargetMutation.isPending} type="submit">
                       <Save size={14} />
                       {editingBackupTarget ? "Update" : "Add"}
-                    </button>
+                    </Button>
                   </div>
                 </div>
                 {createTargetMutation.error ? <p className="text-sm text-danger">{createTargetMutation.error.message}</p> : null}
@@ -741,10 +959,10 @@ export function SettingsPanel({
                   <p className="truncate text-sm font-medium">Backup target not found</p>
                   <p className="truncate text-xs text-muted">The target may have been deleted or has not loaded yet.</p>
                 </div>
-                <button className="button secondary justify-center" onClick={closeBackupTargetForm} type="button">
+                <Button variant="secondary" onClick={closeBackupTargetForm} type="button">
                   <ArrowLeft size={14} />
                   Back
-                </button>
+                </Button>
               </div>
             )
           ) : (
@@ -754,9 +972,9 @@ export function SettingsPanel({
                   <p className="truncate text-sm font-medium">Backup targets</p>
                   <p className="truncate text-xs text-muted">S3-compatible destinations for project backups, control-plane backups, and upgrade restore points.</p>
                 </div>
-                <button className="icon-button" onClick={newBackupTarget} title="Add backup target" type="button">
+                <Button variant="ghost" size="icon" onClick={newBackupTarget} title="Add backup target" type="button">
                   <Plus size={14} />
-                </button>
+                </Button>
               </div>
               <DataTable columns={backupTargetColumns} data={backupStorageTargets} emptyText="No S3-compatible targets configured." minWidth={940} />
               {testTargetMutation.error ? <p className="text-sm text-danger">{testTargetMutation.error.message}</p> : null}
@@ -767,22 +985,25 @@ export function SettingsPanel({
       ) : null}
 
       {section === "features" ? (
-        <form className="mt-4 grid gap-3" onSubmit={submit}>
+        <form className="mt-4 grid gap-3" onSubmit={submitFeatureFlags}>
           <div className="usage-row">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">Feature flags</p>
               <p className="truncate text-xs text-muted">Use default org mode for local installs; keep org/team/project RBAC as the access model for enterprise growth.</p>
             </div>
-            <span className="pill">{enabledFeatures} enabled</span>
+            <StatusPill tone={enabledFeatures > 0 ? "info" : "neutral"} label={`${enabledFeatures} enabled`} />
           </div>
           <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-1">
             {featureFlagGroups.map((group) => (
-              <div className="grid gap-2 rounded-md border border-border bg-bg p-3" key={group.label}>
+              <div className="grid gap-3 rounded-md border border-border bg-bg p-3" key={group.label}>
                 <p className="label">{group.label}</p>
                 {group.flags.map(([key, label]) => (
-                  <label className="flex items-center justify-between gap-3 text-sm text-muted" key={key}>
-                    <span>{label}</span>
-                    <input checked={Boolean(form.feature_flags[key])} onChange={(event) => setFeatureFlag(key, event.target.checked)} type="checkbox" />
+                  <label className="flex items-start justify-between gap-3 text-sm text-muted" key={key}>
+                    <span className="min-w-0">
+                      <span className="block font-medium text-text">{label}</span>
+                      {featureFlagDescriptions[key] ? <span className="mt-0.5 block text-xs text-faint">{featureFlagDescriptions[key]}</span> : null}
+                    </span>
+                    <input className="mt-1 shrink-0" checked={Boolean(form.feature_flags[key])} onChange={(event) => setFeatureFlag(key, event.target.checked)} type="checkbox" />
                   </label>
                 ))}
               </div>
@@ -799,28 +1020,28 @@ export function SettingsPanel({
             <div className="usage-row">
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">Platform SMTP</p>
-                <p className="truncate text-xs text-muted">{form.smtp.enabled ? `${form.smtp.sender_email || "sender pending"} via ${form.smtp.host || "host pending"}:${form.smtp.port} · ${form.smtp.tls_mode}` : "No platform SMTP connector is configured."}</p>
+                <p className="truncate text-xs text-muted">{defaults?.smtp?.enabled ? `${defaults.smtp.sender_email || "sender pending"} via ${defaults.smtp.host || "host pending"}:${defaults.smtp.port} · ${defaults.smtp.tls_mode}` : "No platform SMTP connector is configured."}</p>
               </div>
               <div className="flex items-center gap-2">
-                <span className={`pill ${form.smtp.enabled ? "healthy" : "paused"}`}>{form.smtp.enabled ? "enabled" : "not configured"}</span>
-                <button className={form.smtp.enabled ? "button secondary justify-center" : "button justify-center"} onClick={openSMTPForm} type="button">
+                <StatusPill tone={defaults?.smtp?.enabled ? "success" : "neutral"} label={defaults?.smtp?.enabled ? "enabled" : "not configured"} />
+                <Button variant={defaults?.smtp?.enabled ? "secondary" : "default"} onClick={openSMTPForm} type="button">
                   <Plus size={14} />
-                  {form.smtp.enabled ? "Edit SMTP" : "Add SMTP"}
-                </button>
+                  {defaults?.smtp?.enabled ? "Edit SMTP" : "Add SMTP"}
+                </Button>
               </div>
             </div>
           ) : (
-            <form className="grid gap-3" onSubmit={submit}>
+            <form className="grid gap-3" onSubmit={submitSMTP}>
               <div className="usage-row">
                 <div className="min-w-0">
                   <button className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-muted hover:text-text" onClick={closeSMTPForm} type="button">
                     <ArrowLeft size={14} />
                     Platform SMTP
                   </button>
-                  <p className="truncate text-sm font-medium">{form.smtp.enabled ? "Edit SMTP connector" : "Add SMTP connector"}</p>
+                  <p className="truncate text-sm font-medium">{defaults?.smtp?.enabled ? "Edit SMTP connector" : "Add SMTP connector"}</p>
                   <p className="truncate text-xs text-muted">Control-plane mail uses a secret handle; raw passwords stay out of the meta DB payload.</p>
                 </div>
-                <span className={`pill ${form.smtp.enabled ? "healthy" : "paused"}`}>{form.smtp.enabled ? "enabled" : "disabled"}</span>
+                <StatusPill tone={form.smtp.enabled ? "success" : "neutral"} label={form.smtp.enabled ? "enabled (draft)" : "disabled (draft)"} />
               </div>
               <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
                 <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-muted">
@@ -829,11 +1050,11 @@ export function SettingsPanel({
                 </label>
                 <label className="grid gap-1">
                   <span className="label">TLS mode</span>
-                  <select className="input" value={form.smtp.tls_mode} onChange={(event) => setSMTPForm({ tls_mode: event.target.value })}>
+                  <NativeSelect value={form.smtp.tls_mode} onChange={(event) => setSMTPForm({ tls_mode: event.target.value })}>
                     <option value="starttls">STARTTLS</option>
                     <option value="implicit">Implicit TLS</option>
                     <option value="none">None</option>
-                  </select>
+                  </NativeSelect>
                 </label>
                 <SMTPInput label="SMTP host" value={form.smtp.host} onChange={(value) => setSMTPForm({ host: value })} mono />
                 <SMTPInput label="Port" value={form.smtp.port} onChange={(value) => setSMTPForm({ port: value })} mono numeric />
@@ -848,11 +1069,11 @@ export function SettingsPanel({
                   <p className="truncate text-xs text-muted">Password handles must point at secret:// references.</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button className="button secondary justify-center" onClick={closeSMTPForm} type="button">Cancel</button>
-                  <button className="button secondary justify-center" disabled={!canSave || mutation.isPending} type="submit">
+                  <Button variant="secondary" onClick={closeSMTPForm} type="button">Cancel</Button>
+                  <Button variant="secondary" disabled={!canSave || mutation.isPending} type="submit">
                     <Save size={14} />
                     Save SMTP
-                  </button>
+                  </Button>
                 </div>
               </div>
               {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
@@ -867,14 +1088,14 @@ export function SettingsPanel({
             <div className="usage-row">
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">Platform SAML SSO</p>
-                <p className="truncate text-xs text-muted">{ssoForm.enabled ? `${ssoForm.idp_entity_id || "IdP pending"} · ${ssoForm.email_domain || "any domain"} · ${ssoForm.auto_provision ? "auto-provision" : "manual users"}` : "Password login only."}</p>
+                <p className="truncate text-xs text-muted">{sso?.enabled ? `${sso.idp_entity_id || "IdP pending"} · ${sso.email_domain || "any domain"} · ${sso.auto_provision ? "auto-provision" : "manual users"}` : "Password login only."}</p>
               </div>
               <div className="flex items-center gap-2">
-                <span className={`pill ${ssoForm.enabled ? "healthy" : "paused"}`}>{ssoForm.enabled ? "enabled" : "not configured"}</span>
-                <button className={ssoForm.enabled ? "button secondary justify-center" : "button justify-center"} onClick={openSSOForm} type="button">
+                <StatusPill tone={sso?.enabled ? "success" : "neutral"} label={sso?.enabled ? "enabled" : "not configured"} />
+                <Button variant={sso?.enabled ? "secondary" : "default"} onClick={openSSOForm} type="button">
                   <Plus size={14} />
-                  {ssoForm.enabled ? "Edit SSO" : "Add SSO"}
-                </button>
+                  {sso?.enabled ? "Edit SSO" : "Add SSO"}
+                </Button>
               </div>
             </div>
           ) : (
@@ -885,10 +1106,10 @@ export function SettingsPanel({
                     <ArrowLeft size={14} />
                     Platform SSO
                   </button>
-                  <p className="truncate text-sm font-medium">{ssoForm.enabled ? "Edit SAML SSO" : "Add SAML SSO"}</p>
+                  <p className="truncate text-sm font-medium">{sso?.enabled ? "Edit SAML SSO" : "Add SAML SSO"}</p>
                   <p className="truncate text-xs text-muted">{ssoForm.acs_url || "Set the ACS URL exposed by this control plane."}</p>
                 </div>
-                <span className={`pill ${ssoForm.enabled ? "healthy" : "paused"}`}>{ssoForm.enabled ? "enabled" : "disabled"}</span>
+                <StatusPill tone={ssoForm.enabled ? "success" : "neutral"} label={ssoForm.enabled ? "enabled (draft)" : "disabled (draft)"} />
               </div>
               <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
                 <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-muted">
@@ -911,16 +1132,16 @@ export function SettingsPanel({
                 <SSOInput label={ssoForm.scim_token_configured ? "Rotate SCIM token" : "SCIM token"} value={ssoForm.scim_token} onChange={(value) => setSSOForm({ ...ssoForm, scim_token: value })} mono />
                 <label className="grid gap-1">
                   <span className="label">Default role</span>
-                  <select className="input" value={ssoForm.default_role} onChange={(event) => setSSOForm({ ...ssoForm, default_role: event.target.value })}>
+                  <NativeSelect value={ssoForm.default_role} onChange={(event) => setSSOForm({ ...ssoForm, default_role: event.target.value })}>
                     <option value="developer">Developer</option>
                     <option value="viewer">Viewer</option>
                     <option value="admin">Admin</option>
-                  </select>
+                  </NativeSelect>
                 </label>
               </div>
               <label className="grid gap-1">
                 <span className="label">Signing certificate PEM</span>
-                <textarea className="input min-h-24 font-mono text-xs leading-5" value={ssoForm.certificate_pem} onChange={(event) => setSSOForm({ ...ssoForm, certificate_pem: event.target.value })} />
+                <Textarea className="min-h-24 font-mono text-xs leading-5" value={ssoForm.certificate_pem} onChange={(event) => setSSOForm({ ...ssoForm, certificate_pem: event.target.value })} />
               </label>
               <div className="usage-row">
                 <div className="min-w-0">
@@ -928,11 +1149,11 @@ export function SettingsPanel({
                   <p className="truncate text-xs text-muted">{ssoForm.acs_url || "Set the ACS URL exposed by this control plane."}</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button className="button secondary justify-center" onClick={closeSSOForm} type="button">Cancel</button>
-                  <button className="button secondary justify-center" disabled={!canSaveSSO || ssoMutation.isPending} type="submit">
+                  <Button variant="secondary" onClick={closeSSOForm} type="button">Cancel</Button>
+                  <Button variant="secondary" disabled={!canSaveSSO || ssoMutation.isPending} type="submit">
                     <Save size={14} />
                     Save SSO
-                  </button>
+                  </Button>
                 </div>
               </div>
               {ssoMutation.error ? <p className="text-sm text-danger">{ssoMutation.error.message}</p> : null}
@@ -947,38 +1168,123 @@ export function SettingsPanel({
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">Platform SCIM provisioning</p>
               <p className="truncate text-xs text-muted">
-                {scimServiceProviderConfig ? `${scimAuthScheme?.name ?? "Bearer token"} · ${ssoForm.scim_token_configured ? "token configured" : "token missing"} · patch ${scimServiceProviderConfig.patch.supported ? "supported" : "off"}` : "Loading service provider config"}
+                {scimServiceProviderConfig ? `${scimAuthScheme?.name ?? "Bearer token"} · ${sso?.scim_token_configured ? "token configured" : "token missing"} · patch ${scimServiceProviderConfig.patch.supported ? "supported" : "off"}` : "Loading service provider config"}
               </p>
             </div>
-            <span className={`pill ${ssoForm.scim_enabled && ssoForm.scim_token_configured ? "healthy" : "paused"}`}>{ssoForm.scim_enabled ? "enabled" : "disabled"}</span>
+            <div className="flex items-center gap-2">
+              <StatusPill
+                tone={sso?.scim_enabled ? (sso.scim_token_configured ? "success" : "warning") : "neutral"}
+                label={sso?.scim_enabled ? (sso.scim_token_configured ? "enabled" : "token missing") : "not configured"}
+              />
+              <Button variant="secondary" onClick={openSSOForm} type="button">
+                <Plus size={14} />
+                {sso?.scim_enabled ? "Manage in SSO" : "Configure SCIM"}
+              </Button>
+            </div>
           </div>
-          <div className="grid grid-cols-3 gap-2 max-lg:grid-cols-1">
-            <Metric label="Users" value={(scimUsers?.totalResults ?? 0).toString()} />
-            <Metric label="Groups" value={(scimGroups?.totalResults ?? 0).toString()} />
-            <Metric label="Auth" value={ssoForm.scim_token_configured ? scimAuthScheme?.type ?? "oauthbearertoken" : "token missing"} />
-          </div>
-          <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-            <SCIMUsers users={scimUserResources} />
-            <SCIMGroups groups={scimGroupResources} />
-          </div>
+          {!sso?.scim_enabled ? (
+            <EmptyState
+              icon={ShieldCheck}
+              title="SCIM provisioning is not enabled"
+              description="SCIM is configured alongside SAML SSO: enable SCIM and set a bearer token there, then your IdP can sync users and groups into Supadupa. This page is read-only and reflects what the IdP has provisioned."
+              action={
+                <Button onClick={openSSOForm} type="button">
+                  <Plus size={14} />
+                  Enable SCIM in SSO settings
+                </Button>
+              }
+            />
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-2 max-lg:grid-cols-1">
+                <MetricCard label="Users" value={(scimUsers?.totalResults ?? 0).toString()} />
+                <MetricCard label="Groups" value={(scimGroups?.totalResults ?? 0).toString()} />
+                <MetricCard label="Auth" value={sso?.scim_token_configured ? scimAuthScheme?.type ?? "oauthbearertoken" : "token missing"} tone={sso?.scim_token_configured ? "default" : "warning"} />
+              </div>
+              <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
+                <SCIMUsers users={scimUserResources} />
+                <SCIMGroups groups={scimGroupResources} />
+              </div>
+            </>
+          )}
         </div>
       ) : null}
-    </section>
+
+      <Modal
+        description="This overwrites the live control-plane state (orgs, projects, settings) with the contents of this backup and reconciles the runtime. This cannot be undone."
+        footer={
+          <>
+            <Button variant="secondary" disabled={platformRestoreMutation.isPending} onClick={closeRestoreConfirm} type="button">
+              Cancel
+            </Button>
+            <Button variant="danger" disabled={platformRestoreMutation.isPending || restoreConfirmText.trim() !== "restore-control-plane"} onClick={confirmPlatformRestore} type="button">
+              {platformRestoreMutation.isPending ? "Restoring..." : "Restore control plane"}
+            </Button>
+          </>
+        }
+        onClose={closeRestoreConfirm}
+        open={Boolean(restoreTarget)}
+        title="Restore control plane"
+      >
+        <div className="grid gap-3 text-sm text-muted">
+          <div className="rounded-md border border-border bg-bg p-3">
+            <p className="label">Backup</p>
+            <p className="mt-1 truncate text-sm font-medium text-text capitalize">{restoreTarget?.kind}</p>
+            <p className="mt-1 truncate font-mono text-xs text-faint">{restoreTarget?.id}</p>
+          </div>
+          <label className="grid gap-1">
+            <span className="label">Type <span className="font-mono text-text">restore-control-plane</span> to confirm</span>
+            <Input autoFocus className="font-mono" placeholder="restore-control-plane" value={restoreConfirmText} onChange={(event) => setRestoreConfirmText(event.target.value)} />
+          </label>
+          {platformRestoreMutation.error ? <p className="text-sm text-danger">{platformRestoreMutation.error.message}</p> : null}
+        </div>
+      </Modal>
+      <Modal
+        description={externalAccessConfirm ? "This publishes project databases through the edge router, fleet-wide." : "This forces every project's database private, fleet-wide."}
+        footer={
+          <>
+            <Button variant="secondary" disabled={mutation.isPending} onClick={() => setExternalAccessConfirm(null)} type="button">Cancel</Button>
+            <Button variant={externalAccessConfirm ? "default" : "danger"} disabled={mutation.isPending} onClick={() => applyExternalAccess(externalAccessConfirm === true)} type="button">
+              {mutation.isPending ? "Working…" : externalAccessConfirm ? "Enable external access" : "Disable external access"}
+            </Button>
+          </>
+        }
+        onClose={() => !mutation.isPending && setExternalAccessConfirm(null)}
+        open={externalAccessConfirm !== null}
+        title={externalAccessConfirm ? "Enable external database access?" : "Disable external database access?"}
+      >
+        <div className="grid gap-2 text-sm text-muted">
+          {externalAccessConfirm ? (
+            <p>Projects set to <span className="font-mono">public</span> or <span className="font-mono">allowlisted</span> will become reachable per their own settings; projects left private stay private. The host must also publish the database port for external clients to actually connect.</p>
+          ) : (
+            <p>Every project's database becomes unreachable from outside the platform immediately, regardless of its per-project setting. Internal project services are unaffected.</p>
+          )}
+        </div>
+      </Modal>
+    </AppPanel>
   );
 }
 
-function SummaryCard({ detail, label, onClick, status, title }: { label: string; title: string; detail: string; status?: "healthy" | "warning" | "paused"; onClick: () => void }) {
+function SummaryCard({ detail, label, metrics, onClick, statusLabel, title, tone }: { label: string; title: string; detail?: string; metrics?: Array<{ label: string; value: string }>; statusLabel?: string; tone?: Tone; onClick: () => void }) {
   return (
-    <button className="grid min-h-36 content-between gap-4 rounded-md border border-border bg-bg p-3 text-left transition hover:border-border-strong hover:bg-surface-2" onClick={onClick} type="button">
+    <CardButton className="grid min-h-36 content-between gap-4" onClick={onClick}>
       <span className="flex items-start justify-between gap-3">
         <span className="min-w-0">
           <span className="label">{label}</span>
           <span className="mt-1 block truncate text-base font-semibold">{title}</span>
         </span>
-        {status ? <span className={`pill ${status}`}>{status}</span> : null}
+        {tone ? <StatusPill tone={tone} label={statusLabel} /> : null}
       </span>
-      <span className="text-sm text-muted">{detail}</span>
-    </button>
+      {metrics ? (
+        <span className="grid grid-cols-3 gap-1.5 max-sm:grid-cols-2">
+          {metrics.map((metric) => (
+            <MetricCard key={metric.label} label={metric.label} value={metric.value} />
+          ))}
+        </span>
+      ) : detail ? (
+        <span className="text-sm text-muted">{detail}</span>
+      ) : null}
+    </CardButton>
   );
 }
 
@@ -989,10 +1295,10 @@ function SaveRow({ detail, disabled, title }: { title: string; detail: string; d
         <p className="truncate text-sm font-medium">{title}</p>
         <p className="truncate text-xs text-muted">{detail}</p>
       </div>
-      <button className="button secondary justify-center" disabled={disabled} type="submit">
+      <Button variant="secondary" disabled={disabled} type="submit">
         <Save size={14} />
         Save
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1001,7 +1307,7 @@ function SMTPInput({ label, mono = false, numeric = false, onChange, placeholder
   return (
     <label className="grid gap-1">
       <span className="label">{label}</span>
-      <input className={`input ${mono ? "font-mono" : ""}`} inputMode={numeric ? "numeric" : undefined} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
+      <Input className={mono ? "font-mono" : undefined} inputMode={numeric ? "numeric" : undefined} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }
@@ -1010,7 +1316,7 @@ function BackupTargetInput({ label, mono = false, onChange, placeholder, value }
   return (
     <label className="grid gap-1">
       <span className="label">{label}</span>
-      <input className={`input ${mono ? "font-mono" : ""}`} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
+      <Input className={mono ? "font-mono" : undefined} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }
@@ -1019,7 +1325,7 @@ function SSOInput({ label, mono = false, onChange, value }: { label: string; val
   return (
     <label className="grid gap-1">
       <span className="label">{label}</span>
-      <input className={`input ${mono ? "font-mono" : ""}`} value={value} onChange={(event) => onChange(event.target.value)} />
+      <Input className={mono ? "font-mono" : undefined} value={value} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }
@@ -1054,7 +1360,7 @@ function SCIMUsers({ users }: { users: SCIMUser[] }) {
         header: "Status",
         accessorKey: "active",
         size: 120,
-        cell: ({ row }) => <span className={`pill ${row.original.active ? "healthy" : "paused"}`}>{row.original.active ? "active" : "inactive"}</span>,
+        cell: ({ row }) => <StatusPill tone={row.original.active ? "success" : "neutral"} label={row.original.active ? "active" : "inactive"} />,
       },
       {
         header: "Created",
@@ -1104,7 +1410,7 @@ function SCIMGroups({ groups }: { groups: SCIMGroup[] }) {
         header: "Type",
         id: "type",
         size: 140,
-        cell: ({ row }) => <span className="pill">{row.original.meta.resourceType}</span>,
+        cell: ({ row }) => <Badge variant="muted">{row.original.meta.resourceType}</Badge>,
       },
       {
         header: "Created",
@@ -1124,11 +1430,3 @@ function SCIMGroups({ groups }: { groups: SCIMGroup[] }) {
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric-cell">
-      <p className="label">{label}</p>
-      <p className="truncate text-sm font-medium">{value}</p>
-    </div>
-  );
-}

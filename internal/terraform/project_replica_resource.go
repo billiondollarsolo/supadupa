@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
@@ -169,12 +167,8 @@ func (r *projectReplicaResource) Schema(ctx context.Context, req resource.Schema
 }
 
 func (r *projectReplicaResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -231,16 +225,7 @@ func (r *projectReplicaResource) Delete(ctx context.Context, req resource.Delete
 }
 
 func (r *projectReplicaResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, id, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, id, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(id) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/id, for example alpha/replica_123.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strings.TrimSpace(id))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "id", "Use ref/id, for example alpha/replica_123.")
 }
 
 func (r *projectReplicaResource) findReplica(ctx context.Context, ref string, id string, name string) (ProjectReplica, error) {
@@ -249,12 +234,9 @@ func (r *projectReplicaResource) findReplica(ctx context.Context, ref string, id
 		return ProjectReplica{}, err
 	}
 	normalizedName := strings.ToLower(strings.TrimSpace(name))
-	for _, replica := range replicas {
-		if replica.ID == id || (normalizedName != "" && replica.Name == normalizedName) {
-			return replica, nil
-		}
-	}
-	return ProjectReplica{}, ErrNotFound
+	return findInList(replicas, func(replica ProjectReplica) bool {
+		return replica.ID == id || (normalizedName != "" && replica.Name == normalizedName)
+	})
 }
 
 func projectReplicaInputFromModel(model projectReplicaResourceModel) ProjectReplicaInput {

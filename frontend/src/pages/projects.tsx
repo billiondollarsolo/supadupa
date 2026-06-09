@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { listStackReleases } from "../api";
 import { useDashboardContext } from "../lib/dashboard-context";
-import { CreateProjectPanel, ProjectCards, ProjectTable } from "./projects/panels";
+import { CreateProjectPanel, ProjectsListPanel } from "./projects/panels";
 
 export function ProjectsListPage() {
   const { activeRef, hosts, orgs, projectList, projects, routeToProject } = useDashboardContext();
@@ -11,23 +11,14 @@ export function ProjectsListPage() {
   const hostsById = new Map((hosts.data ?? []).map((host) => [host.id, host]));
   return (
     <div className="grid gap-6">
-      <ProjectCards
+      <ProjectsListPanel
         projects={projectList}
         orgNamesById={orgNamesById}
         hostsById={hostsById}
         selectedRef={activeRef}
         onSelect={(ref) => routeToProject(ref)}
-        onAccess={(ref) => routeToProject(ref, "auth")}
         onCreate={() => void navigate({ to: "/projects/new" })}
         loading={projects.isLoading || hosts.isLoading || orgs.isLoading}
-      />
-      <ProjectTable
-        projects={projectList}
-        orgNamesById={orgNamesById}
-        hostsById={hostsById}
-        selectedRef={activeRef}
-        onSelect={(ref) => routeToProject(ref)}
-        loading={projects.isLoading || hosts.isLoading}
       />
     </div>
   );

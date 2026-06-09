@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -133,15 +130,15 @@ func (r *projectReplicationPipelineResource) Schema(ctx context.Context, req res
 }
 
 func (r *projectReplicationPipelineResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectReplicationPipelineResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "id")
 }
 
 func (r *projectReplicationPipelineResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -193,32 +190,7 @@ func (r *projectReplicationPipelineResource) Read(ctx context.Context, req resou
 }
 
 func (r *projectReplicationPipelineResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectReplicationPipelineResourceModel
-	var state projectReplicationPipelineResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := replicationPipelineInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectReplicationPipeline(ctx, state.Ref.ValueString(), state.ID.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project replication pipeline", err.Error())
-		return
-	}
-	pipeline, err := r.client.CreateProjectReplicationPipeline(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project replication pipeline", err.Error())
-		return
-	}
-	setProjectReplicationPipelineState(ctx, &plan, pipeline, input.CredentialHandle, input.Config, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project replication pipeline")
 }
 
 func (r *projectReplicationPipelineResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -235,16 +207,7 @@ func (r *projectReplicationPipelineResource) Delete(ctx context.Context, req res
 }
 
 func (r *projectReplicationPipelineResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, id, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, id, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(id) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/id, for example alpha/pipe_123.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strings.TrimSpace(id))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "id", "Use ref/id, for example alpha/pipe_123.")
 }
 
 func (r *projectReplicationPipelineResource) findReplicationPipeline(ctx context.Context, ref string, id string) (ProjectReplicationPipeline, error) {
@@ -252,12 +215,7 @@ func (r *projectReplicationPipelineResource) findReplicationPipeline(ctx context
 	if err != nil {
 		return ProjectReplicationPipeline{}, err
 	}
-	for _, pipeline := range pipelines {
-		if pipeline.ID == id {
-			return pipeline, nil
-		}
-	}
-	return ProjectReplicationPipeline{}, ErrNotFound
+	return findInList(pipelines, func(pipeline ProjectReplicationPipeline) bool { return pipeline.ID == id })
 }
 
 func replicationPipelineInputFromModel(ctx context.Context, model projectReplicationPipelineResourceModel, addError func(string, string)) (ProjectReplicationPipelineInput, bool) {
@@ -292,9 +250,8 @@ func setProjectReplicationPipelineState(ctx context.Context, model *projectRepli
 	model.CreatedAt = optionalTimeString(pipeline.CreatedAt)
 	model.UpdatedAt = optionalTimeString(pipeline.UpdatedAt)
 
-	config, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(pipeline.Config, previousConfig))
-	if diags.HasError() {
-		addError("Unable to encode config map", diags.Errors()[0].Detail())
+	config, ok := sensitiveStringMapStateValue(ctx, "config", pipeline.Config, previousConfig, addError)
+	if !ok {
 		return
 	}
 	model.Config = config

@@ -2,9 +2,7 @@ package terraform
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -17,18 +15,16 @@ type orgQuotaResource struct {
 }
 
 type orgQuotaResourceModel struct {
-	ID           types.String `tfsdk:"id"`
-	OrgID        types.String `tfsdk:"org_id"`
-	MaxProjects  types.Int64  `tfsdk:"max_projects"`
-	MaxCPU       types.Int64  `tfsdk:"max_cpu"`
-	MaxRAMMB     types.Int64  `tfsdk:"max_ram_mb"`
-	MaxDiskGB    types.Int64  `tfsdk:"max_disk_gb"`
-	MaxDiskIOPS  types.Int64  `tfsdk:"max_disk_iops"`
-	UsedCPU      types.Int64  `tfsdk:"used_cpu"`
-	UsedRAMMB    types.Int64  `tfsdk:"used_ram_mb"`
-	UsedDiskGB   types.Int64  `tfsdk:"used_disk_gb"`
-	UsedDiskIOPS types.Int64  `tfsdk:"used_disk_iops"`
-	UpdatedAt    types.String `tfsdk:"updated_at"`
+	ID          types.String `tfsdk:"id"`
+	OrgID       types.String `tfsdk:"org_id"`
+	MaxProjects types.Int64  `tfsdk:"max_projects"`
+	MaxCPU      types.Int64  `tfsdk:"max_cpu"`
+	MaxRAMMB    types.Int64  `tfsdk:"max_ram_mb"`
+	MaxDiskGB   types.Int64  `tfsdk:"max_disk_gb"`
+	UsedCPU     types.Int64  `tfsdk:"used_cpu"`
+	UsedRAMMB   types.Int64  `tfsdk:"used_ram_mb"`
+	UsedDiskGB  types.Int64  `tfsdk:"used_disk_gb"`
+	UpdatedAt   types.String `tfsdk:"updated_at"`
 }
 
 func NewOrgQuotaResource() resource.Resource {
@@ -56,11 +52,10 @@ func (r *orgQuotaResource) Schema(ctx context.Context, req resource.SchemaReques
 				Description:   "Control-plane organization ID.",
 				PlanModifiers: replace,
 			},
-			"max_projects":  resourceschema.Int64Attribute{Required: true, Description: "Maximum projects allowed for the organization."},
-			"max_cpu":       resourceschema.Int64Attribute{Required: true, Description: "Maximum aggregate CPU units allowed for the organization."},
-			"max_ram_mb":    resourceschema.Int64Attribute{Required: true, Description: "Maximum aggregate RAM in MiB allowed for the organization."},
-			"max_disk_gb":   resourceschema.Int64Attribute{Required: true, Description: "Maximum aggregate disk in GiB allowed for the organization."},
-			"max_disk_iops": resourceschema.Int64Attribute{Required: true, Description: "Maximum aggregate disk IOPS allowed for the organization."},
+			"max_projects": resourceschema.Int64Attribute{Required: true, Description: "Maximum projects allowed for the organization."},
+			"max_cpu":      resourceschema.Int64Attribute{Required: true, Description: "Maximum aggregate CPU units allowed for the organization."},
+			"max_ram_mb":   resourceschema.Int64Attribute{Required: true, Description: "Maximum aggregate RAM in MiB allowed for the organization."},
+			"max_disk_gb":  resourceschema.Int64Attribute{Required: true, Description: "Maximum aggregate disk in GiB allowed for the organization."},
 			"used_cpu": resourceschema.Int64Attribute{
 				Computed:    true,
 				Description: "Current CPU usage counted against the quota.",
@@ -72,10 +67,6 @@ func (r *orgQuotaResource) Schema(ctx context.Context, req resource.SchemaReques
 			"used_disk_gb": resourceschema.Int64Attribute{
 				Computed:    true,
 				Description: "Current disk usage counted against the quota.",
-			},
-			"used_disk_iops": resourceschema.Int64Attribute{
-				Computed:    true,
-				Description: "Current disk IOPS usage counted against the quota.",
 			},
 			"updated_at": resourceschema.StringAttribute{
 				Computed:    true,
@@ -89,12 +80,8 @@ func (r *orgQuotaResource) Schema(ctx context.Context, req resource.SchemaReques
 }
 
 func (r *orgQuotaResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -158,11 +145,7 @@ func (r *orgQuotaResource) Delete(ctx context.Context, req resource.DeleteReques
 }
 
 func (r *orgQuotaResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	if req.ID == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use organization ID, for example org_123.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), req.ID)...)
+	setOnePartImportState(ctx, req.ID, resp, "org_id", "Use organization ID, for example org_123.")
 }
 
 func orgQuotaInputFromModel(model orgQuotaResourceModel) OrgQuotaInput {
@@ -171,7 +154,6 @@ func orgQuotaInputFromModel(model orgQuotaResourceModel) OrgQuotaInput {
 		MaxCPU:      int(model.MaxCPU.ValueInt64()),
 		MaxRAMMB:    int(model.MaxRAMMB.ValueInt64()),
 		MaxDiskGB:   int(model.MaxDiskGB.ValueInt64()),
-		MaxDiskIOPS: int(model.MaxDiskIOPS.ValueInt64()),
 	}
 }
 
@@ -182,10 +164,8 @@ func setOrgQuotaState(model *orgQuotaResourceModel, quota OrgQuota) {
 	model.MaxCPU = types.Int64Value(int64(quota.MaxCPU))
 	model.MaxRAMMB = types.Int64Value(int64(quota.MaxRAMMB))
 	model.MaxDiskGB = types.Int64Value(int64(quota.MaxDiskGB))
-	model.MaxDiskIOPS = types.Int64Value(int64(quota.MaxDiskIOPS))
 	model.UsedCPU = types.Int64Value(int64(quota.Used.CPU))
 	model.UsedRAMMB = types.Int64Value(int64(quota.Used.RAMMB))
 	model.UsedDiskGB = types.Int64Value(int64(quota.Used.DiskGB))
-	model.UsedDiskIOPS = types.Int64Value(int64(quota.Used.DiskIOPS))
 	model.UpdatedAt = optionalTimeString(quota.UpdatedAt)
 }

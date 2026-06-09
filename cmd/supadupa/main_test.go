@@ -71,6 +71,51 @@ func TestBootstrapInitialAdminRequiresEmailAndPasswordTogether(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeSecretsRequiresStrongSecrets(t *testing.T) {
+	err := validateRuntimeSecretsFromEnv(func(string) string { return "" })
+	if err == nil || !strings.Contains(err.Error(), control.PlatformSecretKeyEnv) {
+		t.Fatalf("expected missing platform secret error, got %v", err)
+	}
+
+	values := map[string]string{
+		control.PlatformSecretKeyEnv: "local-dev-secret-change-me",
+		control.AuthSecretEnv:        strings.Repeat("a", 32),
+	}
+	err = validateRuntimeSecretsFromEnv(func(key string) string { return values[key] })
+	if err == nil || !strings.Contains(err.Error(), "known development placeholder") {
+		t.Fatalf("expected placeholder error, got %v", err)
+	}
+	if strings.Contains(err.Error(), values[control.PlatformSecretKeyEnv]) {
+		t.Fatalf("runtime secret error leaked platform secret value: %v", err)
+	}
+
+	values[control.PlatformSecretKeyEnv] = strings.Repeat("p", 32)
+	values[control.AuthSecretEnv] = "short"
+	err = validateRuntimeSecretsFromEnv(func(key string) string { return values[key] })
+	if err == nil || !strings.Contains(err.Error(), "at least 32 characters") {
+		t.Fatalf("expected short auth secret error, got %v", err)
+	}
+	if strings.Contains(err.Error(), values[control.AuthSecretEnv]) {
+		t.Fatalf("runtime secret error leaked auth secret value: %v", err)
+	}
+
+	values[control.AuthSecretEnv] = strings.Repeat("a", 32)
+	if err := validateRuntimeSecretsFromEnv(func(key string) string { return values[key] }); err != nil {
+		t.Fatalf("expected strong secrets to pass, got %v", err)
+	}
+}
+
+func TestValidateRuntimeSecretsAllowsExplicitDevOverride(t *testing.T) {
+	values := map[string]string{
+		"SUPADUPA_ALLOW_DEV_SECRETS": "true",
+		control.PlatformSecretKeyEnv: "",
+		control.AuthSecretEnv:        "",
+	}
+	if err := validateRuntimeSecretsFromEnv(func(key string) string { return values[key] }); err != nil {
+		t.Fatalf("expected dev override to pass, got %v", err)
+	}
+}
+
 func TestBootstrapPlatformDefaultsNoEnvDoesNothing(t *testing.T) {
 	store := control.NewMemoryStore()
 	ctx := context.Background()
@@ -174,6 +219,30 @@ func TestBootstrapDefaultBackupStorageTargetNoEnvDoesNothing(t *testing.T) {
 	}
 	if len(targets) != 0 {
 		t.Fatalf("expected no backup targets without env, got %#v", targets)
+	}
+}
+
+func TestBootstrapDefaultBackupStorageTargetIgnoresSetupComposeEmptyDefaults(t *testing.T) {
+	t.Setenv("SUPADUPA_BACKUP_TARGET_NAME", "")
+	t.Setenv("SUPADUPA_BACKUP_TARGET_ENDPOINT", "")
+	t.Setenv("SUPADUPA_BACKUP_TARGET_REGION", "auto")
+	t.Setenv("SUPADUPA_BACKUP_TARGET_BUCKET", "")
+	t.Setenv("SUPADUPA_BACKUP_TARGET_PREFIX", "supadupa")
+	t.Setenv("SUPADUPA_BACKUP_TARGET_ACCESS_KEY_ID", "")
+	t.Setenv("SUPADUPA_BACKUP_TARGET_SECRET_ACCESS_KEY", "")
+	t.Setenv("SUPADUPA_BACKUP_TARGET_FORCE_PATH_STYLE", "false")
+	t.Setenv("SUPADUPA_BACKUP_TARGET_AUTO_TEST", "false")
+	store := control.NewMemoryStore()
+
+	if err := bootstrapDefaultBackupStorageTarget(context.Background(), store, discardLogger()); err != nil {
+		t.Fatalf("bootstrapDefaultBackupStorageTarget returned error: %v", err)
+	}
+	targets, err := store.ListBackupStorageTargets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("expected setup-compose empty backup target defaults to be ignored, got %#v", targets)
 	}
 }
 
@@ -312,6 +381,31 @@ func TestBootstrapDefaultBackupStorageTargetRequiresCompleteCreateEnv(t *testing
 	}
 }
 
+func enablePlatformDatabaseExternalAccess(ctx context.Context, t *testing.T, store control.Store) {
+	t.Helper()
+	defaults, err := store.GetPlatformDefaults(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := map[string]bool{}
+	for k, v := range defaults.FeatureFlags {
+		flags[k] = v
+	}
+	flags[control.DatabaseExternalAccessFlag] = true
+	if _, err := store.UpdatePlatformDefaults(ctx, control.PlatformDefaultsInput{
+		Domain:                      defaults.Domain,
+		StackVersion:                defaults.StackVersion,
+		Profile:                     defaults.Profile,
+		ResourceTier:                defaults.ResourceTier,
+		BackupSchedule:              defaults.BackupSchedule,
+		FeatureFlags:                flags,
+		DatabaseIngressAllowedCIDRs: defaults.DatabaseIngressAllowedCIDRs,
+		SMTP:                        defaults.SMTP,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReconcileExistingProjectRoutesRepairsStaleRouteFile(t *testing.T) {
 	ctx := context.Background()
 	routesRoot := t.TempDir()
@@ -334,10 +428,12 @@ func TestReconcileExistingProjectRoutesRepairsStaleRouteFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.UpdateProjectConfig(ctx, project.Ref, "network", control.ProjectConfigInput{Config: map[string]string{
-		"ip_allowlist": "10.0.0.0/8",
+		"db_allowlist":    "10.0.0.0/8",
+		"db_ingress_mode": "allowlisted",
 	}}); err != nil {
 		t.Fatal(err)
 	}
+	enablePlatformDatabaseExternalAccess(ctx, t, store)
 	if _, err := store.CreateProjectReplica(ctx, project.Ref, control.ProjectReplicaInput{Name: "east", Region: "us-east-1", Tier: control.ResourceTierSmall}); err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +442,7 @@ func TestReconcileExistingProjectRoutesRepairsStaleRouteFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := reconcileExistingProjectRoutes(ctx, store, discardLogger()); err != nil {
+	if err := reconcileExistingProjectRoutes(ctx, store, nil, discardLogger()); err != nil {
 		t.Fatal(err)
 	}
 

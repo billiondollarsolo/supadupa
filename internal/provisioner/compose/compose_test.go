@@ -69,7 +69,9 @@ func TestCreateRendersProjectFiles(t *testing.T) {
 		"SUPABASE_ANON_KEY: ${ANON_KEY}",
 		"SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}",
 		`command: ["/bin/sh", "-c", "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"]`,
-		"DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@db:5432/_supabase",
+		"DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@alpha-db:5432/_supabase",
+		"POSTGRES_HOST: alpha-db",
+		"SUPABASE_URL: http://alpha-kong:8000",
 		"GLOBAL_S3_BUCKET: ${GLOBAL_S3_BUCKET}",
 		"REQUEST_ALLOW_X_FORWARDED_PATH: ${REQUEST_ALLOW_X_FORWARDED_PATH}",
 		"IMGPROXY_LOCAL_FILESYSTEM_ROOT: /",
@@ -81,18 +83,21 @@ func TestCreateRendersProjectFiles(t *testing.T) {
 		"S3_PROTOCOL_ACCESS_KEY_ID: ${S3_PROTOCOL_ACCESS_KEY_ID}",
 		"SELF_HOST_TENANT_NAME: ${PROJECT_REF}",
 		"./log-drains:/etc/vector/log-drains:ro",
-		"/var/run/docker.sock:/var/run/docker.sock:ro",
-		"supadupa-ingress:",
+		"name: alpha-edge",
 		"egress: {}",
 		"- alpha-db",
 		"- alpha-kong",
 		"- alpha-pooler",
 		"- alpha-studio",
 		"- alpha.supabase-realtime",
+		"security_opt:\n      - no-new-privileges:true",
 	} {
 		if !strings.Contains(string(compose), expected) {
 			t.Fatalf("expected compose to contain %q, got:\n%s", expected, compose)
 		}
+	}
+	if count := strings.Count(string(compose), "- no-new-privileges:true"); count != 13 {
+		t.Fatalf("expected every generated service to set no-new-privileges, got %d occurrences:\n%s", count, compose)
 	}
 	if strings.Contains(string(compose), "ports:") {
 		t.Fatalf("compose should not expose per-service host ports, got:\n%s", compose)
@@ -115,13 +120,15 @@ func TestCreateRendersProjectFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"type: docker_logs",
-		"docker_host: unix:///var/run/docker.sock",
-		"com.docker.compose.project=alpha",
+		"type: internal_logs",
+		`supadupa_log_source = "vector_internal"`,
 	} {
 		if !strings.Contains(string(vector), expected) {
 			t.Fatalf("expected vector config to contain %q, got:\n%s", expected, vector)
 		}
+	}
+	if strings.Contains(string(compose), "/var/run/docker.sock") || strings.Contains(string(vector), "/var/run/docker.sock") || strings.Contains(string(vector), "type: docker_logs") {
+		t.Fatalf("project compose/vector should not use Docker socket by default, got compose:\n%s\nvector:\n%s", compose, vector)
 	}
 	if strings.Contains(string(vector), "/var/log/supadupa") {
 		t.Fatalf("vector config should not tail unused file logs, got:\n%s", vector)
@@ -319,6 +326,118 @@ func TestCreateRendersProjectFiles(t *testing.T) {
 	}
 	if strings.TrimSpace(string(authHooks)) != "[]" {
 		t.Fatalf("expected empty auth hook desired state, got:\n%s", authHooks)
+	}
+}
+
+func TestCreateRendersDatabaseLimitsOnlyWhenEnforced(t *testing.T) {
+	// Default: no enforcement -> no deploy limits emitted.
+	root := t.TempDir()
+	if err := NewWithOptions(Options{RootDir: root}).Create(context.Background(), control.ProjectSpec{
+		Ref: "noenforce", Domain: "supadupa.test", StackVersion: "15.8.1.060", ResourceTier: control.ResourceTierMedium,
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	compose, err := os.ReadFile(filepath.Join(root, "noenforce", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(compose), "limits:") {
+		t.Fatalf("expected no deploy limits without enforcement:\n%s", compose)
+	}
+
+	// Enforced with an exact override -> deploy limits reflect the override, not
+	// the medium-tier preset (2 CPU / 4096M).
+	root2 := t.TempDir()
+	if err := NewWithOptions(Options{RootDir: root2}).Create(context.Background(), control.ProjectSpec{
+		Ref: "enforced", Domain: "supadupa.test", StackVersion: "15.8.1.060",
+		ResourceTier: control.ResourceTierMedium, CPU: 3, RAMMB: 6144, EnforceLimits: true,
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	compose2, err := os.ReadFile(filepath.Join(root2, "enforced", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"deploy:", "resources:", "limits:", `cpus: "3"`, "memory: 6144M"} {
+		if !strings.Contains(string(compose2), expected) {
+			t.Fatalf("expected enforced limit %q in compose:\n%s", expected, compose2)
+		}
+	}
+}
+
+func TestCreateRendersHostBindMountsWhenHostRootConfigured(t *testing.T) {
+	root := t.TempDir()
+	hostRoot := "/var/lib/supadupa/projects"
+	provisioner := NewWithOptions(Options{RootDir: root, HostRootDir: hostRoot})
+
+	spec := control.ProjectSpec{
+		Ref:          "alpha",
+		Domain:       "supadupa.test",
+		StackVersion: "15.8.1.060",
+	}
+	if err := provisioner.Create(context.Background(), spec); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	compose, err := os.ReadFile(filepath.Join(root, "alpha", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"/var/lib/supadupa/projects/alpha/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro",
+		"/var/lib/supadupa/projects/alpha/00-supadupa-init.sql:/etc/postgresql.schema.sql:ro",
+		"/var/lib/supadupa/projects/alpha/kong.yml:/home/kong/kong.yml:ro",
+		"/var/lib/supadupa/projects/alpha/kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro",
+		"/var/lib/supadupa/projects/alpha/functions:/home/deno/functions",
+		"/var/lib/supadupa/projects/alpha/pooler.exs:/etc/pooler/pooler.exs:ro",
+		"/var/lib/supadupa/projects/alpha/vector.yml:/etc/vector/vector.yml:ro",
+		"/var/lib/supadupa/projects/alpha/log-drains:/etc/vector/log-drains:ro",
+	} {
+		if !strings.Contains(string(compose), expected) {
+			t.Fatalf("expected compose to contain %q, got:\n%s", expected, compose)
+		}
+	}
+	for _, unexpected := range []string{
+		"./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro",
+		"./functions:/home/deno/functions",
+		"./log-drains:/etc/vector/log-drains:ro",
+	} {
+		if strings.Contains(string(compose), unexpected) {
+			t.Fatalf("expected host-root mode to avoid relative mount %q, got:\n%s", unexpected, compose)
+		}
+	}
+}
+
+func TestCreateCanOptIntoProjectDockerLogCollection(t *testing.T) {
+	root := t.TempDir()
+	provisioner := NewWithOptions(Options{RootDir: root, ProjectDockerLogs: true})
+
+	spec := control.ProjectSpec{
+		Ref:          "alpha",
+		Domain:       "supadupa.test",
+		StackVersion: "15.8.1.060",
+	}
+	if err := provisioner.Create(context.Background(), spec); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	compose, err := os.ReadFile(filepath.Join(root, "alpha", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vector, err := os.ReadFile(filepath.Join(root, "alpha", "vector.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"/var/run/docker.sock:/var/run/docker.sock:ro",
+		"type: docker_logs",
+		"docker_host: unix:///var/run/docker.sock",
+		"com.docker.compose.project=alpha",
+	} {
+		if !strings.Contains(string(compose)+"\n"+string(vector), expected) {
+			t.Fatalf("expected Docker log opt-in output to contain %q, got compose:\n%s\nvector:\n%s", expected, compose, vector)
+		}
 	}
 }
 
@@ -595,6 +714,21 @@ func TestDestroyWithOptionsRetainsVolumeManifest(t *testing.T) {
 	}
 }
 
+func TestDestroySkipsComposeDownWhenProjectWasNeverRendered(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "alpha", "functions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	provisioner := NewWithOptions(Options{RootDir: root, Apply: true, Command: "definitely-missing-compose-command"})
+
+	if err := provisioner.Destroy(context.Background(), "alpha"); err != nil {
+		t.Fatalf("destroy failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "alpha")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected partial project dir removed, got err=%v", err)
+	}
+}
+
 func TestSyncSecretsUpdatesManagedValuesAndPreservesGeneratedEnv(t *testing.T) {
 	root := t.TempDir()
 	provisioner := NewWithOptions(Options{RootDir: root})
@@ -801,10 +935,13 @@ func TestSyncServicesUpdatesComposeKongAndEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"type: docker_logs", "docker_host: unix:///var/run/docker.sock", "com.docker.compose.project=alpha"} {
+	for _, expected := range []string{"type: internal_logs", `supadupa_log_source = "vector_internal"`} {
 		if !strings.Contains(string(vector), expected) {
 			t.Fatalf("expected sync services to refresh vector config with %q, got:\n%s", expected, vector)
 		}
+	}
+	if strings.Contains(string(vector), "/var/run/docker.sock") || strings.Contains(string(vector), "type: docker_logs") {
+		t.Fatalf("sync services should keep Docker log collection disabled by default, got:\n%s", vector)
 	}
 }
 
@@ -905,6 +1042,8 @@ func TestCreateApplyRunsDatabaseBootstrap(t *testing.T) {
 		"up -d --scale pooler=0",
 		"up -d --force-recreate pooler",
 		"up -d pooler",
+		"exec -T pooler sh -lc PGPASSWORD=\"$POSTGRES_PASSWORD\" psql -h 127.0.0.1 -p '5432' -U 'postgres.alpha'",
+		"exec -T pooler sh -lc PGPASSWORD=\"$POSTGRES_PASSWORD\" psql -h 127.0.0.1 -p '6543' -U 'postgres.alpha'",
 	} {
 		if !strings.Contains(string(logs), expected) {
 			t.Fatalf("expected compose command log to contain %q, got:\n%s", expected, logs)
@@ -920,6 +1059,43 @@ func TestCreateApplyRunsDatabaseBootstrap(t *testing.T) {
 		poolerRecreateIndex < 0 || dbUpIndex > bootstrapIndex || bootstrapIndex > fullUpIndex || fullUpIndex > poolerUpIndex ||
 		poolerUpIndex > secondBootstrapIndex || secondBootstrapIndex > poolerRecreateIndex {
 		t.Fatalf("expected create to start db, bootstrap, start non-pooler stack, start pooler, bootstrap again, then force-recreate pooler, got:\n%s", logs)
+	}
+	sessionReadyIndex := strings.Index(string(logs), "psql -h 127.0.0.1 -p '5432'")
+	transactionReadyIndex := strings.Index(string(logs), "psql -h 127.0.0.1 -p '6543'")
+	if sessionReadyIndex <= poolerRecreateIndex || transactionReadyIndex <= sessionReadyIndex {
+		t.Fatalf("expected create to probe session then transaction pooler listeners after pooler recreate, got:\n%s", logs)
+	}
+}
+
+func TestWaitForComposeServiceRunningToleratesTransientRestart(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("SUPADUPA_COMPOSE_SERVICE_START_TIMEOUT_SECONDS", "1")
+	t.Setenv("SUPADUPA_COMPOSE_SERVICE_POLL_INTERVAL_SECONDS", "0")
+	countPath := filepath.Join(root, "pooler-ps-count")
+	provisioner := NewWithOptions(Options{
+		RootDir: root,
+		Apply:   true,
+		Command: fakeComposeCommandWithTransientPoolerRestart(t, countPath),
+	})
+
+	if err := provisioner.waitForComposeServiceRunning(context.Background(), root, "alpha", "pooler", 0); err != nil {
+		t.Fatalf("expected transient restarting service to become ready: %v", err)
+	}
+}
+
+func TestWaitForPoolerConnectionsRetriesUntilListenersAcceptQueries(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("SUPADUPA_POOLER_CONNECTION_READY_TIMEOUT_SECONDS", "1")
+	t.Setenv("SUPADUPA_COMPOSE_SERVICE_POLL_INTERVAL_SECONDS", "0")
+	countPath := filepath.Join(root, "pooler-ready-count")
+	provisioner := NewWithOptions(Options{
+		RootDir: root,
+		Apply:   true,
+		Command: fakeComposeCommandWithTransientPoolerConnection(t, countPath),
+	})
+
+	if err := provisioner.waitForPoolerConnections(context.Background(), root, "alpha"); err != nil {
+		t.Fatalf("expected transient pooler connection failure to become ready: %v", err)
 	}
 }
 
@@ -938,6 +1114,47 @@ func fakeComposeCommandWithStderr(t *testing.T, psOutput string, stderrOutput st
 		"    exit 0\n" +
 		"  fi\n" +
 		"done\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func fakeComposeCommandWithTransientPoolerRestart(t *testing.T, countPath string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-compose")
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *\"ps --format json pooler\"*)\n" +
+		"    if [ ! -f " + shellQuote(countPath) + " ]; then\n" +
+		"      printf 1 > " + shellQuote(countPath) + "\n" +
+		"      printf '{\"Service\":\"pooler\",\"State\":\"restarting\"}\\n'\n" +
+		"    else\n" +
+		"      printf '{\"Service\":\"pooler\",\"State\":\"running\"}\\n'\n" +
+		"    fi\n" +
+		"    exit 0 ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func fakeComposeCommandWithTransientPoolerConnection(t *testing.T, countPath string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-compose")
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *\"exec -T pooler sh -lc\"*)\n" +
+		"    count=0\n" +
+		"    if [ -f " + shellQuote(countPath) + " ]; then count=$(cat " + shellQuote(countPath) + "); fi\n" +
+		"    count=$((count + 1))\n" +
+		"    printf '%s' \"$count\" > " + shellQuote(countPath) + "\n" +
+		"    if [ \"$count\" -eq 1 ]; then echo 'pooler not ready' >&2; exit 1; fi\n" +
+		"    exit 0 ;;\n" +
+		"esac\n" +
 		"exit 0\n"
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -1538,6 +1755,64 @@ func TestStatusUsesLiveComposePSWhenApplyEnabled(t *testing.T) {
 	assertRuntimeService(t, status.Services, "edge-runtime", false, "disabled")
 }
 
+func TestStatusTreatsRenderedReplicasAsExpectedLiveServices(t *testing.T) {
+	root := t.TempDir()
+	renderer := NewWithOptions(Options{RootDir: root})
+	if err := renderer.Create(context.Background(), control.ProjectSpec{
+		Ref:    "alpha",
+		Domain: "supadupa.test",
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	replicas := []control.ProjectReplica{
+		{
+			ID:         "replica-one",
+			ProjectRef: "alpha",
+			Name:       "east",
+			Tier:       control.ResourceTierSmall,
+		},
+	}
+	if err := renderer.SyncReplicas(context.Background(), "alpha", replicas); err != nil {
+		t.Fatalf("sync replicas failed: %v", err)
+	}
+	psOutput := `{"Service":"db","State":"running","Health":"healthy"}
+{"Service":"kong","State":"running","Health":"healthy"}
+{"Service":"meta","State":"running","Health":"healthy"}
+{"Service":"auth","State":"running"}
+{"Service":"rest","State":"running"}
+{"Service":"realtime","State":"running"}
+{"Service":"storage","State":"running"}
+{"Service":"imgproxy","State":"running"}
+{"Service":"edge-runtime","State":"running"}
+{"Service":"pooler","State":"running"}
+{"Service":"studio","State":"running","Health":"healthy"}
+{"Service":"analytics","State":"running"}
+{"Service":"vector","State":"running"}
+{"Service":"db-replica-east","State":"running","Health":"healthy"}`
+	provisioner := NewWithOptions(Options{RootDir: root, Apply: true, Command: fakeComposeCommand(t, psOutput)})
+
+	status, err := provisioner.Status(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.Phase != control.ProjectHealthy || status.Message != "compose project running" {
+		t.Fatalf("expected live healthy status with replica, got %#v", status)
+	}
+	assertRuntimeService(t, status.Services, "db-replica-east", true, "running")
+
+	if err := renderer.SyncReplicas(context.Background(), "alpha", nil); err != nil {
+		t.Fatalf("sync empty replicas failed: %v", err)
+	}
+	status, err = provisioner.Status(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("stale replica status should report drift without error: %v", err)
+	}
+	if status.Phase != control.ProjectDegraded || !strings.Contains(status.Message, "unexpected live services db-replica-east=running") {
+		t.Fatalf("expected stale replica drift, got %#v", status)
+	}
+	assertRuntimeService(t, status.Services, "db-replica-east", false, "running")
+}
+
 func TestStatusIgnoresComposeWarningsOnStderrWhenParsingLivePS(t *testing.T) {
 	root := t.TempDir()
 	renderer := NewWithOptions(Options{RootDir: root})
@@ -1601,6 +1876,38 @@ func TestStatusReportsLiveComposeDrift(t *testing.T) {
 	}
 	assertRuntimeService(t, status.Services, "kong", true, "exited")
 	assertRuntimeService(t, status.Services, "auth", true, "missing")
+}
+
+func TestStatusReportsStartingWhenServiceHealthcheckStillComingUp(t *testing.T) {
+	root := t.TempDir()
+	renderer := NewWithOptions(Options{RootDir: root})
+	if err := renderer.Create(context.Background(), control.ProjectSpec{
+		Ref:    "alpha",
+		Domain: "supadupa.test",
+		Services: map[string]control.ServiceSpec{
+			"storage":   {Enabled: false},
+			"imgproxy":  {Enabled: false},
+			"functions": {Enabled: false},
+			"studio":    {Enabled: false},
+		},
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	// kong is up but its healthcheck is still in the start window, and meta was
+	// just created — both transient come-up states, not failures.
+	command := fakeComposeCommand(t, `[{"Service":"db","State":"running","Health":"healthy"},{"Service":"kong","State":"running","Health":"starting"},{"Service":"meta","State":"created"},{"Service":"auth","State":"running"},{"Service":"rest","State":"running"},{"Service":"realtime","State":"running"},{"Service":"pooler","State":"running"},{"Service":"analytics","State":"running"},{"Service":"vector","State":"running"}]`)
+	provisioner := NewWithOptions(Options{RootDir: root, Apply: true, Command: command})
+
+	status, err := provisioner.Status(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.Phase != control.ProjectStarting {
+		t.Fatalf("expected starting phase, got %#v", status)
+	}
+	if !strings.Contains(status.Message, "compose project starting") || !strings.Contains(status.Message, "kong/starting") || !strings.Contains(status.Message, "meta") {
+		t.Fatalf("expected starting detail, got %q", status.Message)
+	}
 }
 
 func TestStatusReportsLivePausedState(t *testing.T) {
@@ -1897,6 +2204,26 @@ func TestParseComposeStatsRejectsEmptyPayload(t *testing.T) {
 	}
 }
 
+func TestReadNodeNetworkUsesHostProcNetDev(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dev")
+	payload := `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 10 1 0 0 0 0 0 0 20 1 0 0 0 0 0 0
+  eth0: 1000 1 0 0 0 0 0 0 2000 1 0 0 0 0 0 0
+docker0: 3000 1 0 0 0 0 0 0 4000 1 0 0 0 0 0 0
+  ens5: 5000 1 0 0 0 0 0 0 6000 1 0 0 0 0 0 0
+`
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUPADUPA_NODE_NET_DEV_PATH", path)
+
+	sampled, rx, tx := readNodeNetwork()
+	if !sampled || rx != 6000 || tx != 8000 {
+		t.Fatalf("node network = sampled:%v rx:%d tx:%d, want sampled:true rx:6000 tx:8000", sampled, rx, tx)
+	}
+}
+
 func TestCloneBranchWritesDryRunPlan(t *testing.T) {
 	root := t.TempDir()
 	provisioner := NewWithOptions(Options{RootDir: root})
@@ -2005,6 +2332,12 @@ func TestAddReplicaRendersReplicaFiles(t *testing.T) {
 	if !strings.Contains(string(manifest), "db-replica-east") {
 		t.Fatalf("expected replica service in manifest, got:\n%s", manifest)
 	}
+	if !strings.Contains(string(manifest), "image: supabase/postgres:${STACK_VERSION}") || strings.Contains(string(manifest), "supabase/postgres:latest") {
+		t.Fatalf("expected replica manifest to use project stack version instead of latest, got:\n%s", manifest)
+	}
+	if !strings.Contains(string(manifest), "security_opt:\n      - no-new-privileges:true") {
+		t.Fatalf("expected replica manifest to set no-new-privileges, got:\n%s", manifest)
+	}
 	env, err := os.ReadFile(filepath.Join(root, "alpha", "replicas", "replica-one.env"))
 	if err != nil {
 		t.Fatal(err)
@@ -2053,9 +2386,10 @@ func TestSyncReplicasRendersStandbyOverlayAndCleansStaleFiles(t *testing.T) {
 	for _, expected := range []string{
 		"db-replica-east:",
 		"image: supabase/postgres:${STACK_VERSION}",
+		"security_opt:\n      - no-new-privileges:true",
 		"- .env",
 		"- replicas/replica-one.env",
-		"supadupa-ingress:",
+		"name: alpha-edge",
 		"- alpha-db-replica-east",
 		"pg_basebackup -h db -p 5432 -U supabase_replication_admin",
 		"select pg_is_in_recovery()",
@@ -2175,7 +2509,7 @@ func TestDestroyIncludesReplicaOverlay(t *testing.T) {
 	for _, expected := range []string{
 		"-f " + filepath.Join(root, "alpha", "compose.yaml"),
 		"-f " + filepath.Join(root, "alpha", "replicas", "compose.yaml"),
-		"down -v",
+		"down --remove-orphans -v",
 	} {
 		if !strings.Contains(string(logs), expected) {
 			t.Fatalf("expected destroy command log to contain %q, got:\n%s", expected, logs)

@@ -18,6 +18,8 @@ fi
 
 src="${1%/}"
 dest="${2%/}"
+src_abs="$(realpath -m "$src")"
+dest_abs="$(realpath -m "$dest")"
 
 if [[ ! -d "$src" ]]; then
   echo "source artifact directory does not exist: $src" >&2
@@ -25,6 +27,10 @@ if [[ ! -d "$src" ]]; then
 fi
 if [[ -z "$dest" || "$dest" == "/" ]]; then
   echo "destination artifact directory is invalid: $dest" >&2
+  exit 1
+fi
+if [[ "$dest_abs" == "$src_abs" || "$dest_abs" == "$src_abs"/* ]]; then
+  echo "destination artifact directory must not be inside source: $dest" >&2
   exit 1
 fi
 
@@ -55,10 +61,25 @@ should_skip_artifact() {
   return 1
 }
 
+artifact_has_sensitive_content() {
+  local file="$1"
+
+  if ! LC_ALL=C grep -Iq . "$file" 2>/dev/null; then
+    return 0
+  fi
+
+  LC_ALL=C grep -Eiq \
+    '(authorization[":[:space:]]+bearer|bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|access_token|refresh_token|id_token|supadupa_studio_code|supadupa_studio_token|password["'\''[:space:]=:]+[^[:space:]]|api[_-]?key["'\''[:space:]=:]+[^[:space:]]|apikey["'\''[:space:]=:]+[^[:space:]]|secret[_-]?access[_-]?key|service[_-]?role|anon[_-]?key|set-cookie:)' "$file"
+}
+
 while IFS= read -r -d '' file; do
   rel="${file#"$src"/}"
   if should_skip_artifact "$rel"; then
     printf 'skip\tsensitive-name\t%s\n' "$rel" >>"$manifest"
+    continue
+  fi
+  if artifact_has_sensitive_content "$file"; then
+    printf 'skip\tsensitive-content\t%s\n' "$rel" >>"$manifest"
     continue
   fi
   mkdir -p "$dest/$(dirname -- "$rel")"

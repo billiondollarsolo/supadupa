@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -115,12 +113,8 @@ func (r *projectDomainResource) Schema(ctx context.Context, req resource.SchemaR
 }
 
 func (r *projectDomainResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -178,16 +172,7 @@ func (r *projectDomainResource) Delete(ctx context.Context, req resource.DeleteR
 }
 
 func (r *projectDomainResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, fqdn, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, fqdn, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(fqdn) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/fqdn, for example alpha/api.example.com.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("fqdn"), strings.TrimSpace(fqdn))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "fqdn", "Use ref/fqdn, for example alpha/api.example.com.")
 }
 
 func (r *projectDomainResource) findDomain(ctx context.Context, ref string, fqdn string) (ProjectDomain, error) {
@@ -196,12 +181,7 @@ func (r *projectDomainResource) findDomain(ctx context.Context, ref string, fqdn
 		return ProjectDomain{}, err
 	}
 	normalized := strings.Trim(strings.ToLower(strings.TrimSpace(fqdn)), ".")
-	for _, domain := range domains {
-		if domain.FQDN == normalized {
-			return domain, nil
-		}
-	}
-	return ProjectDomain{}, ErrNotFound
+	return findInList(domains, func(domain ProjectDomain) bool { return domain.FQDN == normalized })
 }
 
 func setProjectDomainState(model *projectDomainResourceModel, domain ProjectDomain) {

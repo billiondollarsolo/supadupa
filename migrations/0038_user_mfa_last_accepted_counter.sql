@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_last_accepted_counter BIGINT NOT NULL DEFAULT 0;

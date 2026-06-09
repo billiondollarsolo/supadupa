@@ -1,21 +1,27 @@
 import { create } from "zustand";
-import { clearToken, getToken, logoutSession, setToken } from "../api";
+import { logoutSession } from "../api";
+import type { User } from "../types";
 
 type AuthSessionStore = {
-  token: string | null;
-  setAuthenticated: (token: string) => void;
-  logout: () => void;
+  user: User | null;
+  setAuthenticated: (user: User) => void;
+  setUnauthenticated: () => void;
+  logout: () => Promise<void>;
 };
 
 export const useAuthSession = create<AuthSessionStore>((set) => ({
-  token: getToken(),
-  setAuthenticated: (token) => {
-    setToken(token);
-    set({ token });
+  user: null,
+  setAuthenticated: (user) => {
+    set({ user });
   },
-  logout: () => {
-    void logoutSession().catch(() => undefined);
-    clearToken();
-    set({ token: null });
+  setUnauthenticated: () => {
+    set({ user: null });
+  },
+  logout: async () => {
+    try {
+      await logoutSession();
+    } finally {
+      set({ user: null });
+    }
   },
 }));

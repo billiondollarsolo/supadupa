@@ -66,8 +66,8 @@ case "$project_status" in
   *) fail "metrics.project.status" "expected healthy, got ${project_status:-empty}" ;;
 esac
 
-if jq -e '.resources.cpu > 0 and .resources.ram_mb > 0 and .resources.disk_gb > 0 and .resources.disk_iops > 0 and .resources.projects > 0' "$project_metrics" >/dev/null; then
-  pass "metrics.project.resources" "$(jq -r '.resources | "\(.cpu) vCPU, \(.ram_mb) MB RAM, \(.disk_gb) GB disk, \(.disk_iops) IOPS"' "$project_metrics")"
+if jq -e '.resources.cpu > 0 and .resources.ram_mb > 0 and .resources.disk_gb > 0 and .resources.projects > 0' "$project_metrics" >/dev/null; then
+  pass "metrics.project.resources" "$(jq -r '.resources | "\(.cpu) vCPU, \(.ram_mb) MB RAM, \(.disk_gb) GB disk"' "$project_metrics")"
 else
   fail "metrics.project.resources" "project reservation metrics are missing or zero"
 fi
@@ -99,14 +99,14 @@ else
   fail "metrics.fleet.projects" "fleet project counts are missing selected healthy project"
 fi
 
-if jq -e '.hosts >= 1 and .host_capacity.cpu > 0 and .host_capacity.ram_mb > 0 and .host_capacity.disk_gb > 0 and .host_capacity.disk_iops > 0' "$fleet_metrics" >/dev/null; then
-  pass "metrics.fleet.capacity" "$(jq -r '.host_capacity | "\(.cpu) vCPU, \(.ram_mb) MB RAM, \(.disk_gb) GB disk, \(.disk_iops) IOPS"' "$fleet_metrics")"
+if jq -e '.hosts >= 1 and .host_capacity.cpu > 0 and .host_capacity.ram_mb > 0 and .host_capacity.disk_gb > 0' "$fleet_metrics" >/dev/null; then
+  pass "metrics.fleet.capacity" "$(jq -r '.host_capacity | "\(.cpu) vCPU, \(.ram_mb) MB RAM, \(.disk_gb) GB disk"' "$fleet_metrics")"
 else
   fail "metrics.fleet.capacity" "fleet host capacity is missing or zero"
 fi
 
-if jq -e '.host_used.cpu >= 1 and .host_used.ram_mb >= 1 and .host_used.disk_gb >= 1 and .host_used.disk_iops >= 1 and .host_used.projects >= 1' "$fleet_metrics" >/dev/null; then
-  pass "metrics.fleet.reservations" "$(jq -r '.host_used | "\(.cpu) vCPU, \(.ram_mb) MB RAM, \(.disk_gb) GB disk, \(.disk_iops) IOPS, \(.projects) projects"' "$fleet_metrics")"
+if jq -e '.host_used.cpu >= 1 and .host_used.ram_mb >= 1 and .host_used.disk_gb >= 1 and .host_used.projects >= 1' "$fleet_metrics" >/dev/null; then
+  pass "metrics.fleet.reservations" "$(jq -r '.host_used | "\(.cpu) vCPU, \(.ram_mb) MB RAM, \(.disk_gb) GB disk, \(.projects) projects"' "$fleet_metrics")"
 else
   fail "metrics.fleet.reservations" "fleet reserved resources are missing selected project"
 fi

@@ -38,7 +38,7 @@ func TestRoutingServiceRendersTraefikDynamicConfig(t *testing.T) {
 		`main: "*.supadupa.test"`,
 		"alpha-studio-supadupa-sso",
 		"forwardAuth:",
-		`address: "http://host.docker.internal:8080/v1/auth/studio/verify?project_ref=alpha"`,
+		`address: "http://supadupavisor:8080/v1/auth/studio/verify?project_ref=alpha"`,
 		"trustForwardHeader: false",
 		"tcp:",
 		"alpha-db:",
@@ -159,9 +159,9 @@ func TestTCPRoutesForProjectIncludeReplicaHosts(t *testing.T) {
 		},
 	}
 
-	routes := TCPRoutesForProjectWithNetworkAndReplicas(project, ProjectConfig{}, []ProjectReplica{
+	routes := TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(project, ProjectConfig{}, []ProjectReplica{
 		{ID: "replica-one", Name: "east", Status: "healthy", Role: "read"},
-	})
+	}, nil)
 	seen := false
 	for _, route := range routes {
 		if route.Name != "db-replica-east" {
@@ -434,8 +434,8 @@ func TestRoutingServiceRendersNetworkPolicy(t *testing.T) {
 	}
 	routes := RoutesForProjectWithNetwork(project, ProjectConfig{
 		Config: map[string]string{
-			"ip_allowlist": "10.0.0.0/8, 2001:db8::/32",
-			"ssl_enforced": "true",
+			"http_allowlist": "10.0.0.0/8, 2001:db8::/32",
+			"ssl_enforced":   "true",
 		},
 	})
 	path, err := NewRoutingService(root).RenderProject(project, routes)
@@ -473,15 +473,173 @@ func TestTCPRoutesForProjectHonorNetworkPolicy(t *testing.T) {
 			Domain: "apps.supadupa.test",
 		},
 	}
-	routes := TCPRoutesForProjectWithNetwork(project, ProjectConfig{
-		Config: map[string]string{"ip_allowlist": "10.0.0.0/8, 2001:db8::/32"},
-	})
+	routes := TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(project, ProjectConfig{
+		Config: map[string]string{"db_allowlist": "10.0.0.0/8, 2001:db8::/32"},
+	}, nil, nil)
 	if len(routes) != 3 {
 		t.Fatalf("expected db and pooler routes, got %d", len(routes))
 	}
 	for _, route := range routes {
 		if strings.Join(route.IPAllowlist, ",") != "10.0.0.0/8,2001:db8::/32" {
 			t.Fatalf("route %s allowlist = %#v", route.Name, route.IPAllowlist)
+		}
+	}
+}
+
+func TestTCPRoutesPerProjectExposureIsolation(t *testing.T) {
+	project := func(ref string) Project {
+		return Project{Ref: ref, Spec: ProjectSpec{Ref: ref, Domain: "apps.supadupa.test"}}
+	}
+	// A fleet-wide allowlist is present; explicit per-project modes must ignore
+	// it entirely so no project's exposure is inferred from the fleet.
+	platform := []string{"203.0.113.0/24"}
+
+	// Private: no public database routes at all, even with a platform allowlist.
+	priv := TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(
+		project("alpha"),
+		ProjectConfig{Config: map[string]string{"db_ingress_mode": "private", "db_allowlist": "10.0.0.0/8"}},
+		nil, platform,
+	)
+	if len(priv) != 0 {
+		t.Fatalf("private project expected 0 tcp routes, got %d", len(priv))
+	}
+
+	// Public: routes emitted with no IP restriction, ignoring the platform list.
+	pub := TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(
+		project("beta"),
+		ProjectConfig{Config: map[string]string{"db_ingress_mode": "public"}},
+		nil, platform,
+	)
+	if len(pub) == 0 {
+		t.Fatal("public project expected tcp routes, got 0")
+	}
+	for _, route := range pub {
+		if len(route.IPAllowlist) != 0 {
+			t.Fatalf("public route %s should have no allowlist, got %#v", route.Name, route.IPAllowlist)
+		}
+	}
+
+	// Allowlisted: only this project's own CIDRs apply — not the fleet's, not
+	// another project's.
+	gamma := TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(
+		project("gamma"),
+		ProjectConfig{Config: map[string]string{"db_ingress_mode": "allowlisted", "db_allowlist": "198.51.100.7/32"}},
+		nil, platform,
+	)
+	if len(gamma) == 0 {
+		t.Fatal("allowlisted project expected tcp routes, got 0")
+	}
+	for _, route := range gamma {
+		got := strings.Join(route.IPAllowlist, ",")
+		if got != "198.51.100.7/32" {
+			t.Fatalf("allowlisted route %s should carry only its own CIDR, got %q", route.Name, got)
+		}
+	}
+
+	// Allowlisted with no CIDRs is treated as private (deny), never silently open.
+	empty := TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(
+		project("delta"),
+		ProjectConfig{Config: map[string]string{"db_ingress_mode": "allowlisted"}},
+		nil, platform,
+	)
+	if len(empty) != 0 {
+		t.Fatalf("allowlisted-with-no-cidrs expected 0 tcp routes, got %d", len(empty))
+	}
+}
+
+func TestRenderExposureModesArtifact(t *testing.T) {
+	project := Project{Ref: "demo", Spec: ProjectSpec{Ref: "demo", Domain: "apps.supadupa.test"}}
+	render := func(t *testing.T, cfg map[string]string) string {
+		network := ProjectConfig{Config: cfg}
+		tcp := TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(project, network, nil, nil)
+		path, err := NewRoutingService(t.TempDir()).RenderProjectWithTCPRoutes(project, RoutesForProjectWithNetwork(project, network), tcp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(payload)
+	}
+
+	t.Run("private", func(t *testing.T) {
+		out := render(t, map[string]string{"db_ingress_mode": "private"})
+		t.Logf("PRIVATE route file:\n%s", out)
+		if strings.Contains(out, "demo-db:") || strings.Contains(out, "HostSNI(`db") {
+			t.Fatal("private mode must not publish any database TCP router")
+		}
+		// Must NOT emit an empty tcp: block — Traefik rejects it and drops all
+		// dynamic config, breaking unrelated routing.
+		if strings.Contains(out, "tcp:") {
+			t.Fatalf("private mode must omit the tcp section entirely:\n%s", out)
+		}
+	})
+
+	t.Run("public", func(t *testing.T) {
+		out := render(t, map[string]string{"db_ingress_mode": "public"})
+		t.Logf("PUBLIC route file:\n%s", out)
+		if !strings.Contains(out, "demo-db:") || !strings.Contains(out, "HostSNI(`db-demo.apps.supadupa.test`)") {
+			t.Fatal("public mode must publish the database TCP router")
+		}
+		if strings.Contains(out, "ip-allowlist") || strings.Contains(out, "ipAllowList") {
+			t.Fatal("public mode must not attach an IP allowlist middleware")
+		}
+	})
+
+	t.Run("allowlisted", func(t *testing.T) {
+		out := render(t, map[string]string{"db_ingress_mode": "allowlisted", "db_allowlist": "203.0.113.5/32"})
+		t.Logf("ALLOWLISTED route file:\n%s", out)
+		if !strings.Contains(out, "demo-db:") {
+			t.Fatal("allowlisted mode must publish the database TCP router")
+		}
+		if !strings.Contains(out, "203.0.113.5/32") {
+			t.Fatal("allowlisted mode must render the project's CIDR into the middleware")
+		}
+	})
+}
+
+func TestTCPRoutesForProjectHonorPlatformDatabaseIngressAllowlist(t *testing.T) {
+	project := Project{
+		Ref: "alpha",
+		Spec: ProjectSpec{
+			Ref:    "alpha",
+			Domain: "apps.supadupa.test",
+		},
+	}
+	routes := TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(
+		project,
+		ProjectConfig{Config: map[string]string{"db_allowlist": "10.0.0.0/8"}},
+		nil,
+		[]string{"203.0.113.0/24", "2001:db8::/32"},
+	)
+	if len(routes) != 3 {
+		t.Fatalf("expected db and pooler routes, got %d", len(routes))
+	}
+	for _, route := range routes {
+		if strings.Join(route.IPAllowlist, ",") != "203.0.113.0/24,2001:db8::/32" {
+			t.Fatalf("route %s allowlist = %#v", route.Name, route.IPAllowlist)
+		}
+	}
+
+	path, err := NewRoutingService(t.TempDir()).RenderProjectWithTCPRoutes(project, RoutesForProject(project), routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(payload)
+	for _, expected := range []string{
+		"alpha-db-tcp-ipallowlist",
+		"alpha-pooler-transaction-tcp-ipallowlist",
+		"alpha-pooler-session-tcp-ipallowlist",
+		"- \"203.0.113.0/24\"",
+		"- \"2001:db8::/32\"",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected %q in rendered platform database ingress allowlist:\n%s", expected, body)
 		}
 	}
 }

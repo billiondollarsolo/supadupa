@@ -22,7 +22,6 @@ export type User = {
 };
 
 export type AuthResponse = {
-  token?: string;
   mfa_required?: boolean;
   user: User;
 };
@@ -30,6 +29,8 @@ export type AuthResponse = {
 export type AuthState = {
   bootstrapped: boolean;
   auth_required: boolean;
+  authenticated: boolean;
+  user?: User;
   sso_enabled?: boolean;
   sso_provider?: string;
 };
@@ -119,7 +120,6 @@ export type HostCapacity = {
   cpu: number;
   ram_mb: number;
   disk_gb: number;
-  disk_iops: number;
   projects: number;
 };
 
@@ -129,7 +129,6 @@ export type OrgQuota = {
   max_cpu: number;
   max_ram_mb: number;
   max_disk_gb: number;
-  max_disk_iops: number;
   used: HostCapacity;
   updated_at: string;
 };
@@ -216,6 +215,8 @@ export type FleetMetrics = {
   projects_by_status: Record<string, number>;
   host_capacity: HostCapacity;
   host_used: HostCapacity;
+  database_ingress: DatabaseIngressStatus;
+  node_observed: NodeTelemetrySample[];
   observed: TelemetryRollup;
   routes: number;
   custom_domains: number;
@@ -247,6 +248,18 @@ export type FleetMetrics = {
   audit_events: number;
   audit_verified: boolean;
   sampled_at: string;
+};
+
+export type DatabaseIngressStatus = {
+  mode: "private" | "public" | string;
+  public: boolean;
+  postgres_addr: string;
+  pooler_addr: string;
+  postgres_public: boolean;
+  pooler_public: boolean;
+  allowlist_configured: boolean;
+  allowed_cidrs: string[];
+  warnings: string[];
 };
 
 export type AdvisorFinding = {
@@ -358,6 +371,23 @@ export type TelemetryRollup = {
   stale_after_seconds: number;
 };
 
+export type NodeTelemetrySample = {
+  host_id: string;
+  source: string;
+  cpu_percent: number;
+  cpu_used_cores: number;
+  cpu_capacity_cores: number;
+  memory_used_bytes: number;
+  memory_total_bytes: number;
+  disk_used_bytes: number;
+  disk_total_bytes: number;
+  disk_available_bytes: number;
+  network_sampled: boolean;
+  network_rx_bytes: number;
+  network_tx_bytes: number;
+  sampled_at: string;
+};
+
 export type PlatformDefaults = {
   domain: string;
   stack_version: string;
@@ -365,6 +395,7 @@ export type PlatformDefaults = {
   resource_tier: "small" | "medium" | "large" | string;
   backup_schedule: "daily" | "hourly" | string;
   feature_flags: Record<string, boolean>;
+  database_ingress_allowed_cidrs: string[];
   smtp: {
     enabled: boolean;
     host: string;
@@ -548,7 +579,7 @@ export type ConnectPayload = {
 };
 
 export type ProjectStudioSession = {
-  token: string;
+  code: string;
   expires_at: string;
 };
 
@@ -815,6 +846,8 @@ export type ProjectRouteManifest = {
   project_ref: string;
   http_routes: ProjectRoute[];
   tcp_routes: ProjectTCPRoute[];
+  database_ingress_published?: boolean;
+  database_external_access_enabled?: boolean;
 };
 
 export type ProjectDomain = {

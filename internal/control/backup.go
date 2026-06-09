@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"supadupa2026/internal/env"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -139,9 +140,9 @@ func NewBackupServiceWithOptions(opts BackupServiceOptions) *BackupService {
 	if pitrRestoreCommand == "" && composeBackupDefaultsEnabled() {
 		pitrRestoreCommand = "set -eu; ref={{ref}}; backup={{backup_path}}; target={{recovery_time_target}}; tmp=\"$(mktemp -d)\"; trap 'rm -rf \"$tmp\"' EXIT; echo \"PITR restore starting ref=$ref target=$target\"; docker compose -p \"$ref\" {{compose_file_args}} stop; volume_path=\"$(docker volume inspect \"${ref}_db-data\" --format '{{ .Mountpoint }}')\"; test -n \"$volume_path\"; tar -C \"$tmp\" -xf \"$backup\"; test -f \"$tmp/base.tar\"; test -f \"$tmp/pg_wal.tar\"; rm -rf \"$volume_path\"/* \"$volume_path\"/.[!.]* \"$volume_path\"/..?* 2>/dev/null || true; tar -C \"$volume_path\" -xf \"$tmp/base.tar\"; mkdir -p \"$volume_path/pg_wal\"; tar -C \"$volume_path/pg_wal\" -xf \"$tmp/pg_wal.tar\"; for wal_path in {{wal_path_args}}; do cp \"$wal_path\" \"$volume_path/pg_wal/\"; done; rm -f \"$volume_path/postmaster.pid\"; touch \"$volume_path/recovery.signal\"; { printf '\\nrecovery_target_time = '\\''%s'\\''\\n' \"$target\"; printf 'recovery_target_action = '\\''promote'\\''\\n'; } >> \"$volume_path/postgresql.auto.conf\"; docker compose -p \"$ref\" {{compose_file_args}} up -d; echo \"PITR restore completed ref=$ref target=$target\""
 	}
-	dryRun := opts.DryRun || command == "" || envBool("SUPADUPA_BACKUP_DRY_RUN")
-	restoreDryRun := opts.RestoreDryRun || restoreCommand == "" || envBool("SUPADUPA_RESTORE_DRY_RUN")
-	walDryRun := opts.WALDryRun || envBool("SUPADUPA_WAL_ARCHIVE_DRY_RUN")
+	dryRun := opts.DryRun || command == "" || env.Bool("SUPADUPA_BACKUP_DRY_RUN")
+	restoreDryRun := opts.RestoreDryRun || restoreCommand == "" || env.Bool("SUPADUPA_RESTORE_DRY_RUN")
+	walDryRun := opts.WALDryRun || env.Bool("SUPADUPA_WAL_ARCHIVE_DRY_RUN")
 	uploader := opts.Uploader
 	if uploader == nil {
 		uploader = s3BackupArtifactUploader{}
@@ -162,7 +163,7 @@ func NewBackupServiceWithOptions(opts BackupServiceOptions) *BackupService {
 }
 
 func composeBackupDefaultsEnabled() bool {
-	if !envBool("SUPADUPA_COMPOSE_APPLY") {
+	if !env.Bool("SUPADUPA_COMPOSE_APPLY") {
 		return false
 	}
 	value := strings.ToLower(strings.TrimSpace(os.Getenv("SUPADUPA_COMPOSE_BACKUP_DEFAULTS")))
@@ -1293,7 +1294,7 @@ func backupStorageTargetIsReadyOffHost(target BackupStorageTarget) bool {
 }
 
 func requireRecoveryReadyBackupTargets() bool {
-	return envBool("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS")
+	return env.Bool("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS")
 }
 
 func ensureRecoveryReadyBackupTarget(target BackupStorageTarget, hasTarget bool, purpose string) error {
@@ -1879,11 +1880,6 @@ func composeFileArgs(files []string) string {
 		args = append(args, "-f", shellQuote(file))
 	}
 	return strings.Join(args, " ")
-}
-
-func envBool(key string) bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 func shellQuote(value string) string {

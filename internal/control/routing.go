@@ -29,6 +29,15 @@ type ProjectRouteManifest struct {
 	ProjectRef string            `json:"project_ref"`
 	HTTPRoutes []ProjectRoute    `json:"http_routes"`
 	TCPRoutes  []ProjectTCPRoute `json:"tcp_routes"`
+	// DatabaseIngressPublished reports whether the platform edge-router actually
+	// publishes the database/pooler ports on a public interface. When false, a
+	// project set to public/allowlisted still won't be reachable from outside
+	// the host until the platform binds those ports — surfaced in the UI so the
+	// exposure control never silently implies reachability it can't deliver.
+	DatabaseIngressPublished bool `json:"database_ingress_published"`
+	// DatabaseExternalAccessEnabled is the platform master switch. When false,
+	// every project is forced private regardless of its own mode.
+	DatabaseExternalAccessEnabled bool `json:"database_external_access_enabled"`
 }
 
 func NewRoutingService(rootDir string) *RoutingService {
@@ -61,7 +70,7 @@ func RoutesForProjectWithNetworkAndCDN(project Project, network ProjectConfig, c
 			UpstreamURL:  fmt.Sprintf("http://%s-kong:8000", project.Ref),
 			TLS:          true,
 			SSLEnforced:  policy.SSLEnforced,
-			IPAllowlist:  policy.IPAllowlist,
+			IPAllowlist:  policy.HTTPAllowlist,
 			CacheControl: cache.CacheControl,
 			SmartCDN:     cache.SmartCDN,
 		},
@@ -73,7 +82,7 @@ func RoutesForProjectWithNetworkAndCDN(project Project, network ProjectConfig, c
 			UpstreamURL: fmt.Sprintf("http://%s-studio:3000", project.Ref),
 			TLS:         true,
 			SSLEnforced: policy.SSLEnforced,
-			IPAllowlist: policy.IPAllowlist,
+			IPAllowlist: policy.HTTPAllowlist,
 			SSORequired: true,
 		})
 	}
@@ -84,7 +93,7 @@ func RoutesForProjectWithNetworkAndCDN(project Project, network ProjectConfig, c
 			UpstreamURL:  fmt.Sprintf("http://%s-kong:8000", project.Ref),
 			TLS:          true,
 			SSLEnforced:  policy.SSLEnforced,
-			IPAllowlist:  policy.IPAllowlist,
+			IPAllowlist:  policy.HTTPAllowlist,
 			CacheControl: cache.CacheControl,
 			SmartCDN:     cache.SmartCDN,
 		})
@@ -134,7 +143,7 @@ func RoutesForProjectDomainsWithNetworkAndCDN(project Project, domains []Project
 			UpstreamURL:  fmt.Sprintf("http://%s-kong:8000", project.Ref),
 			TLS:          true,
 			SSLEnforced:  policy.SSLEnforced,
-			IPAllowlist:  policy.IPAllowlist,
+			IPAllowlist:  policy.HTTPAllowlist,
 			CacheControl: cache.CacheControl,
 			SmartCDN:     cache.SmartCDN,
 			CertMode:     domain.CertMode,
@@ -148,18 +157,21 @@ func RoutesForProjectDomainsWithNetworkAndCDN(project Project, domains []Project
 	return routes
 }
 
+// TCPRoutesForProject renders a project's TCP routes with no network policy or
+// replicas — a convenience over TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress.
 func TCPRoutesForProject(project Project) []ProjectTCPRoute {
-	return TCPRoutesForProjectWithNetwork(project, ProjectConfig{})
+	return TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(project, ProjectConfig{}, nil, nil)
 }
 
-func TCPRoutesForProjectWithNetwork(project Project, network ProjectConfig) []ProjectTCPRoute {
-	return TCPRoutesForProjectWithNetworkAndReplicas(project, network, nil)
-}
-
-func TCPRoutesForProjectWithNetworkAndReplicas(project Project, network ProjectConfig, replicas []ProjectReplica) []ProjectTCPRoute {
+func TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(project Project, network ProjectConfig, replicas []ProjectReplica, databaseIngressAllowedCIDRs []string) []ProjectTCPRoute {
 	dbHost := databaseHost(project.Ref, project.Spec.Domain)
 	poolerHost := poolerHost(project.Ref, project.Spec.Domain)
 	policy := networkPolicyFromConfig(network)
+	publish, tcpIPAllowlist := databaseIngressDecision(policy, databaseIngressAllowedCIDRs)
+	if !publish {
+		// Private: this project's database is not routed through the edge-router.
+		return []ProjectTCPRoute{}
+	}
 	routes := []ProjectTCPRoute{
 		{
 			Protocol:        "tcp",
@@ -169,7 +181,7 @@ func TCPRoutesForProjectWithNetworkAndReplicas(project Project, network ProjectC
 			PublicPort:      5432,
 			UpstreamAddress: fmt.Sprintf("%s-db:5432", project.Ref),
 			TLS:             true,
-			IPAllowlist:     policy.IPAllowlist,
+			IPAllowlist:     tcpIPAllowlist,
 		},
 	}
 	for _, replica := range replicas {
@@ -189,7 +201,7 @@ func TCPRoutesForProjectWithNetworkAndReplicas(project Project, network ProjectC
 			PublicPort:      5432,
 			UpstreamAddress: fmt.Sprintf("%s-%s:5432", project.Ref, service),
 			TLS:             true,
-			IPAllowlist:     policy.IPAllowlist,
+			IPAllowlist:     tcpIPAllowlist,
 		})
 	}
 	if !ProjectServiceStates(project.Spec.Services)["pooler"] {
@@ -204,7 +216,7 @@ func TCPRoutesForProjectWithNetworkAndReplicas(project Project, network ProjectC
 			PublicPort:      6543,
 			UpstreamAddress: fmt.Sprintf("%s-pooler:6543", project.Ref),
 			TLS:             true,
-			IPAllowlist:     policy.IPAllowlist,
+			IPAllowlist:     tcpIPAllowlist,
 		},
 		ProjectTCPRoute{
 			Protocol:        "tcp",
@@ -214,25 +226,23 @@ func TCPRoutesForProjectWithNetworkAndReplicas(project Project, network ProjectC
 			PublicPort:      5432,
 			UpstreamAddress: fmt.Sprintf("%s-pooler:5432", project.Ref),
 			TLS:             true,
-			IPAllowlist:     policy.IPAllowlist,
+			IPAllowlist:     tcpIPAllowlist,
 		},
 	)
 	return routes
 }
 
+// RouteManifestForProject builds a manifest with no network policy or replicas —
+// a convenience over RouteManifestForProjectWithNetworkReplicasAndDatabaseIngress.
 func RouteManifestForProject(project Project, httpRoutes []ProjectRoute) ProjectRouteManifest {
-	return RouteManifestForProjectWithNetwork(project, httpRoutes, ProjectConfig{})
+	return RouteManifestForProjectWithNetworkReplicasAndDatabaseIngress(project, httpRoutes, ProjectConfig{}, nil, nil)
 }
 
-func RouteManifestForProjectWithNetwork(project Project, httpRoutes []ProjectRoute, network ProjectConfig) ProjectRouteManifest {
-	return RouteManifestForProjectWithNetworkAndReplicas(project, httpRoutes, network, nil)
-}
-
-func RouteManifestForProjectWithNetworkAndReplicas(project Project, httpRoutes []ProjectRoute, network ProjectConfig, replicas []ProjectReplica) ProjectRouteManifest {
+func RouteManifestForProjectWithNetworkReplicasAndDatabaseIngress(project Project, httpRoutes []ProjectRoute, network ProjectConfig, replicas []ProjectReplica, databaseIngressAllowedCIDRs []string) ProjectRouteManifest {
 	return ProjectRouteManifest{
 		ProjectRef: project.Ref,
 		HTTPRoutes: cloneProjectRoutes(httpRoutes),
-		TCPRoutes:  TCPRoutesForProjectWithNetworkAndReplicas(project, network, replicas),
+		TCPRoutes:  TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(project, network, replicas, databaseIngressAllowedCIDRs),
 	}
 }
 
@@ -243,7 +253,16 @@ type routeCachePolicy struct {
 
 type routeNetworkPolicy struct {
 	SSLEnforced bool
-	IPAllowlist []string
+	// HTTPAllowlist gates the HTTP edge routes (API/Studio/Storage/custom
+	// domains). DBAllowlist independently gates the database/pooler TCP ports.
+	// Both default to empty = open to all; the two surfaces are controlled
+	// separately so restricting raw Postgres never blocks Studio/API.
+	HTTPAllowlist []string
+	DBAllowlist   []string
+	// DBIngressMode is the per-project database exposure mode: "private",
+	// "allowlisted", or "public". Empty means the project has not opted into
+	// per-project control yet and legacy (platform-default) behavior applies.
+	DBIngressMode string
 }
 
 func routeCachePolicyFromCDN(policy ProjectCDNPolicy) routeCachePolicy {
@@ -265,8 +284,69 @@ func networkPolicyFromConfig(config ProjectConfig) routeNetworkPolicy {
 	if strings.EqualFold(strings.TrimSpace(config.Config["ssl_enforced"]), "false") {
 		policy.SSLEnforced = false
 	}
-	policy.IPAllowlist = splitAllowlist(config.Config["ip_allowlist"])
+	policy.HTTPAllowlist = splitAllowlist(config.Config["http_allowlist"])
+	policy.DBAllowlist = splitAllowlist(config.Config["db_allowlist"])
+	policy.DBIngressMode = strings.ToLower(strings.TrimSpace(config.Config["db_ingress_mode"]))
 	return policy
+}
+
+// databaseIngressDecision resolves, for a single project, whether its database
+// TCP routes should be published and with which IP allowlist — derived ONLY
+// from that project's own network policy once it has opted into per-project
+// control. The platform-wide allowlist is used solely as legacy fallback for
+// projects that have not set a mode, so one project's exposure can never be
+// inferred from the fleet or from another project.
+func databaseIngressDecision(policy routeNetworkPolicy, databaseIngressAllowedCIDRs []string) (publish bool, allowlist []string) {
+	switch policy.DBIngressMode {
+	case "private":
+		return false, nil
+	case "public":
+		// Reachable through the edge-router with no IP restriction.
+		return true, []string{}
+	case "allowlisted":
+		// Must list at least one CIDR; an empty allowlist is treated as private
+		// rather than silently open.
+		if len(policy.DBAllowlist) == 0 {
+			return false, nil
+		}
+		return true, policy.DBAllowlist
+	default:
+		// Unset = legacy fallback (only reached by direct callers that pass no
+		// network config). Real projects always carry the schema default
+		// "private", so they stay off until explicitly enabled.
+		return true, databaseIngressIPAllowlist(policy.DBAllowlist, databaseIngressAllowedCIDRs)
+	}
+}
+
+// DatabaseExternalAccessFlag is the platform feature-flag key for the master
+// switch that publishes project databases through the edge router.
+const DatabaseExternalAccessFlag = "database_external_access"
+
+// ApplyDatabaseExternalAccessGate enforces the platform master switch: when
+// external database access is disabled, the returned network config forces the
+// project private so no database TCP routes are rendered — regardless of the
+// project's own mode. Shared by the API reconcile/manifest paths and the
+// startup route repair so the kill switch is honored everywhere, including
+// across restarts.
+func ApplyDatabaseExternalAccessGate(networkConfig ProjectConfig, defaults PlatformDefaults) ProjectConfig {
+	if defaults.FeatureFlags[DatabaseExternalAccessFlag] {
+		return networkConfig
+	}
+	cfg := make(map[string]string, len(networkConfig.Config)+1)
+	for k, v := range networkConfig.Config {
+		cfg[k] = v
+	}
+	cfg["db_ingress_mode"] = "private"
+	networkConfig.Config = cfg
+	return networkConfig
+}
+
+func databaseIngressIPAllowlist(projectAllowlist []string, databaseIngressAllowedCIDRs []string) []string {
+	platformAllowlist := splitAllowlist(strings.Join(databaseIngressAllowedCIDRs, ","))
+	if len(platformAllowlist) > 0 {
+		return platformAllowlist
+	}
+	return projectAllowlist
 }
 
 func splitAllowlist(input string) []string {
@@ -435,8 +515,14 @@ func (s *RoutingService) RenderProjectWithTCPRoutes(project Project, routes []Pr
 		builder.WriteString("  middlewares:\n")
 		builder.WriteString(middlewarePayload)
 	}
-	builder.WriteString("tcp:\n")
-	builder.WriteString("  routers:\n")
+	// Only emit the tcp section when there are TCP routes. An empty
+	// "tcp:\n  routers:\n  services:" block is rejected by Traefik ("tcp cannot
+	// be a standalone element"), which makes the file invalid and causes the
+	// file provider to drop ALL dynamic config — taking down unrelated routing.
+	if len(tcpRoutes) > 0 {
+		builder.WriteString("tcp:\n")
+		builder.WriteString("  routers:\n")
+	}
 	for _, route := range tcpRoutes {
 		routerName := fmt.Sprintf("%s-%s", project.Ref, route.Name)
 		builder.WriteString(fmt.Sprintf("    %s:\n", routerName))
@@ -460,7 +546,9 @@ func (s *RoutingService) RenderProjectWithTCPRoutes(project Project, routes []Pr
 			builder.WriteString(fmt.Sprintf("        - %s\n", tcpIPAllowlistMiddlewareName(project.Ref, route.Name)))
 		}
 	}
-	builder.WriteString("  services:\n")
+	if len(tcpRoutes) > 0 {
+		builder.WriteString("  services:\n")
+	}
 	for _, route := range tcpRoutes {
 		serviceName := fmt.Sprintf("%s-%s", project.Ref, route.Name)
 		builder.WriteString(fmt.Sprintf("    %s:\n", serviceName))
@@ -536,11 +624,11 @@ func tcpRoutesForProjectFromHTTPRoutes(project Project, routes []ProjectRoute) [
 	network := ProjectConfig{}
 	for _, route := range routes {
 		if route.Name == "api" && len(route.IPAllowlist) > 0 {
-			network.Config = map[string]string{"ip_allowlist": strings.Join(route.IPAllowlist, ",")}
+			network.Config = map[string]string{"db_allowlist": strings.Join(route.IPAllowlist, ",")}
 			break
 		}
 	}
-	return TCPRoutesForProjectWithNetwork(project, network)
+	return TCPRoutesForProjectWithNetworkReplicasAndDatabaseIngress(project, network, nil, nil)
 }
 
 func routeMiddlewares(ref string, route ProjectRoute) []string {
@@ -668,6 +756,8 @@ func renderMiddlewares(ref string, routes []ProjectRoute) string {
 				builder.WriteString("        authResponseHeaders:\n")
 				builder.WriteString("          - X-Supadupa-User\n")
 				builder.WriteString("          - X-Supadupa-Project\n")
+				builder.WriteString("        addAuthCookiesToResponse:\n")
+				builder.WriteString("          - supadupa_session\n")
 			}
 		}
 		if route.SSLEnforced {
@@ -719,7 +809,7 @@ func studioForwardAuthURL(ref ...string) string {
 		}
 		return configured
 	}
-	base := "http://host.docker.internal:8080/v1/auth/studio/verify"
+	base := "http://supadupavisor:8080/v1/auth/studio/verify"
 	if len(ref) > 0 && strings.TrimSpace(ref[0]) != "" {
 		return base + "?project_ref=" + strings.TrimSpace(ref[0])
 	}

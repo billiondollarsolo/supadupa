@@ -195,6 +195,58 @@ func TestReconcileLogsProvisionerErrors(t *testing.T) {
 	}
 }
 
+func TestReconcileReturnsStatusUpdateErrors(t *testing.T) {
+	ctx := context.Background()
+	base := control.NewMemoryStore()
+	org, err := base.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := base.CreateProject(ctx, control.CreateProjectRequest{
+		OrgID:  org.ID,
+		Ref:    "alpha",
+		Name:   "Alpha",
+		Domain: "supadupa.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := failingStatusStore{Store: base, err: errors.New("checkpoint failed")}
+
+	err = New(store, fakeProvisioner{status: control.ProjectStatus{
+		Ref:     project.Ref,
+		Phase:   control.ProjectHealthy,
+		Message: "runtime healthy",
+	}}, nil).Reconcile(ctx)
+	if err == nil || !strings.Contains(err.Error(), "checkpoint failed") || !strings.Contains(err.Error(), "alpha") {
+		t.Fatalf("expected status update error with project ref, got %v", err)
+	}
+}
+
+func TestReconcileReturnsStatusUpdateErrorsAfterProvisionerError(t *testing.T) {
+	ctx := context.Background()
+	base := control.NewMemoryStore()
+	org, err := base.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = base.CreateProject(ctx, control.CreateProjectRequest{
+		OrgID:  org.ID,
+		Ref:    "alpha",
+		Name:   "Alpha",
+		Domain: "supadupa.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := failingStatusStore{Store: base, err: errors.New("checkpoint failed")}
+
+	err = New(store, fakeProvisioner{err: errors.New("compose file missing")}, nil).Reconcile(ctx)
+	if err == nil || !strings.Contains(err.Error(), "checkpoint failed") || !strings.Contains(err.Error(), "provisioner error") {
+		t.Fatalf("expected provisioner status update error, got %v", err)
+	}
+}
+
 func TestReconcilePreservesPausedProject(t *testing.T) {
 	ctx := context.Background()
 	store := control.NewMemoryStore()
@@ -239,6 +291,15 @@ func TestReconcilePreservesPausedProject(t *testing.T) {
 	if len(events) != 0 {
 		t.Fatalf("expected no reconcile audit event for unchanged paused state, got %#v", events)
 	}
+}
+
+type failingStatusStore struct {
+	control.Store
+	err error
+}
+
+func (s failingStatusStore) UpdateProjectStatus(ctx context.Context, ref string, status control.ProjectPhase, message string) (control.Project, error) {
+	return control.Project{}, s.err
 }
 
 type fakeProvisioner struct {

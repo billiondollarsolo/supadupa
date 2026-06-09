@@ -20,6 +20,8 @@ db-smoke.apps.example.com:5432             direct Postgres
 pooler-smoke.apps.example.com:6543         transaction/session pooler
 ```
 
+Direct Postgres and pooler routes require public `5432`/`6543` bindings. `scripts/setup-compose.sh --mode vps` keeps those bindings on loopback unless `--expose-db` is supplied.
+
 ## DNS Records
 
 For VPS mode, point these records to the server:
@@ -42,25 +44,27 @@ Run setup with explicit hosts:
 
 ```bash
 export CLOUDFLARE_API_TOKEN='...'
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
 scripts/setup-compose.sh \
   --mode vps \
   --admin-host admin.supadupa.example.com \
   --api-host api.supadupa.example.com \
   --apps-domain apps.supadupa.example.com \
-  --email ops@example.com \
-  --bootstrap-password 'change-this-password'
+  --email ops@example.com
 ```
 
 ## Traefik Edge
 
-The edge profile runs Traefik and publishes:
+The edge profile runs Traefik and publishes by default:
 
 ```text
 80      HTTP redirect and ACME HTTP reachability
 443     HTTPS control-plane and project HTTP surfaces
-5432    TLS-routed direct Postgres
-6543    TLS-routed pooler
 ```
+
+With `--expose-db` or explicit `SUPADUPA_POSTGRES_ADDR=0.0.0.0:5432` and `SUPADUPA_POOLER_ADDR=0.0.0.0:6543`, Traefik also publishes TLS-routed direct Postgres and pooler routes. This is only needed for external raw Postgres/pooler clients; browser apps and `supabase-js` style clients continue to use the public HTTPS project routes when DB ingress is private.
+
+If direct database ingress is public, restrict `5432` and `6543` to trusted client networks with host or provider firewall rules. Configure the same trusted CIDRs in `Settings -> Database Ingress`; saving that setting rewrites existing project route manifests so Traefik reloads TCP `ipAllowList` middleware and the Admin dashboard can report `Public with allowlist` instead of unrestricted public ingress.
 
 Start with:
 
@@ -140,12 +144,12 @@ On AWS infrastructure, you can use an instance role instead of static access key
 Run setup:
 
 ```bash
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
 scripts/setup-compose.sh \
   --mode vps \
   --dns-provider route53 \
   --domain example.com \
-  --email ops@example.com \
-  --bootstrap-password 'change-this-password'
+  --email ops@example.com
 ```
 
 Start:
@@ -159,7 +163,8 @@ docker compose -f deploy/compose.yaml --profile edge up -d --build
 For non-public local routing, use offline mode:
 
 ```bash
-scripts/setup-compose.sh --mode offline --bootstrap-password 'change-this-password'
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
+scripts/setup-compose.sh --mode offline
 scripts/setup-local-dns.sh --domain supadupa.test
 docker compose -f deploy/compose.yaml --profile edge up -d --build
 ```

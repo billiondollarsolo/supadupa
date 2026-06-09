@@ -18,7 +18,8 @@ It does not provide browser-trusted public TLS unless you trust the generated lo
 ## Quick Start
 
 ```bash
-scripts/setup-compose.sh --mode offline --bootstrap-password 'change-this-password'
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
+scripts/setup-compose.sh --mode offline
 scripts/setup-local-dns.sh --domain supadupa.test
 docker compose -f deploy/compose.yaml --profile edge up -d --build
 ```

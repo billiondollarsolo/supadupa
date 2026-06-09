@@ -56,8 +56,8 @@ For local loopback evaluation:
 
 - Linux or macOS with Docker
 - Docker Compose v2
-- Go 1.23+
-- Node 22+
+- Go 1.26.4+ if running binaries natively
+- Node `^20.19.0` or `>=22.12.0`
 
 For a real VPS install:
 
@@ -66,15 +66,16 @@ For a real VPS install:
 - Docker and Docker Compose v2
 - DNS control for your domain
 - Cloudflare DNS API token for Let's Encrypt DNS-01
-- Open inbound ports `80`, `443`, `5432`, and `6543`
+- Open inbound ports `80` and `443`; open `5432` and `6543` only when intentionally exposing public DB/pooler routes.
 
 ## Quick Start: Local Loopback
 
 This starts the control plane, meta database, and admin UI on local ports. It does not give you public project TLS routes.
 
 ```bash
-scripts/setup-compose.sh --mode local --bootstrap-password 'change-this-password'
-docker compose -f deploy/compose.yaml up -d --build
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
+scripts/setup-compose.sh --mode local
+docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.apply.yaml up -d --build
 ```
 
 Open:
@@ -88,7 +89,7 @@ Login with the bootstrap email/password written in `.env`. The default bootstrap
 To stop:
 
 ```bash
-docker compose -f deploy/compose.yaml down
+docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.apply.yaml down
 ```
 
 ## Quick Start: VPS With DNS And TLS
@@ -103,13 +104,15 @@ Create a Cloudflare API token with DNS edit permission for that zone, then run:
 
 ```bash
 export CLOUDFLARE_API_TOKEN='...'
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
 scripts/setup-compose.sh \
   --mode vps \
   --domain example.com \
   --email ops@example.com \
-  --bootstrap-email admin@example.com \
-  --bootstrap-password 'change-this-password'
+  --bootstrap-email admin@example.com
 ```
+
+Add `--expose-db` only when this host should publish direct Postgres and pooler routes on `5432` and `6543`.
 
 Create DNS records pointing at the VPS:
 
@@ -122,7 +125,7 @@ api.example.com         A/AAAA  <server-ip>
 Start the public edge stack:
 
 ```bash
-docker compose -f deploy/compose.yaml --profile edge up -d --build
+docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 Open:
@@ -224,7 +227,7 @@ Common commands:
 docker compose -f deploy/compose.yaml ps
 docker compose -f deploy/compose.yaml logs -f supadupavisor
 docker compose -f deploy/compose.yaml --profile edge logs -f edge-router
-docker compose -f deploy/compose.yaml --profile edge up -d --build
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 Runtime data lives under `runtime/` by default:
@@ -251,7 +254,7 @@ The upgrade API creates or verifies a pre-upgrade logical backup and records rol
 Control-plane updates use normal Compose rebuild/restart:
 
 ```bash
-docker compose -f deploy/compose.yaml --profile edge up -d --build
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 The API runs meta DB migrations on startup and reconciles persisted project runtime artifacts.
@@ -273,7 +276,10 @@ Run backend/API natively while meta DB and project runtime use containers:
 ```bash
 docker compose -f deploy/compose.yaml up -d meta-db
 export SUPADUPA_META_DSN='postgres://supadupa:supadupa@localhost:15432/supadupa_meta?sslmode=disable'
+export SUPADUPA_SECRET_KEY="$(openssl rand -hex 32)"
+export SUPADUPA_AUTH_SECRET="$(openssl rand -hex 32)"
 export SUPADUPA_COMPOSE_APPLY=true
+export SUPADUPA_PROJECT_ROOT="$PWD/runtime/projects"
 go run ./cmd/supadupa api
 ```
 
@@ -281,7 +287,7 @@ Run the admin UI:
 
 ```bash
 npm --prefix frontend install
-npm --prefix frontend run dev -- --host 0.0.0.0 --port 3000
+npm --prefix frontend run dev -- --host 127.0.0.1 --port 3000
 ```
 
 Run tests:
@@ -315,6 +321,7 @@ Durable recovery validation requires real off-host S3/R2 credentials. See [scrip
 - Keep Cloudflare and S3/R2 tokens scoped to the minimum permissions.
 - Do not expose the Traefik dashboard publicly.
 - Keep project containers off host-published ports; use Traefik routes.
+- Keep DB-facing edge ports loopback unless public Postgres/pooler access is an explicit requirement.
 - Treat service-role keys, DB passwords, SCIM tokens, and backup target secrets as production secrets.
 
 ## Troubleshooting

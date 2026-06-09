@@ -1,0 +1,92 @@
+{{- if .Values.metaDb.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "supadupa.metaDbHost" . }}
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meta-db
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  selector:
+    {{- include "supadupa.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: meta-db
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "supadupa.fullname" . }}-meta-db
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meta-db
+spec:
+  serviceName: {{ include "supadupa.metaDbHost" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "supadupa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: meta-db
+  template:
+    metadata:
+      labels:
+        {{- include "supadupa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: meta-db
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.metaDb.podSecurityContext | nindent 8 }}
+      containers:
+        - name: postgres
+          image: "{{ .Values.metaDb.image.repository }}:{{ .Values.metaDb.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.metaDb.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.metaDb.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "supadupa.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          securityContext:
+            {{- toYaml .Values.metaDb.securityContext | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.metaDb.username | quote }}, "-d", {{ .Values.metaDb.database | quote }}]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.metaDb.username | quote }}, "-d", {{ .Values.metaDb.database | quote }}]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.metaDb.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.metaDb.storage.storageClassName }}
+        storageClassName: {{ .Values.metaDb.storage.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.metaDb.storage.size | quote }}
+{{- end }}

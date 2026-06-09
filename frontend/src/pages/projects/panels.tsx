@@ -2,10 +2,21 @@ import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { flexRender, getCoreRowModel, getFilteredRowModel, getSortedRowModel, useReactTable, type ColumnDef, type SortingState } from "@tanstack/react-table";
-import { Boxes, BrainCircuit, Database, Gauge, Network, Plus, Search, Server, Shield, Sparkles, type LucideIcon } from "lucide-react";
+import { Boxes, Plus, Search } from "lucide-react";
 import { createProject } from "../../api";
+import { AppPanel } from "../../components/app/app-panel";
+import { MetricCard } from "../../components/app/metric-card";
+import { Button } from "../../components/ui/button";
+import { EmptyState } from "../../components/ui/empty-state";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
+import { Field } from "../../components/ui/field";
+import { Input } from "../../components/ui/input";
+import { NativeSelect } from "../../components/ui/native-select";
+import { StatusPill } from "../../components/ui/status-pill";
 import { formatBytes, formatDateTime } from "../../lib/format";
 import type { Host, HostCapacity, Org, PlatformDefaults, Project, StackReleaseManifest } from "../../types";
+
+type StackProfile = "essential" | "full" | "orioledb";
 
 type CreateProjectForm = {
   ref: string;
@@ -13,65 +24,65 @@ type CreateProjectForm = {
   host_id: string;
   domain: string;
   stack_version: string;
-  profile: "essential" | "full" | "orioledb";
+  profile: StackProfile;
   resource_tier: "small" | "medium" | "large";
+  // Exact-size overrides. 0 means "use the tier preset" for that dimension.
+  cpu: number;
+  ram_mb: number;
+  disk_gb: number;
+  // Opt-in: apply real container CPU/memory limits to the database service.
+  enforce_limits: boolean;
+  // Per-service enable map (keys = ALL_SERVICES). The profile seeds this; the
+  // user can then toggle any service individually.
+  services: Record<string, boolean>;
 };
 
-type ProjectIntent = "prototype" | "production" | "ai" | "enterprise";
+// Platform sizing bounds (must mirror the control-plane validateResourceSizing).
+const SIZING_BOUNDS = { maxCpu: 64, minRamMB: 256, maxRamMB: 262144, maxDiskGB: 16384 } as const;
 
-const intentOptions: Array<{
-  id: ProjectIntent;
-  label: string;
-  description: string;
-  profile: CreateProjectForm["profile"];
-  tier: CreateProjectForm["resource_tier"];
-  icon: LucideIcon;
-  highlights: string[];
-}> = [
-  {
-    id: "prototype",
-    label: "Prototype or local dev",
-    description: "Small isolated stack for experiments, demos, and local Docker Compose deployments.",
-    profile: "essential",
-    tier: "small",
-    icon: Sparkles,
-    highlights: ["Small footprint", "Fast create", "Easy reset"],
-  },
-  {
-    id: "production",
-    label: "Team production app",
-    description: "Full Supabase-compatible surface for an app a team will actually run.",
-    profile: "full",
-    tier: "medium",
-    icon: Gauge,
-    highlights: ["Full stack", "Team default", "Room to grow"],
-  },
-  {
-    id: "ai",
-    label: "AI or data workflow",
-    description: "Full stack with storage, functions, queues, embeddings, and pgvector-oriented defaults.",
-    profile: "full",
-    tier: "medium",
-    icon: BrainCircuit,
-    highlights: ["pgvector ready", "Functions ready", "Queue friendly"],
-  },
-  {
-    id: "enterprise",
-    label: "Enterprise workload",
-    description: "Higher reserved capacity for heavier tenants, stricter isolation, and later K8s migration.",
-    profile: "full",
-    tier: "large",
-    icon: Network,
-    highlights: ["Dedicated capacity", "P3 ready", "Operational headroom"],
-  },
+// The full Supabase service set the control plane can render per project. Each is
+// individually gated in the rendered compose file, so any combination is valid.
+const PROJECT_SERVICES: Array<{ key: string; label: string; description: string }> = [
+  { key: "auth", label: "Auth", description: "GoTrue — signups, login, JWTs, OAuth/SSO." },
+  { key: "rest", label: "REST API", description: "PostgREST — auto REST API over your tables." },
+  { key: "graphql", label: "GraphQL", description: "pg_graphql — GraphQL endpoint over your schema." },
+  { key: "realtime", label: "Realtime", description: "Postgres changes, presence & broadcast over WebSockets." },
+  { key: "storage", label: "Storage", description: "S3-compatible object storage with RLS." },
+  { key: "imgproxy", label: "Imgproxy", description: "On-the-fly image resizing/transforms for Storage." },
+  { key: "functions", label: "Edge Functions", description: "Deno runtime for serverless functions." },
+  { key: "pooler", label: "Pooler", description: "Supavisor — connection pooling for Postgres." },
+  { key: "studio", label: "Studio", description: "The web dashboard for this project." },
+  { key: "analytics", label: "Analytics", description: "Logflare — log analytics backend." },
+  { key: "vector", label: "Vector", description: "Log shipping/collection agent." },
+];
+const ALL_SERVICES = PROJECT_SERVICES.map((s) => s.key);
+
+// "Essential" trims the heavier optional surfaces (GraphQL, image proxy, log
+// analytics + shipping) to a lean app-serving core; "full"/"orioledb" enable
+// everything. The DB engine is the other axis: orioledb swaps stock Postgres for
+// the OrioleDB storage engine (preview).
+const ESSENTIAL_OFF = new Set(["graphql", "imgproxy", "analytics", "vector"]);
+
+function servicesForProfile(profile: StackProfile): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const key of ALL_SERVICES) out[key] = profile === "essential" ? !ESSENTIAL_OFF.has(key) : true;
+  return out;
+}
+
+const STACK_PROFILES: Array<{ id: StackProfile; label: string; engine: string; blurb: string }> = [
+  { id: "full", label: "Full", engine: "Postgres", blurb: "Stock Postgres with the complete Supabase service set. The default for real apps." },
+  { id: "essential", label: "Essential", engine: "Postgres", blurb: "Stock Postgres, lean core (no GraphQL, image proxy, or log analytics/shipping). Lighter footprint." },
+  { id: "orioledb", label: "OrioleDB", engine: "OrioleDB (preview)", blurb: "Swaps stock Postgres for the OrioleDB storage engine (preview). Same services as Full." },
 ];
 
-export function ProjectTable({
+// Single sortable, searchable projects table.
+export function ProjectsListPanel({
   projects,
   orgNamesById,
   hostsById,
   selectedRef,
   onSelect,
+  onCreate,
   loading,
 }: {
   projects: Project[];
@@ -79,6 +90,7 @@ export function ProjectTable({
   hostsById: Map<string, Host>;
   selectedRef: string;
   onSelect: (ref: string) => void;
+  onCreate: () => void;
   loading: boolean;
 }) {
   const [query, setQuery] = useState("");
@@ -103,7 +115,16 @@ export function ProjectTable({
     {
       accessorKey: "status",
       header: "Status",
-      cell: (info) => <span className={`pill ${info.row.original.status}`}>{info.row.original.status}</span>,
+      cell: (info) => <StatusPill status={info.row.original.status} />,
+    },
+    {
+      id: "runtime",
+      header: "Runtime phase",
+      accessorFn: (project) => project.runtime_status?.phase ?? "",
+      cell: (info) => {
+        const phase = info.row.original.runtime_status?.phase;
+        return phase ? <StatusPill status={phase} /> : <span className="text-faint">—</span>;
+      },
     },
     {
       id: "host",
@@ -154,6 +175,7 @@ export function ProjectTable({
         project.ref,
         orgNamesById.get(project.org_id) ?? project.org_id,
         project.status,
+        project.runtime_status?.phase ?? "",
         project.spec.stack_version,
         project.spec.host_id ?? "default local runtime",
         host?.name ?? "",
@@ -165,170 +187,79 @@ export function ProjectTable({
     getSortedRowModel: getSortedRowModel(),
   });
   const rows = table.getRowModel().rows;
+  const filteredProjects = rows.map((row) => row.original);
 
   return (
-    <section className="panel overflow-hidden">
-      <div className="section-head">
-        <div>
-          <p className="label">Projects</p>
-          <h2>Isolated stacks</h2>
-        </div>
-        <div className="relative w-full max-w-xs">
-          <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" size={14} />
-          <input
-            aria-label="Filter projects"
-            className="input pl-8"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </div>
-      </div>
-      <div className="mt-4 overflow-auto">
-        <table className="w-full min-w-[920px] text-left text-sm">
-          <thead className="text-faint">
-            {table.getHeaderGroups().map((headerGroup) => (
-              <tr className="border-b border-border" key={headerGroup.id}>
-                {headerGroup.headers.map((header) => {
-                  const sorted = header.column.getIsSorted();
-                  return (
-                    <th className="py-2 pr-4 font-medium" key={header.id}>
-                      <button className="flex items-center gap-1 text-left text-faint transition hover:text-text" disabled={!header.column.getCanSort()} onClick={header.column.getToggleSortingHandler()} type="button">
-                        {flexRender(header.column.columnDef.header, header.getContext())}
-                        {sorted ? <span className="text-[10px]">{sorted === "asc" ? "ASC" : "DESC"}</span> : null}
-                      </button>
-                    </th>
-                  );
-                })}
-              </tr>
-            ))}
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr>
-                <td className="py-5 text-muted" colSpan={7}>
-                  Loading projects...
-                </td>
-              </tr>
-            ) : null}
-            {!loading && rows.length === 0 ? (
-              <tr>
-                <td className="py-5 text-muted" colSpan={7}>
-                  No projects match the filter.
-                </td>
-              </tr>
-            ) : null}
-            {rows.map((row) => {
-              const project = row.original;
-              return (
-                <tr
-                  className={project.ref === selectedRef ? "table-row bg-surface-2" : "table-row"}
-                  key={row.id}
-                  onClick={() => onSelect(project.ref)}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <td className="py-3 pr-4" key={cell.id}>
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-export function ProjectCards({
-  projects,
-  orgNamesById,
-  hostsById,
-  selectedRef,
-  onSelect,
-  onAccess,
-  onCreate,
-  loading,
-  maxProjects,
-}: {
-  projects: Project[];
-  orgNamesById: Map<string, string>;
-  hostsById: Map<string, Host>;
-  selectedRef: string;
-  onSelect: (ref: string) => void;
-  onAccess: (ref: string) => void;
-  onCreate: () => void;
-  loading: boolean;
-  maxProjects?: number;
-}) {
-  const visibleProjects = typeof maxProjects === "number" ? projects.slice(0, maxProjects) : projects;
-  return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Projects</p>
-          <h2>Project cards</h2>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="pill">{projects.length} visible</span>
-          <button className="button secondary h-8 min-h-8 justify-center" onClick={onCreate} type="button">
+    <AppPanel
+      className="overflow-hidden"
+      eyebrow="Projects"
+      title={`${projects.length} project${projects.length === 1 ? "" : "s"}`}
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative w-full max-w-xs">
+            <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" size={14} />
+            <Input
+              aria-label="Search projects"
+              className="pl-8"
+              placeholder="Search projects"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
+          <Button className="justify-center" onClick={onCreate} size="sm" type="button" variant="secondary">
             <Plus size={14} />
             Create project
-          </button>
+          </Button>
         </div>
-      </div>
-      <div className="project-card-grid mt-4">
-        {loading ? <p className="text-sm text-muted">Loading projects...</p> : null}
-        {!loading && visibleProjects.length === 0 ? <p className="text-sm text-muted">No projects available.</p> : null}
-        {visibleProjects.map((project) => {
-          const host = project.spec.host_id ? hostsById.get(project.spec.host_id) : undefined;
-          const reservation = reservationForTier(project.spec.resource_tier);
-          return (
-            <article className={project.ref === selectedRef ? "project-card active" : "project-card"} key={project.ref}>
-              <button className="project-card-button" onClick={() => onSelect(project.ref)} type="button">
-                <div className="project-card-header">
-                  <div className="min-w-0">
-                    <p className="truncate text-base font-medium">{project.name}</p>
-                    <p className="truncate font-mono text-xs text-muted">{project.ref}</p>
-                  </div>
-                  <span className={`pill ${project.status}`}>{project.status}</span>
-                </div>
-                <div className="project-card-panel">
-                  <p className="label">API URL</p>
-                  <p className="mt-1 truncate font-mono text-xs text-muted">https://{project.ref}.{project.spec.domain}</p>
-                </div>
-                <div className="project-card-detail-grid">
-                  <CardMetric icon={Database} label="Org" value={orgNamesById.get(project.org_id) ?? project.org_id} />
-                  <CardMetric icon={Boxes} label="Tier" value={project.spec.resource_tier} />
-                  <CardMetric icon={Database} label="Profile" value={project.spec.profile} />
-                  <CardMetric icon={Shield} label="Access" value="org/team + project grants" />
-                </div>
-                <ResourceSummary host={host} reservation={reservation} />
-                <div className="project-card-detail-grid">
-                  <CardMetric icon={Boxes} label="Host" value={host?.name ?? "Default local runtime"} />
-                  <CardMetric icon={Database} label="Version" value={project.spec.stack_version} />
-                  <CardMetric icon={Boxes} label="Created" value={formatDateTime(project.created_at)} />
-                  <CardMetric icon={Shield} label="Runtime" value={project.runtime_status?.phase ?? project.status} />
-                </div>
-                <div className="project-card-panel">
-                  <p className="truncate text-xs text-muted">{project.message ?? "Dedicated isolated stack"}</p>
-                  <p className="truncate font-mono text-xs text-faint">{host?.address ?? "local"} · {project.spec.domain}</p>
-                </div>
-              </button>
-              <div className="project-card-actions">
-                <button className="button secondary h-8 min-h-8 justify-center" onClick={() => onSelect(project.ref)} type="button">
-                  Open
-                </button>
-                <button className="button secondary h-8 min-h-8 justify-center" onClick={() => onAccess(project.ref)} type="button">
-                  <Shield size={14} />
-                  Access
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
-    </section>
+      }
+    >
+      {loading ? <p className="mt-4 text-sm text-muted">Loading projects...</p> : null}
+      {!loading && projects.length === 0 ? (
+        <EmptyState className="mt-4" icon={Boxes} title="No projects yet" description="Provision an isolated Supabase stack to get started." action={<Button className="justify-center" onClick={onCreate} size="sm" type="button" variant="secondary"><Plus size={14} />Create project</Button>} />
+      ) : null}
+      {!loading && projects.length > 0 && filteredProjects.length === 0 ? (
+        <EmptyState className="mt-4" icon={Search} title="No matches" description="No projects match your search." />
+      ) : null}
+      {!loading && rows.length > 0 ? (
+        <div className="data-table-wrap mt-4">
+          <Table className="data-table" style={{ minWidth: 1160 }}>
+            <TableHeader>
+              {table.getHeaderGroups().map((headerGroup) => (
+                <TableRow key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => {
+                    const sorted = header.column.getIsSorted();
+                    return (
+                      <TableHead key={header.id}>
+                        {header.column.getCanSort() ? (
+                          <button className="flex items-center gap-1 text-left uppercase transition hover:text-text" onClick={header.column.getToggleSortingHandler()} type="button">
+                            {flexRender(header.column.columnDef.header, header.getContext())}
+                            {sorted ? <span className="text-accent">{sorted === "asc" ? "↑" : "↓"}</span> : null}
+                          </button>
+                        ) : (
+                          flexRender(header.column.columnDef.header, header.getContext())
+                        )}
+                      </TableHead>
+                    );
+                  })}
+                </TableRow>
+              ))}
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => {
+                const project = row.original;
+                return (
+                  <TableRow className={`cursor-pointer ${project.ref === selectedRef ? "bg-surface-2" : ""}`} key={row.id} onClick={() => onSelect(project.ref)}>
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>
+                    ))}
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      ) : null}
+    </AppPanel>
   );
 }
 
@@ -337,21 +268,19 @@ function ResourceSummary({ host, reservation }: { host?: Host; reservation: Host
     <div className="resource-summary">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <p className="label">Reserved resources</p>
+          <p className="label">Reserved of host capacity</p>
           <p className="mt-1 truncate text-xs text-muted">
             {reservation.cpu} vCPU · {formatBytes(reservation.ram_mb * 1024 * 1024)} RAM · {reservation.disk_gb} GB disk
           </p>
         </div>
-        <span className="pill">{reservation.disk_iops.toLocaleString()} IOPS</span>
       </div>
       <div className="grid gap-2">
-        <ResourceBar label="CPU" value={reservation.cpu} total={host?.capacity.cpu} suffix="vCPU" />
-        <ResourceBar label="RAM" value={reservation.ram_mb} total={host?.capacity.ram_mb} format={(value) => formatBytes(value * 1024 * 1024)} />
-        <ResourceBar label="Disk" value={reservation.disk_gb} total={host?.capacity.disk_gb} suffix="GB" />
-        <ResourceBar label="IOPS" value={reservation.disk_iops} total={host?.capacity.disk_iops} format={(value) => value.toLocaleString()} />
+        <ResourceBar label={host ? "CPU reserved / host" : "CPU"} value={reservation.cpu} total={host?.capacity.cpu} reference={LARGE_PRESET.cpu} suffix="vCPU" />
+        <ResourceBar label={host ? "RAM reserved / host" : "RAM"} value={reservation.ram_mb} total={host?.capacity.ram_mb} reference={LARGE_PRESET.ram_mb} format={(value) => formatBytes(value * 1024 * 1024)} />
+        <ResourceBar label={host ? "Disk reserved / host" : "Disk"} value={reservation.disk_gb} total={host?.capacity.disk_gb} reference={LARGE_PRESET.disk_gb} suffix="GB" />
       </div>
       <p className="mt-2 truncate text-xs text-faint">
-        {host ? `Host reserved: ${host.used.cpu}/${host.capacity.cpu || "-"} vCPU · ${formatBytes(host.used.ram_mb * 1024 * 1024)} RAM` : "No host capacity registered yet"}
+        {host ? `Host total reserved: ${host.used.cpu}/${host.capacity.cpu || "-"} vCPU · ${formatBytes(host.used.ram_mb * 1024 * 1024)} RAM` : "No host selected; bars are scaled to the large preset for comparison."}
       </p>
     </div>
   );
@@ -361,47 +290,57 @@ function ResourceBar({
   label,
   value,
   total,
+  reference,
   suffix,
   format,
 }: {
   label: string;
   value: number;
   total?: number;
+  // Fallback scale used when no host total is known, so the bar still reflects
+  // the chosen size (scaled against the largest preset for comparison).
+  reference?: number;
   suffix?: string;
   format?: (value: number) => string;
 }) {
-  const percent = total && total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0;
+  const scale = total && total > 0 ? total : reference;
+  const percent = scale && scale > 0 ? Math.min(100, Math.max(0, (value / scale) * 100)) : 0;
   const valueLabel = format ? format(value) : `${value}${suffix ? ` ${suffix}` : ""}`;
-  const totalLabel = total && total > 0 ? (format ? format(total) : `${total}${suffix ? ` ${suffix}` : ""}`) : "-";
+  const totalLabel = total && total > 0 ? (format ? format(total) : `${total}${suffix ? ` ${suffix}` : ""}`) : null;
   return (
     <div className="grid gap-1">
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="text-faint">{label}</span>
-        <span className="truncate text-muted">{valueLabel} / {totalLabel}</span>
+        <span className="truncate text-muted">{valueLabel}{totalLabel ? ` / ${totalLabel}` : ""}</span>
       </div>
       <div className="resource-bar" aria-label={`${label} reserved`}>
-        <span style={{ width: `${percent || 8}%` }} />
+        <span style={{ width: `${Math.max(percent, 4)}%` }} />
       </div>
     </div>
   );
 }
 
-function CardMetric({ icon: Icon, label, value }: { icon: typeof Database; label: string; value: string }) {
-  return (
-    <div className="metric-cell min-w-0">
-      <div className="mb-1 flex items-center gap-1 text-faint">
-        <Icon size={12} />
-        <p className="label">{label}</p>
-      </div>
-      <p className="truncate text-xs text-muted">{value}</p>
-    </div>
-  );
-}
+// Largest tier preset — used as the comparison scale for the plan-panel bars
+// when no host is selected, so different sizes render at visibly different fills.
+const LARGE_PRESET = reservationForTier("large");
 
 function reservationForTier(tier: string): HostCapacity {
-  if (tier === "large") return { cpu: 4, ram_mb: 8192, disk_gb: 100, disk_iops: 12000, projects: 1 };
-  if (tier === "medium") return { cpu: 2, ram_mb: 4096, disk_gb: 50, disk_iops: 6000, projects: 1 };
-  return { cpu: 1, ram_mb: 2048, disk_gb: 20, disk_iops: 3000, projects: 1 };
+  if (tier === "large") return { cpu: 4, ram_mb: 8192, disk_gb: 100, projects: 1 };
+  if (tier === "medium") return { cpu: 2, ram_mb: 4096, disk_gb: 50, projects: 1 };
+  return { cpu: 1, ram_mb: 2048, disk_gb: 20, projects: 1 };
+}
+
+// effectiveReservation mirrors the control plane: start from the tier preset and
+// apply any exact per-dimension override (> 0). This is what will actually be
+// reserved and, when enforcement is on, limited on the container.
+function effectiveReservation(form: CreateProjectForm): HostCapacity {
+  const preset = reservationForTier(form.resource_tier);
+  return {
+    cpu: form.cpu > 0 ? form.cpu : preset.cpu,
+    ram_mb: form.ram_mb > 0 ? form.ram_mb : preset.ram_mb,
+    disk_gb: form.disk_gb > 0 ? form.disk_gb : preset.disk_gb,
+    projects: 1,
+  };
 }
 
 export function CreateProjectPanel({
@@ -421,26 +360,40 @@ export function CreateProjectPanel({
   onSelectOrg: (orgId: string) => void;
   onCreated: (project: Project) => void;
 }) {
-  const wizardSteps = ["Goal", "Identity", "Org", "Placement", "Stack", "Review"];
+  const wizardSteps = ["Identity", "Org & placement", "Stack"];
   const [step, setStep] = useState(0);
-  const [intent, setIntent] = useState<ProjectIntent>("production");
+  const smallPreset = reservationForTier("small");
   const [form, setForm] = useState<CreateProjectForm>({
-    ref: "alpha",
-    name: "Alpha",
+    ref: "",
+    name: "",
     host_id: "",
     domain: "supadupa.test",
     stack_version: "latest",
     profile: "full",
     resource_tier: "small",
+    // Exact size always carries concrete numbers (prefilled from the tier
+    // preset); the user can edit any field to override that dimension.
+    cpu: smallPreset.cpu,
+    ram_mb: smallPreset.ram_mb,
+    disk_gb: smallPreset.disk_gb,
+    enforce_limits: false,
+    services: servicesForProfile("full"),
   });
   useEffect(() => {
     if (!defaults) return;
+    const tier = defaults.resource_tier === "medium" || defaults.resource_tier === "large" ? defaults.resource_tier : "small";
+    const preset = reservationForTier(tier);
+    const profile: StackProfile = defaults.profile === "essential" || defaults.profile === "orioledb" ? defaults.profile : "full";
     setForm((current) => ({
       ...current,
       domain: defaults.domain || current.domain,
       stack_version: defaults.stack_version || current.stack_version,
-      profile: defaults.profile === "essential" || defaults.profile === "orioledb" ? defaults.profile : "full",
-      resource_tier: defaults.resource_tier === "medium" || defaults.resource_tier === "large" ? defaults.resource_tier : "small",
+      profile,
+      resource_tier: tier,
+      cpu: preset.cpu,
+      ram_mb: preset.ram_mb,
+      disk_gb: preset.disk_gb,
+      services: servicesForProfile(profile),
     }));
   }, [defaults]);
   const mutation = useMutation({
@@ -448,11 +401,33 @@ export function CreateProjectPanel({
     onSuccess: onCreated,
   });
 
-  function selectIntent(nextIntent: ProjectIntent) {
-    const option = intentOptions.find((item) => item.id === nextIntent);
-    setIntent(nextIntent);
-    if (!option) return;
-    setForm((current) => ({ ...current, profile: option.profile, resource_tier: option.tier }));
+  // Picking a profile re-seeds the service selection from that profile's
+  // template; the user can still toggle individual services afterward.
+  function chooseProfile(profile: StackProfile) {
+    setForm((current) => ({ ...current, profile, services: servicesForProfile(profile) }));
+  }
+
+  function toggleService(key: string) {
+    setForm((current) => {
+      const services = { ...current.services, [key]: !current.services[key] };
+      // Hard dependency: Imgproxy only transforms Storage objects, so it can't
+      // run without Storage. Turning Storage off also turns Imgproxy off.
+      if (key === "storage" && !services.storage) services.imgproxy = false;
+      return { ...current, services };
+    });
+  }
+
+  // Picking a tier preset snaps the exact-size inputs to that preset, so the
+  // numbers always reflect the chosen preset until the user edits them.
+  function chooseTier(tier: CreateProjectForm["resource_tier"]) {
+    const preset = reservationForTier(tier);
+    setForm((current) => ({
+      ...current,
+      resource_tier: tier,
+      cpu: preset.cpu,
+      ram_mb: preset.ram_mb,
+      disk_gb: preset.disk_gb,
+    }));
   }
 
   function submit(event: FormEvent) {
@@ -463,31 +438,41 @@ export function CreateProjectPanel({
 
   const selectedHost = hosts.find((host) => host.id === form.host_id);
   const selectedOrg = orgs.find((org) => org.id === orgId);
-  const selectedIntent = intentOptions.find((option) => option.id === intent) ?? intentOptions[1];
   const latestRelease = stackReleases[0];
   const selectedRelease = stackReleases.find((release) => release.version === form.stack_version);
-  const reservation = reservationForTier(form.resource_tier);
+  const reservation = effectiveReservation(form);
+  const enabledServiceCount = ALL_SERVICES.filter((key) => form.services[key]).length;
+  // Soft advisories — the stack is still valid, but the combination is unusual
+  // and worth surfacing. (Hard deps like Imgproxy→Storage are auto-enforced.)
+  const serviceWarnings: string[] = [];
+  if (!form.services.studio) serviceWarnings.push("Studio is off — this project won't have a dashboard; manage it via the API, CLI, or SQL.");
+  if (form.services.analytics !== form.services.vector) serviceWarnings.push("Analytics (Logflare) and Vector are the logging pipeline — enable both or neither, or project logs won't be collected.");
+  if (!form.services.rest && form.services.storage) serviceWarnings.push("Storage works best with the REST API enabled; some Storage operations route through PostgREST.");
   const hostCapacityProblem = Boolean(selectedHost && !hostCanFit(selectedHost, reservation));
+  const identityValid = form.name.trim().length > 0 && form.ref.trim().length > 0 && form.domain.trim().length > 0;
+  const placementValid = orgId.length > 0 && !hostCapacityProblem;
+  const sizingValid =
+    form.cpu >= 1 && form.cpu <= SIZING_BOUNDS.maxCpu &&
+    form.ram_mb >= SIZING_BOUNDS.minRamMB && form.ram_mb <= SIZING_BOUNDS.maxRamMB &&
+    form.disk_gb >= 1 && form.disk_gb <= SIZING_BOUNDS.maxDiskGB;
+  // Every step now validates before Next, so users can't skip past required input.
   const currentValid =
-    step === 1 ? form.name.trim().length > 0 && form.ref.trim().length > 0 && form.domain.trim().length > 0 :
-    step === 2 ? orgId.length > 0 :
-    true;
-  const canSubmit = orgId.length > 0 && form.name.trim().length > 0 && form.ref.trim().length > 0 && form.domain.trim().length > 0 && !hostCapacityProblem;
+    step === 0 ? identityValid :
+    step === 1 ? placementValid :
+    sizingValid;
+  const canSubmit = orgId.length > 0 && identityValid && !hostCapacityProblem && sizingValid;
   const nextStep = () => setStep((current) => Math.min(current + 1, wizardSteps.length - 1));
   const previousStep = () => setStep((current) => Math.max(current - 1, 0));
 
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6 max-xl:grid-cols-1">
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Create project</p>
-            <h2>Provision isolated Supabase stack</h2>
-          </div>
-          <span className="pill">{selectedIntent.label}</span>
-        </div>
+      <AppPanel
+        eyebrow="Create project"
+        title="Provision isolated Supabase stack"
+        actions={<StatusPill tone="neutral" label={`${form.profile} · ${form.resource_tier}`} />}
+      >
         <p className="mt-2 max-w-2xl text-sm text-muted">
-          Choose the workload first. supadupa turns that into a stack profile, resource reservation, host placement, routing domain, and a dedicated project boundary.
+          Name the project, place it on a host, and pick the stack profile and size. supadupa provisions an isolated Supabase stack with its own Postgres volume, network, JWT keys, and routing.
         </p>
         <form className="mt-4 grid gap-4" onSubmit={submit}>
           <div className="wizard-steps">
@@ -500,29 +485,18 @@ export function CreateProjectPanel({
           </div>
 
           {step === 0 ? (
-            <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-              {intentOptions.map((option) => (
-                <IntentCard active={intent === option.id} key={option.id} option={option} onSelect={() => selectIntent(option.id)} />
-              ))}
-            </div>
-          ) : null}
-
-          {step === 1 ? (
             <div className="grid gap-3">
               <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
-                <label className="grid gap-1">
-                  <span className="label">Project name</span>
-                  <input className="input" aria-label="Project name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">Project ref</span>
-                  <input className="input font-mono" aria-label="Project ref" value={form.ref} onChange={(event) => setForm({ ...form, ref: normalizeProjectRef(event.target.value) })} />
-                </label>
+                <Field label="Project name" required hint="Human-friendly display name.">
+                  <Input placeholder="My production app" aria-label="Project name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+                </Field>
+                <Field label="Project ref" required hint="Lowercase slug used in URLs and the CLI.">
+                  <Input className="font-mono" placeholder="my-production-app" aria-label="Project ref" value={form.ref} onChange={(event) => setForm({ ...form, ref: normalizeProjectRef(event.target.value) })} />
+                </Field>
               </div>
-              <label className="grid gap-1">
-                <span className="label">Base domain</span>
-                <input className="input" aria-label="Project domain" value={form.domain} onChange={(event) => setForm({ ...form, domain: event.target.value })} />
-              </label>
+              <Field label="Base domain" required hint="Projects are exposed at <ref>.<domain>.">
+                <Input placeholder="supadupa.test" aria-label="Project domain" value={form.domain} onChange={(event) => setForm({ ...form, domain: event.target.value })} />
+              </Field>
               <div className="wizard-review">
                 <ReviewRow label="Primary API URL" value={`https://${form.ref || "<ref>"}.${form.domain || "<domain>"}`} />
                 <ReviewRow label="Project boundary" value="Dedicated Postgres volume, network, JWT keys, and Supabase services" />
@@ -530,81 +504,100 @@ export function CreateProjectPanel({
             </div>
           ) : null}
 
-          {step === 2 ? (
+          {step === 1 ? (
             <div className="grid gap-3">
-              <label className="grid gap-1">
-                <span className="label">Organization</span>
-                <select className="input" value={orgId} onChange={(event) => onSelectOrg(event.target.value)}>
+              <Field label="Organization" required hint="Global admins can see all; org and project grants scope everyone else.">
+                <NativeSelect aria-label="Organization" value={orgId} onChange={(event) => onSelectOrg(event.target.value)}>
                   <option value="">Select organization</option>
                   {orgs.map((org) => (
                     <option key={org.id} value={org.id}>
                       {org.name}
                     </option>
                   ))}
-                </select>
-              </label>
+                </NativeSelect>
+              </Field>
               {orgs.length === 0 ? <p className="text-sm text-muted">Create an organization first.</p> : null}
-              <div className="wizard-review">
-                <ReviewRow label="Organization" value={selectedOrg ? selectedOrg.name : orgId || "Missing"} />
-                {selectedOrg ? <ReviewRow label="Org ID" value={selectedOrg.id} /> : null}
-                <ReviewRow label="Access model" value="Global admins can see all; org and project grants scope everyone else" />
-              </div>
-            </div>
-          ) : null}
-
-          {step === 3 ? (
-            <div className="grid gap-3">
-              <label className="grid gap-1">
-                <span className="label">Host placement</span>
-                <select className="input" value={form.host_id} onChange={(event) => setForm({ ...form, host_id: event.target.value })}>
+              <Field label="Host placement" hint="Leave on the local runtime for Compose installs; pick a registered host for capacity accounting.">
+                <NativeSelect aria-label="Host placement" value={form.host_id} onChange={(event) => setForm({ ...form, host_id: event.target.value })}>
                   <option value="">Default local runtime</option>
                   {hosts.map((host) => (
                     <option key={host.id} value={host.id}>
                       {host.name} · {host.address}
                     </option>
                   ))}
-                </select>
-              </label>
+                </NativeSelect>
+              </Field>
               {selectedHost ? <HostFitPanel host={selectedHost} reservation={reservation} /> : <PlacementDefaultPanel />}
               {hostCapacityProblem ? <p className="text-sm text-danger">Selected host does not have enough registered capacity for this tier.</p> : null}
             </div>
           ) : null}
 
-          {step === 4 ? (
+          {step === 2 ? (
             <div className="grid gap-4">
-              <div>
-                <label className="grid gap-1">
-                  <span className="label">Stack version</span>
-                  <select className="input font-mono" value={form.stack_version} onChange={(event) => setForm({ ...form, stack_version: event.target.value })}>
-                    <option value="latest">latest{latestRelease ? ` (${latestRelease.version})` : ""}</option>
-                    {stackReleases.map((release) => (
-                      <option key={release.version} value={release.version}>{release.version}</option>
-                    ))}
-                  </select>
-                </label>
-                <div className="mt-2 wizard-review">
-                  <ReviewRow label="Release catalog" value={stackReleases.length ? `${stackReleases.length} supported stable releases` : "Loading supported releases"} />
-                  <ReviewRow label="Resolved release" value={form.stack_version === "latest" ? latestRelease?.version ?? "latest" : selectedRelease?.version ?? form.stack_version} />
-                </div>
-              </div>
+              <Field label="Stack version" hint={`Catalog: ${stackReleases.length ? `${stackReleases.length} supported stable releases` : "loading"} · resolves to ${form.stack_version === "latest" ? latestRelease?.version ?? "latest" : selectedRelease?.version ?? form.stack_version}`}>
+                <NativeSelect className="font-mono" aria-label="Stack version" value={form.stack_version} onChange={(event) => setForm({ ...form, stack_version: event.target.value })}>
+                  <option value="latest">latest{latestRelease ? ` (${latestRelease.version})` : ""}</option>
+                  {stackReleases.map((release) => (
+                    <option key={release.version} value={release.version}>{release.version}</option>
+                  ))}
+                </NativeSelect>
+              </Field>
               <div>
                 <p className="label">Stack profile</p>
+                <p className="mt-1 text-xs text-faint">Sets the database engine and a starting service set. Fine-tune individual services below.</p>
                 <div className="mt-2 grid grid-cols-3 gap-2 max-lg:grid-cols-1">
-                  {(["full", "essential", "orioledb"] as const).map((profile) => (
-                    <button className={form.profile === profile ? "choice active" : "choice"} key={profile} onClick={() => setForm({ ...form, profile })} type="button">
-                      <span className="text-sm font-medium capitalize">{profile}</span>
-                      <span className="text-xs text-faint">{profile === "full" ? "All upstream stack surfaces" : profile === "essential" ? "Reduced local footprint" : "Full stack with OrioleDB metadata"}</span>
+                  {STACK_PROFILES.map((profile) => (
+                    <button className={form.profile === profile.id ? "choice active min-h-[104px]" : "choice min-h-[104px]"} key={profile.id} onClick={() => chooseProfile(profile.id)} type="button">
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium">{profile.label}</span>
+                        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-faint">{profile.engine}</span>
+                      </span>
+                      <span className="text-xs leading-5 text-muted">{profile.blurb}</span>
                     </button>
                   ))}
                 </div>
               </div>
+              <div className="rounded-md border border-border bg-bg p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="label">Services</p>
+                  <span className="text-xs text-faint">{enabledServiceCount} of {ALL_SERVICES.length} enabled</span>
+                </div>
+                <p className="mt-1 text-xs leading-5 text-muted">Each service runs as its own container in this project's isolated stack. The profile seeds these — toggle any of them. The database is always included.</p>
+                <div className="mt-3 grid grid-cols-2 gap-2 max-md:grid-cols-1">
+                  {PROJECT_SERVICES.map((service) => {
+                    // Imgproxy is gated on Storage (it transforms Storage objects).
+                    const requiresStorage = service.key === "imgproxy";
+                    const blocked = requiresStorage && !form.services.storage;
+                    const enabled = Boolean(form.services[service.key]) && !blocked;
+                    return (
+                      <label className={`${enabled ? "choice active" : "choice"} items-start text-left ${blocked ? "opacity-50" : ""}`} key={service.key}>
+                        <span className="flex w-full items-start gap-2">
+                          <input type="checkbox" className="mt-1" checked={enabled} disabled={blocked} onChange={() => toggleService(service.key)} aria-label={service.label} />
+                          <span className="grid gap-0.5">
+                            <span className="text-sm font-medium">{service.label}</span>
+                            <span className="text-xs leading-5 text-muted">{service.description}{blocked ? " Requires Storage." : ""}</span>
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {serviceWarnings.length ? (
+                  <ul className="mt-3 grid gap-1">
+                    {serviceWarnings.map((warning) => (
+                      <li className="text-xs leading-5 text-warning" key={warning}>⚠ {warning}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
               <div>
-                <p className="label">Resource tier</p>
+                <p className="label">Resource tier preset</p>
+                <p className="mt-1 text-xs text-faint">Pick a preset to set sensible numbers, then fine-tune the exact size below.</p>
                 <div className="mt-2 grid grid-cols-3 gap-2 max-lg:grid-cols-1">
                   {(["small", "medium", "large"] as const).map((resourceTier) => {
                     const tierReservation = reservationForTier(resourceTier);
                     return (
-                      <button className={form.resource_tier === resourceTier ? "choice active" : "choice"} key={resourceTier} onClick={() => setForm({ ...form, resource_tier: resourceTier })} type="button">
+                      <button className={form.resource_tier === resourceTier ? "choice active" : "choice"} key={resourceTier} onClick={() => chooseTier(resourceTier)} type="button">
                         <span className="text-sm font-medium capitalize">{resourceTier}</span>
                         <span className="text-xs text-faint">{tierReservation.cpu} vCPU · {formatBytes(tierReservation.ram_mb * 1024 * 1024)} · {tierReservation.disk_gb} GB disk</span>
                       </button>
@@ -612,106 +605,84 @@ export function CreateProjectPanel({
                   })}
                 </div>
               </div>
-            </div>
-          ) : null}
-
-          {step === 5 ? (
-            <div className="wizard-review">
-              <ReviewRow label="Goal" value={selectedIntent.label} />
-              <ReviewRow label="Name" value={form.name} />
-              <ReviewRow label="Ref" value={form.ref} />
-              <ReviewRow label="Org" value={selectedOrg ? selectedOrg.name : orgId || "Missing"} />
-              <ReviewRow label="Host" value={selectedHost ? `${selectedHost.name} · ${selectedHost.address}` : "Default local runtime"} />
-              <ReviewRow label="Stack" value={form.stack_version === "latest" ? `latest (${latestRelease?.version ?? "default"})` : form.stack_version} />
-              <ReviewRow label="Profile" value={form.profile} />
-              <ReviewRow label="Tier" value={`${form.resource_tier} · ${reservation.cpu} vCPU · ${formatBytes(reservation.ram_mb * 1024 * 1024)} RAM · ${reservation.disk_gb} GB disk`} />
-              <ReviewRow label="API domain" value={`${form.ref}.${form.domain}`} />
+              <div className="rounded-md border border-border bg-bg p-3">
+                <p className="label">Exact size</p>
+                <p className="mt-1 text-xs leading-5 text-muted">Prefilled from the {form.resource_tier} preset — edit any field to set an exact CPU / RAM / disk size for this project.</p>
+                <div className="mt-3 grid grid-cols-3 gap-2 max-md:grid-cols-1">
+                  <Field label="CPU (cores)" hint={`1 – ${SIZING_BOUNDS.maxCpu}`}>
+                    <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxCpu} aria-label="CPU cores" value={form.cpu} onChange={(event) => setForm({ ...form, cpu: Number(event.target.value) })} />
+                  </Field>
+                  <Field label="RAM (MB)" hint={`${SIZING_BOUNDS.minRamMB} – ${SIZING_BOUNDS.maxRamMB}`}>
+                    <Input className="font-mono" type="number" min={SIZING_BOUNDS.minRamMB} max={SIZING_BOUNDS.maxRamMB} step={256} aria-label="RAM in MB" value={form.ram_mb} onChange={(event) => setForm({ ...form, ram_mb: Number(event.target.value) })} />
+                  </Field>
+                  <Field label="Disk (GB)" hint={`1 – ${SIZING_BOUNDS.maxDiskGB}`}>
+                    <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxDiskGB} aria-label="Disk in GB" value={form.disk_gb} onChange={(event) => setForm({ ...form, disk_gb: Number(event.target.value) })} />
+                  </Field>
+                </div>
+                {!sizingValid ? <p className="mt-2 text-xs text-danger">Sizing is out of range. CPU 1–{SIZING_BOUNDS.maxCpu} cores, RAM {SIZING_BOUNDS.minRamMB}–{SIZING_BOUNDS.maxRamMB} MB, disk 1–{SIZING_BOUNDS.maxDiskGB} GB.</p> : null}
+              </div>
+              <div className="rounded-md border border-border bg-bg p-3">
+                <label className="flex cursor-pointer items-start gap-3">
+                  <input type="checkbox" className="mt-1" checked={form.enforce_limits} onChange={(event) => setForm({ ...form, enforce_limits: event.target.checked })} aria-label="Enforce runtime limits" />
+                  <span className="grid gap-1">
+                    <span className="text-sm font-medium">Enforce limits on the database container</span>
+                    <span className="text-xs leading-5 text-muted">When on, the project's Postgres container gets hard CPU/memory limits ({reservation.cpu} vCPU · {formatBytes(reservation.ram_mb * 1024 * 1024)}). When off, the size is used for placement and quota accounting only.</span>
+                  </span>
+                </label>
+              </div>
             </div>
           ) : null}
 
           <div className="flex gap-2 max-sm:flex-col">
-            <button className="button secondary justify-center" disabled={step === 0 || mutation.isPending} onClick={previousStep} type="button">
+            <Button className="justify-center" disabled={step === 0 || mutation.isPending} onClick={previousStep} type="button" variant="secondary">
               Back
-            </button>
+            </Button>
             {step < wizardSteps.length - 1 ? (
-              <button className="button justify-center" disabled={!currentValid || mutation.isPending} onClick={nextStep} type="button">
+              <Button className="justify-center" disabled={!currentValid || mutation.isPending} onClick={nextStep} type="button">
                 Next
-              </button>
+              </Button>
             ) : (
-              <button className="button justify-center" disabled={!canSubmit || mutation.isPending} type="submit">
+              <Button className="justify-center" disabled={!canSubmit || mutation.isPending} type="submit">
                 <Plus size={14} />
                 Create project
-              </button>
+              </Button>
             )}
           </div>
           {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
         </form>
-      </section>
-      <CreatePlanPanel form={form} host={selectedHost} intent={selectedIntent} org={selectedOrg} reservation={reservation} stackReleases={stackReleases} />
+      </AppPanel>
+      <CreatePlanPanel form={form} host={selectedHost} org={selectedOrg} reservation={reservation} stackReleases={stackReleases} />
     </div>
-  );
-}
-
-function IntentCard({
-  active,
-  onSelect,
-  option,
-}: {
-  active: boolean;
-  onSelect: () => void;
-  option: (typeof intentOptions)[number];
-}) {
-  const Icon = option.icon;
-  return (
-    <button className={active ? "choice active min-h-[160px]" : "choice min-h-[160px]"} onClick={onSelect} type="button">
-      <div className="flex items-start justify-between gap-3">
-        <span className="grid h-9 w-9 place-items-center rounded-md border border-border bg-surface-2 text-text">
-          <Icon size={16} />
-        </span>
-        <span className="pill">{option.profile} · {option.tier}</span>
-      </div>
-      <span className="text-sm font-medium">{option.label}</span>
-      <span className="text-xs leading-5 text-muted">{option.description}</span>
-      <span className="mt-auto flex flex-wrap gap-1">
-        {option.highlights.map((highlight) => (
-          <span className="pill" key={highlight}>{highlight}</span>
-        ))}
-      </span>
-    </button>
   );
 }
 
 function CreatePlanPanel({
   form,
   host,
-  intent,
   org,
   reservation,
   stackReleases,
 }: {
   form: CreateProjectForm;
   host?: Host;
-  intent: (typeof intentOptions)[number];
   org?: Org;
   reservation: HostCapacity;
   stackReleases: StackReleaseManifest[];
 }) {
   const latestRelease = stackReleases[0];
+  const enabledServices = PROJECT_SERVICES.filter((service) => form.services[service.key]).map((service) => service.label);
   return (
     <aside className="grid content-start gap-3">
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <p className="label">Provisioning plan</p>
-            <h2>{form.name || "New project"}</h2>
-          </div>
-          <span className="pill">{form.resource_tier}</span>
-        </div>
+      <AppPanel
+        eyebrow="Provisioning plan"
+        title={form.name || "New project"}
+        actions={<StatusPill tone="neutral" label={form.resource_tier} />}
+      >
         <div className="mt-4 grid gap-3">
-          <div className="rounded-md border border-border bg-bg p-3">
-            <p className="label">Workload</p>
-            <p className="mt-1 text-sm font-medium">{intent.label}</p>
-            <p className="mt-1 text-xs leading-5 text-muted">{intent.description}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <MetricCard label="vCPU" value={`${reservation.cpu}`} />
+            <MetricCard label="RAM" value={formatBytes(reservation.ram_mb * 1024 * 1024)} />
+            <MetricCard label="Disk" value={`${reservation.disk_gb} GB`} />
           </div>
           <ResourceSummary host={host} reservation={reservation} />
           <div className="wizard-review">
@@ -719,29 +690,12 @@ function CreatePlanPanel({
             <ReviewRow label="Host" value={host ? host.name : "Default local runtime"} />
             <ReviewRow label="Stack" value={form.stack_version === "latest" ? `latest (${latestRelease?.version ?? "default"})` : form.stack_version} />
             <ReviewRow label="API URL" value={`https://${form.ref || "<ref>"}.${form.domain || "<domain>"}`} />
-            <ReviewRow label="Profile" value={form.profile} />
+            <ReviewRow label="Engine" value={form.profile === "orioledb" ? "OrioleDB (preview)" : "Postgres"} />
+            <ReviewRow label="Services" value={`${enabledServices.length}/${ALL_SERVICES.length}: ${enabledServices.join(", ") || "none"}`} />
           </div>
         </div>
-      </section>
-      <section className="panel">
-        <p className="label">This creates</p>
-        <div className="mt-3 grid gap-2 text-sm text-muted">
-          <CreateFact icon={Database} text="Dedicated Postgres volume and Supabase service stack" />
-          <CreateFact icon={Shield} text="Project-scoped JWT secrets, API keys, and RBAC grants" />
-          <CreateFact icon={Server} text="Kong route, Studio deep-link, pooler URLs, and CLI profile" />
-          <CreateFact icon={Boxes} text="Storage, Realtime, Functions, GraphQL, REST, logs, and backups surfaces" />
-        </div>
-      </section>
+      </AppPanel>
     </aside>
-  );
-}
-
-function CreateFact({ icon: Icon, text }: { icon: LucideIcon; text: string }) {
-  return (
-    <div className="flex gap-2 rounded-md border border-border bg-bg p-2">
-      <Icon className="mt-0.5 shrink-0 text-faint" size={14} />
-      <p className="leading-5">{text}</p>
-    </div>
   );
 }
 
@@ -754,13 +708,12 @@ function HostFitPanel({ host, reservation }: { host: Host; reservation: HostCapa
           <p className="label">Host fit</p>
           <p className="mt-1 truncate text-sm font-medium">{host.name}</p>
         </div>
-        <span className={`pill ${fits ? "healthy" : "error"}`}>{fits ? "capacity ok" : "capacity short"}</span>
+        <StatusPill tone={fits ? "success" : "danger"} label={fits ? "capacity ok" : "capacity short"} />
       </div>
       <div className="grid gap-2">
         <ResourceBar label="CPU after create" value={host.used.cpu + reservation.cpu} total={host.capacity.cpu} suffix="vCPU" />
         <ResourceBar label="RAM after create" value={host.used.ram_mb + reservation.ram_mb} total={host.capacity.ram_mb} format={(value) => formatBytes(value * 1024 * 1024)} />
         <ResourceBar label="Disk after create" value={host.used.disk_gb + reservation.disk_gb} total={host.capacity.disk_gb} suffix="GB" />
-        <ResourceBar label="IOPS after create" value={host.used.disk_iops + reservation.disk_iops} total={host.capacity.disk_iops} format={(value) => value.toLocaleString()} />
       </div>
     </div>
   );
@@ -785,7 +738,6 @@ function hostCanFit(host: Host, reservation: HostCapacity) {
     (host.capacity.cpu <= 0 || host.used.cpu + reservation.cpu <= host.capacity.cpu) &&
     (host.capacity.ram_mb <= 0 || host.used.ram_mb + reservation.ram_mb <= host.capacity.ram_mb) &&
     (host.capacity.disk_gb <= 0 || host.used.disk_gb + reservation.disk_gb <= host.capacity.disk_gb) &&
-    (host.capacity.disk_iops <= 0 || host.used.disk_iops + reservation.disk_iops <= host.capacity.disk_iops) &&
     (host.capacity.projects <= 0 || host.used.projects + reservation.projects <= host.capacity.projects)
   );
 }

@@ -1,10 +1,55 @@
-import { Activity, Boxes, Command, Copy, Database, ExternalLink, FileCode2, Globe2, KeyRound, Mail, RotateCcw, Server, Shield, SlidersHorizontal, Terminal, type LucideIcon } from "lucide-react";
+import { Boxes, Copy, Database, ExternalLink, FileCode2, Globe2, KeyRound, Server, Shield, Terminal, type LucideIcon } from "lucide-react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { RuntimeLink } from "../../components/runtime-link";
+import { AppPanel } from "../../components/app/app-panel";
+import { Badge } from "../../components/ui/badge";
+import { Button, buttonVariants } from "../../components/ui/button";
+import { CardButton } from "../../components/ui/card-button";
+import { RevealField } from "../../components/ui/reveal-field";
+import { Segmented } from "../../components/ui/segmented";
+import { StatusPill } from "../../components/ui/status-pill";
+import { auditProjectSecretCopy } from "../../api";
 import { useUIStore } from "../../lib/ui-store";
 import { formatBytes, formatTime } from "../../lib/format";
-import { connectSections, type ConfigArea, type ConnectSection as ProjectConnectSection, type ProjectTab } from "../../lib/project-config";
+import { connectSections, type ConnectSection as ProjectConnectSection } from "../../lib/project-config";
+import { projectPath, projectSectionFromPathname } from "../../lib/routes";
 import type { ConnectPayload, Project, ProjectCLIProfile, ProjectMetrics, ProjectRoute, ProjectRouteManifest, ProjectTCPRoute } from "../../types";
+
+// Sections whose values are credentials (keys, signing secrets, connection
+// strings with embedded passwords). These render masked-by-default RevealFields
+// and audit every copy; non-secret sections (URLs, links, snippets) stay plain.
+function isSensitiveSection(section: ProjectConnectSection): boolean {
+  return section === "keys" || section === "jwt" || section === "database" || section === "storage" || section === "secrets";
+}
+
+// Map a connect entry (section prefix + key) to the canonical managed secret
+// kind the audit endpoint understands (POST /secrets/{kind}/copy calls
+// RevealProjectSecret, which only accepts these). Returns null when the value
+// isn't a managed secret (e.g. a `secret://` handle), in which case we skip the
+// audit call entirely rather than fire a request that would 400.
+function canonicalSecretKind(prefix: string, key: string): string | null {
+  const k = key.toLowerCase();
+  switch (prefix) {
+    case "api_key":
+    case "secret":
+      return { anon: "anon_key", service_role: "service_role", publishable: "publishable_key", secret: "secret_key" }[k] ?? null;
+    case "jwt":
+      if (k.includes("current")) return "jwt_signing_key_current";
+      if (k.includes("next")) return "jwt_signing_key_next";
+      if (k.includes("secret")) return "jwt_secret";
+      return null;
+    case "postgres":
+    case "pooler":
+      // Connection URIs embed the database password.
+      return "db_password";
+    case "storage":
+      if (k.includes("access")) return "s3_access_key";
+      if (k.includes("secret")) return "s3_secret_key";
+      return null;
+    default:
+      return null;
+  }
+}
 
 export function ConnectPanel({
   cliProfile,
@@ -12,38 +57,35 @@ export function ConnectPanel({
   project,
   payload,
   loading,
-  onOpenProjectTab,
-  onOpenConfigArea,
 }: {
   cliProfile?: ProjectCLIProfile;
   cliProfileLoading: boolean;
   project?: Project;
   payload?: ConnectPayload;
   loading: boolean;
-  onOpenProjectTab: (tab: ProjectTab) => void;
-  onOpenConfigArea: (area: ConfigArea) => void;
 }) {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const selectedSection = pathname.match(/^\/projects\/[^/]+\/connect\/([^/]+)/)?.[1];
+  const selectedSection = projectSectionFromPathname(pathname, "connect");
   const activeSection: ProjectConnectSection = connectSections.some((section) => section.id === selectedSection) ? selectedSection as ProjectConnectSection : "overview";
   if (!project) {
     return (
-      <section className="panel">
+      <AppPanel>
         <p className="text-sm text-muted">Create a project to view connection details.</p>
-      </section>
+      </AppPanel>
     );
   }
+  const selectSection = (section: ProjectConnectSection) =>
+    void navigate({ to: section === "overview" ? projectPath(project.ref, "connect") : projectPath(project.ref, "connect", section) });
 
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Connect</p>
-          <h2>{project.ref}</h2>
-        </div>
-        {payload?.studio_url ? <RuntimeLink className="button secondary h-8 min-h-8 justify-center" label="Studio" projectRef={project.ref} url={payload.studio_url} /> : null}
-      </div>
+    <AppPanel
+      eyebrow="Connect"
+      title={project.name}
+      actions={payload?.studio_url ? <RuntimeLink className={buttonVariants({ variant: "secondary", size: "sm" })} label="Studio" projectRef={project.ref} url={payload.studio_url} /> : undefined}
+    >
+      <p className="-mt-1 truncate font-mono text-xs text-faint">{project.ref}</p>
+      <SectionNav activeSection={activeSection} onSelect={selectSection} />
       {loading || !payload ? (
         <p className="mt-4 text-sm text-muted">Loading connection payload...</p>
       ) : (
@@ -53,13 +95,24 @@ export function ConnectPanel({
             cliProfile={cliProfile}
             cliProfileLoading={cliProfileLoading}
             payload={payload}
-            onOpenConfigArea={onOpenConfigArea}
-            onOpenProjectTab={onOpenProjectTab}
-            onSelect={(section) => void navigate({ to: section === "overview" ? `/projects/${project.ref}/connect` : `/projects/${project.ref}/connect/${section}` })}
+            onSelect={selectSection}
           />
         </div>
       )}
-    </section>
+    </AppPanel>
+  );
+}
+
+// In-page section navigation so users switch Connect subsections without leaving
+// the content area for the global sidebar.
+function SectionNav({ activeSection, onSelect }: { activeSection: ProjectConnectSection; onSelect: (section: ProjectConnectSection) => void }) {
+  return (
+    <Segmented
+      className="mt-3"
+      onChange={onSelect}
+      options={connectSections.map((section) => ({ value: section.id, label: section.label }))}
+      value={activeSection}
+    />
   );
 }
 
@@ -67,8 +120,6 @@ function ConnectSectionBody({
   activeSection,
   cliProfile,
   cliProfileLoading,
-  onOpenConfigArea,
-  onOpenProjectTab,
   onSelect,
   payload,
 }: {
@@ -76,59 +127,56 @@ function ConnectSectionBody({
   cliProfile?: ProjectCLIProfile;
   cliProfileLoading: boolean;
   payload: ConnectPayload;
-  onOpenProjectTab: (tab: ProjectTab) => void;
-  onOpenConfigArea: (area: ConfigArea) => void;
   onSelect: (section: ProjectConnectSection) => void;
 }) {
   if (activeSection === "overview") {
     const endpointCount = Object.keys(endpointEntries(payload)).length;
     const customCount = payload.custom_api_urls?.length ?? 0;
-    const cards: Array<{ section: ProjectConnectSection; label: string; value: string; detail: string }> = [
-      { section: "endpoints", label: "Endpoints", value: `${endpointCount} URLs`, detail: customCount ? `${customCount} custom API URLs ready` : "API, REST, Auth, GraphQL, Realtime, Functions, Storage" },
-      { section: "keys", label: "API keys", value: `${Object.keys(payload.api_keys).length} handles`, detail: "Publishable, secret, anon, service role" },
-      { section: "jwt", label: "JWT", value: `${Object.keys(payload.jwt).length} items`, detail: `${payload.jwt_signing_keys?.length ?? 0} signing keys` },
-      { section: "database", label: "Database", value: "Postgres", detail: "Direct URI, pooler, psql, parts" },
-      { section: "storage", label: "Storage", value: "S3 compatible", detail: "Endpoint and credential handles" },
-      { section: "links", label: "Links", value: "Studio + docs", detail: "Studio, REST docs, GraphQL explorer, logs" },
-      { section: "cli", label: "CLI", value: "Compatibility", detail: "Supabase CLI and supadupa-cli profile" },
-      { section: "snippets", label: "Snippets", value: `${Object.keys(payload.sdk_snippets).length} SDKs`, detail: "Connection and SDK initialization" },
-      { section: "secrets", label: "Secrets", value: `${Object.keys(payload.secret_handles).length} handles`, detail: "Audited secret references" },
+    // The section rail above already navigates between subsections, so the
+    // overview no longer restates it as a card grid. Instead it shows a compact
+    // real-count summary of the inventory available to connect with, each still
+    // clickable through to the section that acts on it. Constant-string tiles
+    // ("Postgres", "S3 compatible", "Studio + docs", "Compatibility") are gone.
+    const stats: Array<{ section: ProjectConnectSection; label: string; value: string; detail: string }> = [
+      { section: "endpoints", label: "Endpoints", value: `${endpointCount}`, detail: customCount ? `${customCount} custom API URLs` : "URLs" },
+      { section: "keys", label: "API keys", value: `${Object.keys(payload.api_keys).length}`, detail: "handles" },
+      { section: "jwt", label: "JWT signing keys", value: `${payload.jwt_signing_keys?.length ?? 0}`, detail: `${Object.keys(payload.jwt).length} JWT items` },
+      { section: "snippets", label: "SDK snippets", value: `${Object.keys(payload.sdk_snippets).length}`, detail: "SDKs" },
+      { section: "secrets", label: "Secret handles", value: `${Object.keys(payload.secret_handles).length}`, detail: "audited references" },
     ];
     return (
-      <>
-        <ConnectActions onOpenProjectTab={onOpenProjectTab} onOpenConfigArea={onOpenConfigArea} />
-        <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
-          {cards.map((card) => (
-            <button className="rounded-md border border-border bg-bg p-3 text-left transition hover:border-border-strong hover:bg-surface-2" key={card.section} onClick={() => onSelect(card.section)} type="button">
-              <p className="label">{card.label}</p>
-              <p className="mt-2 truncate text-sm font-medium">{card.value}</p>
-              <p className="mt-1 truncate text-xs text-muted">{card.detail}</p>
-            </button>
-          ))}
-        </div>
-      </>
+      <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
+        {stats.map((stat) => (
+          <CardButton key={stat.section} onClick={() => onSelect(stat.section)}>
+            <p className="label">{stat.label}</p>
+            <p className="mt-2 truncate text-base font-medium tabular-nums">{stat.value}</p>
+            <p className="mt-1 truncate text-xs text-muted">{stat.detail}</p>
+          </CardButton>
+        ))}
+      </div>
     );
   }
 
+  const projectRef = cliProfile?.project_ref ?? "";
   if (activeSection === "endpoints") {
     return <ConnectSection defaultOpen title="Endpoints" icon={Globe2} entries={endpointEntries(payload)} />;
   }
   if (activeSection === "keys") {
-    return <ConnectSection defaultOpen title="API keys" icon={KeyRound} entries={payload.api_keys} />;
+    return <ConnectSection defaultOpen sensitive auditRef={projectRef} auditPrefix="api_key" title="API keys" icon={KeyRound} entries={payload.api_keys} />;
   }
   if (activeSection === "jwt") {
     return (
       <>
-        <ConnectSection defaultOpen title="JWT" icon={Shield} entries={payload.jwt} />
-        <JWTSigningKeysSection defaultOpen keys={payload.jwt_signing_keys ?? []} />
+        <ConnectSection defaultOpen sensitive auditRef={projectRef} auditPrefix="jwt" title="JWT" icon={Shield} entries={payload.jwt} />
+        <JWTSigningKeysSection keys={payload.jwt_signing_keys ?? []} />
       </>
     );
   }
   if (activeSection === "database") {
     return (
       <>
-        <ConnectSection defaultOpen title="Postgres URIs" icon={Database} entries={payload.postgres} />
-        <ConnectSection defaultOpen title="Pooler" icon={Server} entries={payload.pooler} />
+        <ConnectSection defaultOpen sensitive auditRef={projectRef} auditPrefix="postgres" title="Postgres URIs" icon={Database} entries={payload.postgres} />
+        <ConnectSection sensitive auditRef={projectRef} auditPrefix="pooler" title="Pooler" icon={Server} entries={payload.pooler} />
         {Object.entries(payload.postgres_parts).map(([mode, values]) => (
           <ConnectSection compact key={mode} title={`Postgres ${mode}`} icon={Database} entries={values} />
         ))}
@@ -136,7 +184,7 @@ function ConnectSectionBody({
     );
   }
   if (activeSection === "storage") {
-    return <ConnectSection defaultOpen title="Storage" icon={Boxes} entries={payload.storage} />;
+    return <ConnectSection defaultOpen sensitive auditRef={projectRef} auditPrefix="storage" title="Storage" icon={Boxes} entries={payload.storage} />;
   }
   if (activeSection === "links") {
     return <ConnectSection defaultOpen title="Links" icon={ExternalLink} entries={payload.links} />;
@@ -148,11 +196,11 @@ function ConnectSectionBody({
     return (
       <>
         <ConnectSection defaultOpen title="Connection snippets" icon={Copy} entries={payload.connection_snippets} />
-        <ConnectSection defaultOpen title="SDK snippets" icon={Copy} entries={payload.sdk_snippets} />
+        <ConnectSection title="SDK snippets" icon={Copy} entries={payload.sdk_snippets} />
       </>
     );
   }
-  return <ConnectSection defaultOpen title="Secret handles" icon={KeyRound} entries={payload.secret_handles} />;
+  return <ConnectSection defaultOpen sensitive auditRef={projectRef} auditPrefix="secret" title="Secret handles" icon={KeyRound} entries={payload.secret_handles} />;
 }
 
 function endpointEntries(payload: ConnectPayload) {
@@ -185,54 +233,7 @@ function filterEntries(entries: Record<string, string | undefined>) {
   return Object.fromEntries(Object.entries(entries).filter(([, value]) => Boolean(value))) as Record<string, string>;
 }
 
-function ConnectActions({
-  onOpenProjectTab,
-  onOpenConfigArea,
-}: {
-  onOpenProjectTab: (tab: ProjectTab) => void;
-  onOpenConfigArea: (area: ConfigArea) => void;
-}) {
-  return (
-    <div className="rounded-md border border-border bg-bg p-3">
-      <div className="mb-2 flex items-center gap-2 text-faint">
-        <SlidersHorizontal size={14} />
-        <span className="label">Actions</span>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <button className="button secondary h-8 min-h-8" onClick={() => onOpenConfigArea("network")} type="button">
-          <Globe2 size={14} />
-          Domains / network
-        </button>
-        <button className="button secondary h-8 min-h-8" onClick={() => onOpenProjectTab("auth")} type="button">
-          <Mail size={14} />
-          Auth mail
-        </button>
-        <button className="button secondary h-8 min-h-8" onClick={() => onOpenProjectTab("functions")} type="button">
-          <Command size={14} />
-          Services / env
-        </button>
-        <button className="button secondary h-8 min-h-8" onClick={() => onOpenProjectTab("storage")} type="button">
-          <Boxes size={14} />
-          Storage / CDN
-        </button>
-        <button className="button secondary h-8 min-h-8" onClick={() => onOpenProjectTab("backups")} type="button">
-          <RotateCcw size={14} />
-          Backups
-        </button>
-        <button className="button secondary h-8 min-h-8" onClick={() => onOpenProjectTab("logs")} type="button">
-          <Activity size={14} />
-          Logs
-        </button>
-        <button className="button secondary h-8 min-h-8" onClick={() => onOpenProjectTab("activity")} type="button">
-          <Activity size={14} />
-          Activity
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function JWTSigningKeysSection({ defaultOpen = false, keys }: { keys: ConnectPayload["jwt_signing_keys"]; defaultOpen?: boolean }) {
+function JWTSigningKeysSection({ keys }: { keys: ConnectPayload["jwt_signing_keys"] }) {
   const addToast = useUIStore((state) => state.addToast);
   async function copyPublicKey(publicKey: string, label: string) {
     await navigator.clipboard?.writeText(publicKey);
@@ -240,7 +241,7 @@ function JWTSigningKeysSection({ defaultOpen = false, keys }: { keys: ConnectPay
   }
 
   return (
-    <details className="rounded-md border border-border bg-bg p-3" open={defaultOpen}>
+    <details className="rounded-md border border-border bg-bg p-3" open>
       <summary className="flex cursor-pointer list-none items-center gap-2 text-faint">
         <Shield size={14} />
         <p className="label">JWT signing keys</p>
@@ -253,14 +254,14 @@ function JWTSigningKeysSection({ defaultOpen = false, keys }: { keys: ConnectPay
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <p className="truncate font-mono text-xs text-muted">{key.kid || key.kind}</p>
-                <span className={`pill ${key.status === "current" ? "healthy" : key.status === "next" ? "provisioning" : ""}`}>{key.status}</span>
+                <StatusPill label={key.status} tone={key.status === "current" ? "success" : key.status === "next" ? "info" : "neutral"} />
               </div>
               <p className="mt-1 truncate font-mono text-xs text-faint">{key.handle}</p>
               <p className="mt-1 truncate font-mono text-xs text-faint">{key.public_key.replace(/\n/g, " ")}</p>
             </div>
-            <button className="icon-button" onClick={() => void copyPublicKey(key.public_key, key.kid || key.kind)} type="button">
+            <Button onClick={() => void copyPublicKey(key.public_key, key.kid || key.kind)} size="icon" type="button" variant="ghost">
               <Copy size={14} />
-            </button>
+            </Button>
           </div>
         ))}
       </div>
@@ -304,9 +305,10 @@ function CLIProfileSection({ defaultOpen = false, profile, loading }: { profile?
           <Terminal size={14} />
           <p className="label">Supabase CLI profile</p>
         </div>
-        <span className="pill healthy">compat</span>
+        <StatusPill label="compat" tone="success" />
       </summary>
       <div className="mt-3 grid gap-2">
+        <p className="label text-faint">Commands</p>
         <CopyRow compact label="supadupa-cli env export" value={`supadupa-cli projects cli-profile --ref ${profile.project_ref} --format env`} />
         <CopyRow compact label="supadupa-cli toml export" value={`supadupa-cli projects cli-profile --ref ${profile.project_ref} --format toml`} />
         {profile.commands.supadupa_env_reveal ? <CopyRow compact label="materialized env" value={profile.commands.supadupa_env_reveal} /> : null}
@@ -319,10 +321,18 @@ function CLIProfileSection({ defaultOpen = false, profile, loading }: { profile?
         {profile.commands.supadupa_db_tunnel ? <CopyRow compact label="db tunnel" value={profile.commands.supadupa_db_tunnel} /> : null}
         {profile.commands.supabase_local_env ? <CopyRow compact label="local Supabase env" value={profile.commands.supabase_local_env} /> : null}
         {customAPIURLs.map((url, index) => <CopyRow compact key={url} label={`custom API ${index + 1}`} value={url} />)}
-        <CopyRow compact label="env" value={env} />
-        <CopyRow compact label="supabase/config.toml" value={profile.supabase_config_toml} />
-        <CopyRow compact label="json" value={json} />
       </div>
+      <details className="mt-3 grid gap-2 border-t border-border pt-3">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-faint">
+          <FileCode2 size={14} />
+          <span className="label">Full env / config.toml / JSON dump</span>
+        </summary>
+        <div className="mt-3 grid gap-2">
+          <CopyRow compact label="env" value={env} />
+          <CopyRow compact label="supabase/config.toml" value={profile.supabase_config_toml} />
+          <CopyRow compact label="json" value={json} />
+        </div>
+      </details>
       <div className="mt-3 grid gap-2 border-t border-border pt-3">
         <div className="flex items-center gap-2 text-faint">
           <FileCode2 size={14} />
@@ -338,7 +348,25 @@ function CLIProfileSection({ defaultOpen = false, profile, loading }: { profile?
   );
 }
 
-function ConnectSection({ title, icon: Icon, entries, compact = false, defaultOpen = false }: { title: string; icon: LucideIcon; entries: Record<string, string>; compact?: boolean; defaultOpen?: boolean }) {
+function ConnectSection({
+  title,
+  icon: Icon,
+  entries,
+  compact = false,
+  defaultOpen = false,
+  sensitive = false,
+  auditRef = "",
+  auditPrefix = "",
+}: {
+  title: string;
+  icon: LucideIcon;
+  entries: Record<string, string>;
+  compact?: boolean;
+  defaultOpen?: boolean;
+  sensitive?: boolean;
+  auditRef?: string;
+  auditPrefix?: string;
+}) {
   return (
     <details className="rounded-md border border-border bg-bg p-3" open={defaultOpen}>
       <summary className="flex cursor-pointer list-none items-center gap-2 text-faint">
@@ -347,9 +375,20 @@ function ConnectSection({ title, icon: Icon, entries, compact = false, defaultOp
         <span className="ml-auto text-xs text-faint">{Object.keys(entries).length} items</span>
       </summary>
       <div className="mt-3 grid gap-2">
-        {Object.entries(entries).map(([key, value]) => (
-          <CopyRow compact={compact} key={key} label={key} value={value} />
-        ))}
+        {Object.entries(entries).map(([key, value]) => {
+          const auditKind = auditRef ? canonicalSecretKind(auditPrefix, key) : null;
+          return sensitive ? (
+            <RevealField
+              key={key}
+              label={key}
+              sensitive
+              value={value}
+              onCopy={auditKind ? () => auditProjectSecretCopy(auditRef, auditKind) : undefined}
+            />
+          ) : (
+            <CopyRow compact={compact} key={key} label={key} value={value} />
+          );
+        })}
       </div>
     </details>
   );
@@ -357,14 +396,11 @@ function ConnectSection({ title, icon: Icon, entries, compact = false, defaultOp
 
 export function ProjectMetricsPanel({ metrics, loading }: { metrics?: ProjectMetrics; loading: boolean }) {
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Reports</p>
-          <h2>Project metrics</h2>
-        </div>
-        {metrics ? <time className="text-xs text-faint">{formatTime(metrics.sampled_at)}</time> : null}
-      </div>
+    <AppPanel
+      actions={metrics ? <time className="text-xs text-faint">{formatTime(metrics.sampled_at)}</time> : undefined}
+      eyebrow="Reports"
+      title="Project metrics"
+    >
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading project metrics...</p> : null}
         {metrics ? (
@@ -374,7 +410,6 @@ export function ProjectMetricsPanel({ metrics, loading }: { metrics?: ProjectMet
               <Metric label="Tier" value={metrics.resource_tier} />
               <Metric label="Reserved CPU" value={metrics.resources.cpu.toString()} />
               <Metric label="Reserved RAM" value={formatBytes(metrics.resources.ram_mb * 1024 * 1024)} />
-              <Metric label="Reserved IOPS" value={metrics.resources.disk_iops.toString()} />
             </div>
             <div className="usage-row">
               <div className="min-w-0">
@@ -402,7 +437,7 @@ export function ProjectMetricsPanel({ metrics, loading }: { metrics?: ProjectMet
           </>
         ) : null}
       </div>
-    </section>
+    </AppPanel>
   );
 }
 
@@ -419,13 +454,7 @@ export function RoutesPanel({ manifest, loading }: { manifest?: ProjectRouteMani
     addToast({ title: "Copied TCP route", detail: route.name });
   }
   return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <p className="label">Routing</p>
-          <h2>Route manifest</h2>
-        </div>
-      </div>
+    <AppPanel eyebrow="Routing" title="Route manifest">
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading routes...</p> : null}
         {!loading && httpRoutes.length === 0 && tcpRoutes.length === 0 ? <p className="text-sm text-muted">No routes registered yet.</p> : null}
@@ -439,9 +468,9 @@ export function RoutesPanel({ manifest, loading }: { manifest?: ProjectRouteMani
             </div>
             <div className="min-w-0 text-right">
               <div className="flex justify-end gap-1">
-                <span className={`pill ${route.tls ? "healthy" : "provisioning"}`}>{route.tls ? "tls" : "plain"}</span>
-                <span className={`pill ${route.ssl_enforced ? "healthy" : "provisioning"}`}>{route.ssl_enforced ? "ssl enforced" : "ssl optional"}</span>
-                {route.cache_control ? <span className={`pill ${route.smart_cdn ? "healthy" : "provisioning"}`}>{route.smart_cdn ? "smart cdn" : "cdn"}</span> : null}
+                <StatusPill label={route.tls ? "tls" : "plain"} tone={route.tls ? "success" : "info"} />
+                <StatusPill label={route.ssl_enforced ? "ssl enforced" : "ssl optional"} tone={route.ssl_enforced ? "success" : "info"} />
+                {route.cache_control ? <StatusPill label={route.smart_cdn ? "smart cdn" : "cdn"} tone={route.smart_cdn ? "success" : "info"} /> : null}
               </div>
               {route.ip_allowlist && route.ip_allowlist.length > 0 ? (
                 <p className="mt-1 truncate font-mono text-xs text-muted">{route.ip_allowlist.join(", ")}</p>
@@ -449,12 +478,12 @@ export function RoutesPanel({ manifest, loading }: { manifest?: ProjectRouteMani
               {route.cache_control ? <p className="mt-1 truncate font-mono text-xs text-muted">{route.cache_control}</p> : null}
               <p className="mt-1 truncate font-mono text-xs text-faint">{route.upstream_url}</p>
               <div className="mt-2 flex justify-end gap-1">
-                <a className="icon-button h-8 min-h-8 min-w-8" href={routeURL(route)} rel="noreferrer" target="_blank" title={`Open ${route.name}`}>
+                <a className={buttonVariants({ variant: "ghost", size: "icon" })} href={routeURL(route)} rel="noreferrer" target="_blank" title={`Open ${route.name}`}>
                   <ExternalLink size={14} />
                 </a>
-                <button className="icon-button h-8 min-h-8 min-w-8" onClick={() => void copyRouteURL(route)} title={`Copy ${route.name}`} type="button">
+                <Button onClick={() => void copyRouteURL(route)} size="icon" title={`Copy ${route.name}`} type="button" variant="ghost">
                   <Copy size={14} />
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -468,21 +497,21 @@ export function RoutesPanel({ manifest, loading }: { manifest?: ProjectRouteMani
             </div>
             <div className="min-w-0 text-right">
               <div className="flex justify-end gap-1">
-                <span className="pill healthy">{route.protocol}</span>
-                <span className={`pill ${route.tls ? "healthy" : "provisioning"}`}>{route.tls ? "tls" : "plain"}</span>
-                <span className="pill">{route.entrypoint}</span>
+                <StatusPill label={route.protocol} tone="success" />
+                <StatusPill label={route.tls ? "tls" : "plain"} tone={route.tls ? "success" : "info"} />
+                <Badge variant="muted">{route.entrypoint}</Badge>
               </div>
               <p className="mt-1 truncate font-mono text-xs text-faint">{route.upstream_address}</p>
               <div className="mt-2 flex justify-end gap-1">
-                <button className="icon-button h-8 min-h-8 min-w-8" onClick={() => void copyTCPRoute(route)} title={`Copy ${route.name}`} type="button">
+                <Button onClick={() => void copyTCPRoute(route)} size="icon" title={`Copy ${route.name}`} type="button" variant="ghost">
                   <Copy size={14} />
-                </button>
+                </Button>
               </div>
             </div>
           </div>
         ))}
       </div>
-    </section>
+    </AppPanel>
   );
 }
 
@@ -528,14 +557,16 @@ function CopyRow({ label, value, compact = false }: { label: string; value: stri
         <p className="label">{label}</p>
         <p className={compact ? "truncate font-mono text-xs text-muted" : "truncate font-mono text-sm"}>{value}</p>
       </div>
-      {url ? (
-        <a className="icon-button" href={url} rel="noreferrer" target="_blank" title={`Open ${label}`}>
-          <ExternalLink size={14} />
-        </a>
-      ) : null}
-      <button className="icon-button" onClick={() => void copy()} type="button">
-        <Copy size={14} />
-      </button>
+      <div className="copy-row-actions">
+        {url ? (
+          <a className={buttonVariants({ variant: "ghost", size: "icon" })} href={url} rel="noreferrer" target="_blank" title={`Open ${label}`}>
+            <ExternalLink size={14} />
+          </a>
+        ) : null}
+        <Button onClick={() => void copy()} size="icon" title={`Copy ${label}`} type="button" variant="ghost">
+          <Copy size={14} />
+        </Button>
+      </div>
     </div>
   );
 }

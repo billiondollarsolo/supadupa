@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthService struct {
@@ -24,6 +26,7 @@ type AuthService struct {
 const (
 	AuthSecretEnv        = "SUPADUPA_AUTH_SECRET"
 	PlatformSecretKeyEnv = "SUPADUPA_SECRET_KEY"
+	minUserPasswordBytes = 12
 )
 
 type TokenClaims struct {
@@ -67,37 +70,6 @@ func (s *AuthService) Issue(user User, ttl time.Duration) (string, error) {
 	return body + "." + s.sign(body), nil
 }
 
-func (s *AuthService) IssueStudio(claims TokenClaims, projectRef string, ttl time.Duration) (string, error) {
-	studioClaims := TokenClaims{
-		Subject:    claims.Subject,
-		Email:      claims.Email,
-		Role:       claims.Role,
-		Expires:    time.Now().Add(ttl).Unix(),
-		Audience:   "studio",
-		ProjectRef: strings.TrimSpace(projectRef),
-	}
-	payload, err := json.Marshal(studioClaims)
-	if err != nil {
-		return "", err
-	}
-	body := base64.RawURLEncoding.EncodeToString(payload)
-	return body + "." + s.sign(body), nil
-}
-
-func (s *AuthService) VerifyStudio(token string, projectRef string) (TokenClaims, error) {
-	claims, err := s.Verify(token)
-	if err != nil {
-		return TokenClaims{}, err
-	}
-	if claims.Audience != "studio" {
-		return TokenClaims{}, fmt.Errorf("token is not scoped for studio")
-	}
-	if !strings.EqualFold(strings.TrimSpace(claims.ProjectRef), strings.TrimSpace(projectRef)) {
-		return TokenClaims{}, fmt.Errorf("token is not scoped for project")
-	}
-	return claims, nil
-}
-
 func (s *AuthService) Verify(token string) (TokenClaims, error) {
 	body, signature, ok := strings.Cut(token, ".")
 	if !ok || body == "" || signature == "" {
@@ -127,6 +99,11 @@ func (s *AuthService) sign(body string) string {
 }
 
 func hashPassword(password string) string {
+	digest := hex.EncodeToString(hashBytes([]byte(password)))
+	hashed, err := bcrypt.GenerateFromPassword([]byte(digest), bcrypt.DefaultCost)
+	if err == nil {
+		return "bcrypt-sha256$" + string(hashed)
+	}
 	var salt [16]byte
 	if _, err := rand.Read(salt[:]); err != nil {
 		return "sha256$" + hex.EncodeToString(hashBytes([]byte(password)))
@@ -135,16 +112,74 @@ func hashPassword(password string) string {
 	return "sha256$" + saltHex + "$" + hex.EncodeToString(hashBytes([]byte(saltHex+password)))
 }
 
+func validateUserPassword(password string, required bool) error {
+	if password == "" {
+		if required {
+			return fmt.Errorf("password is required")
+		}
+		return nil
+	}
+	if strings.TrimSpace(password) != password {
+		return fmt.Errorf("password must not start or end with whitespace")
+	}
+	if strings.ContainsAny(password, "\r\n\t") {
+		return fmt.Errorf("password must not contain control whitespace")
+	}
+	if len(password) < minUserPasswordBytes {
+		return fmt.Errorf("password must be at least %d characters", minUserPasswordBytes)
+	}
+	normalized := strings.ToLower(password)
+	if commonUserPasswords[normalized] {
+		return fmt.Errorf("password is too common")
+	}
+	return nil
+}
+
+var commonUserPasswords = map[string]bool{
+	"adminadmin":         true,
+	"adminpassword":      true,
+	"changeme":           true,
+	"change-me":          true,
+	"dev-only-change-me": true,
+	"password":           true,
+	"password1":          true,
+	"password12":         true,
+	"password123":        true,
+	"password1234":       true,
+	"password12345":      true,
+	"password123456":     true,
+	"supadupa":           true,
+	"supadupa-password":  true,
+	"supadupa123":        true,
+	"supadupa1234":       true,
+	"temporary-password": true,
+	"test-password":      true,
+	"test-password-123":  true,
+	"welcome123":         true,
+	"welcome1234":        true,
+	"your-password-here": true,
+	"yourpasswordhere":   true,
+}
+
 func verifyPassword(password string, encoded string) bool {
+	verified, _ := verifyPasswordWithRehash(password, encoded)
+	return verified
+}
+
+func verifyPasswordWithRehash(password string, encoded string) (bool, bool) {
+	if hash := strings.TrimPrefix(encoded, "bcrypt-sha256$"); hash != encoded {
+		digest := hex.EncodeToString(hashBytes([]byte(password)))
+		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(digest)) == nil, false
+	}
 	parts := strings.Split(encoded, "$")
 	if len(parts) == 2 {
-		return hmac.Equal([]byte(parts[1]), []byte(hex.EncodeToString(hashBytes([]byte(password)))))
+		return hmac.Equal([]byte(parts[1]), []byte(hex.EncodeToString(hashBytes([]byte(password))))), true
 	}
 	if len(parts) != 3 {
-		return false
+		return false, false
 	}
 	expected := hex.EncodeToString(hashBytes([]byte(parts[1] + password)))
-	return hmac.Equal([]byte(parts[2]), []byte(expected))
+	return hmac.Equal([]byte(parts[2]), []byte(expected)), true
 }
 
 func hashBytes(input []byte) []byte {
@@ -161,11 +196,14 @@ func GenerateTOTPSecret() (string, error) {
 }
 
 func TOTPCode(secret string, at time.Time) (string, error) {
+	return TOTPCodeForCounter(secret, uint64(at.Unix()/30))
+}
+
+func TOTPCodeForCounter(secret string, counter uint64) (string, error) {
 	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(strings.TrimSpace(secret)))
 	if err != nil {
 		return "", err
 	}
-	counter := uint64(at.Unix() / 30)
 	var message [8]byte
 	binary.BigEndian.PutUint64(message[:], counter)
 	mac := hmac.New(sha1.New, key)
@@ -180,20 +218,30 @@ func TOTPCode(secret string, at time.Time) (string, error) {
 }
 
 func VerifyTOTPCode(secret string, code string, at time.Time) bool {
+	_, ok := VerifyTOTPCodeCounter(secret, code, at)
+	return ok
+}
+
+func VerifyTOTPCodeCounter(secret string, code string, at time.Time) (uint64, bool) {
 	code = strings.TrimSpace(code)
 	if len(code) != 6 {
-		return false
+		return 0, false
 	}
 	if _, err := strconv.Atoi(code); err != nil {
-		return false
+		return 0, false
 	}
+	current := at.Unix() / 30
 	for offset := -1; offset <= 1; offset++ {
-		expected, err := TOTPCode(secret, at.Add(time.Duration(offset)*30*time.Second))
+		counter := current + int64(offset)
+		if counter < 0 {
+			continue
+		}
+		expected, err := TOTPCodeForCounter(secret, uint64(counter))
 		if err == nil && hmac.Equal([]byte(expected), []byte(code)) {
-			return true
+			return uint64(counter), true
 		}
 	}
-	return false
+	return 0, false
 }
 
 func TOTPAuthURL(issuer string, account string, secret string) string {

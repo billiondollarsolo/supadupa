@@ -1831,7 +1831,7 @@ run_auth_smtp_checks() {
     --name "$smtp_mailpit_container" \
     --network "$network" \
     --network-alias compat-mailpit \
-    "${SUPADUPA_COMPAT_MAILPIT_IMAGE:-axllent/mailpit:latest}" \
+    "${SUPADUPA_COMPAT_MAILPIT_IMAGE:-axllent/mailpit:v1.30.0}" \
     >"$ARTIFACT_DIR/auth-deep-mailpit-container.out" 2>"$ARTIFACT_DIR/auth-deep-mailpit-container.stderr"; then
     pass "auth_deep.smtp_capture_start" "$smtp_mailpit_container on $network"
   else

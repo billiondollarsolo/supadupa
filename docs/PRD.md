@@ -295,7 +295,7 @@ Every feature in the hosted Supabase catalog, classified by responsibility and a
 | Log Drains (Datadog, Loki, Sentry, Axiom, S3, HTTPS) | Build | P2 | Per-project/fleet log export |
 | Logs & Analytics | Stack (Logflare) + Build | P1 / P2 | Tail (P1); full analytics (P2) |
 | Reports & Metrics | Build | P2 | Prometheus/Grafana per-project + fleet |
-| Compute tiers / disk IOPS provisioning | Build | P3 | Resource-tier resize |
+| Compute tiers / exact sizing | Build | P3 | Presets + exact CPU/RAM/disk, optional container limits, tier resize |
 | SOC 2 / HIPAA controls | Build/process | P3 | Control mapping, audit, DPA posture |
 | SOC 2 / HIPAA compliance | Process | P3 | Operator certification path |
 

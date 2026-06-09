@@ -2,9 +2,7 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"supadupa2026/internal/control"
@@ -21,6 +19,7 @@ type BackupScheduler struct {
 	store              control.Store
 	service            *control.BackupService
 	logger             *slog.Logger
+	runner             *PeriodicRunner
 	tick               time.Duration
 	walArchiveInterval time.Duration
 }
@@ -36,45 +35,18 @@ func NewBackupScheduler(store control.Store, service *control.BackupService, log
 		store:              store,
 		service:            service,
 		logger:             logger,
+		runner:             NewPeriodicRunner("backup", logger),
 		tick:               DefaultBackupSchedulerTick,
 		walArchiveInterval: DefaultWALArchiveInterval,
 	}
 }
 
 func BackupSchedulerTickFromEnv(getenv func(string) string) (time.Duration, error) {
-	if getenv == nil {
-		return DefaultBackupSchedulerTick, nil
-	}
-	raw := strings.TrimSpace(getenv(BackupSchedulerTickEnv))
-	if raw == "" {
-		return DefaultBackupSchedulerTick, nil
-	}
-	tick, err := time.ParseDuration(raw)
-	if err != nil {
-		return DefaultBackupSchedulerTick, fmt.Errorf("%s must be a Go duration such as 30s or 5m: %w", BackupSchedulerTickEnv, err)
-	}
-	if tick <= 0 {
-		return DefaultBackupSchedulerTick, fmt.Errorf("%s must be positive", BackupSchedulerTickEnv)
-	}
-	return tick, nil
+	return durationFromEnv(getenv, BackupSchedulerTickEnv, DefaultBackupSchedulerTick, "30s or 5m")
 }
 
 func WALArchiveIntervalFromEnv(getenv func(string) string) (time.Duration, error) {
-	if getenv == nil {
-		return DefaultWALArchiveInterval, nil
-	}
-	raw := strings.TrimSpace(getenv(WALArchiveIntervalEnv))
-	if raw == "" {
-		return DefaultWALArchiveInterval, nil
-	}
-	interval, err := time.ParseDuration(raw)
-	if err != nil {
-		return DefaultWALArchiveInterval, fmt.Errorf("%s must be a Go duration such as 5m or 15m: %w", WALArchiveIntervalEnv, err)
-	}
-	if interval <= 0 {
-		return DefaultWALArchiveInterval, fmt.Errorf("%s must be positive", WALArchiveIntervalEnv)
-	}
-	return interval, nil
+	return durationFromEnv(getenv, WALArchiveIntervalEnv, DefaultWALArchiveInterval, "5m or 15m")
 }
 
 func (s *BackupScheduler) WithTick(tick time.Duration) *BackupScheduler {
@@ -92,16 +64,10 @@ func (s *BackupScheduler) WithWALArchiveInterval(interval time.Duration) *Backup
 }
 
 func (s *BackupScheduler) Run(ctx context.Context) {
-	ticker := time.NewTicker(s.tick)
-	defer ticker.Stop()
-	for {
-		s.runOnce(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+	if s.runner == nil {
+		s.runner = NewPeriodicRunner("backup", s.logger)
 	}
+	s.runner.Run(ctx, s.tick, s.runOnce)
 }
 
 func (s *BackupScheduler) runOnce(ctx context.Context) {

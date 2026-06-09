@@ -3,11 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -150,15 +147,15 @@ func (r *projectDatabaseRoleResource) Schema(ctx context.Context, req resource.S
 }
 
 func (r *projectDatabaseRoleResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectDatabaseRoleResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "name")
 }
 
 func (r *projectDatabaseRoleResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -210,32 +207,7 @@ func (r *projectDatabaseRoleResource) Read(ctx context.Context, req resource.Rea
 }
 
 func (r *projectDatabaseRoleResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectDatabaseRoleResourceModel
-	var state projectDatabaseRoleResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := databaseRoleInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectDatabaseRole(ctx, state.Ref.ValueString(), state.Name.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project database role", err.Error())
-		return
-	}
-	role, err := r.client.CreateProjectDatabaseRole(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project database role", err.Error())
-		return
-	}
-	setProjectDatabaseRoleState(ctx, &plan, role, input.PasswordSecretHandle, input.Metadata, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project database role")
 }
 
 func (r *projectDatabaseRoleResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -252,16 +224,7 @@ func (r *projectDatabaseRoleResource) Delete(ctx context.Context, req resource.D
 }
 
 func (r *projectDatabaseRoleResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, name, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, name, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name, for example alpha/app_writer.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(name))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "name", "Use ref/name, for example alpha/app_writer.")
 }
 
 func (r *projectDatabaseRoleResource) findDatabaseRole(ctx context.Context, ref string, name string) (ProjectDatabaseRole, error) {
@@ -269,12 +232,7 @@ func (r *projectDatabaseRoleResource) findDatabaseRole(ctx context.Context, ref 
 	if err != nil {
 		return ProjectDatabaseRole{}, err
 	}
-	for _, role := range roles {
-		if role.Name == name {
-			return role, nil
-		}
-	}
-	return ProjectDatabaseRole{}, ErrNotFound
+	return findInList(roles, func(role ProjectDatabaseRole) bool { return role.Name == name })
 }
 
 func databaseRoleInputFromModel(ctx context.Context, model projectDatabaseRoleResourceModel, addError func(string, string)) (ProjectDatabaseRoleInput, bool) {
@@ -318,21 +276,18 @@ func setProjectDatabaseRoleState(ctx context.Context, model *projectDatabaseRole
 	model.CreatedAt = optionalTimeString(role.CreatedAt)
 	model.UpdatedAt = optionalTimeString(role.UpdatedAt)
 
-	memberOf, diags := types.ListValueFrom(ctx, types.StringType, role.MemberOf)
-	if diags.HasError() {
-		addError("Unable to encode member_of list", diags.Errors()[0].Detail())
+	memberOf, ok := stringListStateValue(ctx, "member_of", role.MemberOf, addError)
+	if !ok {
 		return
 	}
 	model.MemberOf = memberOf
-	schemaGrants, diags := types.MapValueFrom(ctx, types.StringType, role.SchemaGrants)
-	if diags.HasError() {
-		addError("Unable to encode schema_grants map", diags.Errors()[0].Detail())
+	schemaGrants, ok := stringMapStateValue(ctx, "schema_grants", role.SchemaGrants, addError)
+	if !ok {
 		return
 	}
 	model.SchemaGrants = schemaGrants
-	metadata, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(role.Metadata, previousMetadata))
-	if diags.HasError() {
-		addError("Unable to encode metadata map", diags.Errors()[0].Detail())
+	metadata, ok := sensitiveStringMapStateValue(ctx, "metadata", role.Metadata, previousMetadata, addError)
+	if !ok {
 		return
 	}
 	model.Metadata = metadata

@@ -2,13 +2,15 @@ name: supadupa
 
 services:
   meta-db:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_DB: supadupa_meta
       POSTGRES_USER: supadupa
       POSTGRES_PASSWORD: supadupa
     ports:
-      - "127.0.0.1:15432:5432"
+      - "${SUPADUPA_META_DB_ADDR:-127.0.0.1:15432}:5432"
     volumes:
       - supadupa-meta-db:/var/lib/postgresql/data
     healthcheck:
@@ -21,11 +23,22 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.control-plane
+    user: "${SUPADUPA_CONTROL_PLANE_USER:-10001:10001}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       SUPADUPA_ADDR: ":8080"
       SUPADUPA_META_DSN: postgres://supadupa:supadupa@meta-db:5432/supadupa_meta?sslmode=disable
-      SUPADUPA_SECRET_KEY: ${SUPADUPA_SECRET_KEY:-local-dev-secret-change-me}
-      SUPADUPA_AUTH_SECRET: ${SUPADUPA_AUTH_SECRET:-}
+      # Edge-router database/pooler bind addresses, so the control plane's
+      # database-ingress readiness reflects whether the host actually publishes
+      # those ports (loopback vs public).
+      SUPADUPA_POSTGRES_ADDR: ${SUPADUPA_POSTGRES_ADDR:-0.0.0.0:5432}
+      SUPADUPA_POOLER_ADDR: ${SUPADUPA_POOLER_ADDR:-0.0.0.0:6543}
+      SUPADUPA_SECRET_KEY: ${SUPADUPA_SECRET_KEY:?SUPADUPA_SECRET_KEY is required; run scripts/setup-compose.sh}
+      SUPADUPA_AUTH_SECRET: ${SUPADUPA_AUTH_SECRET:?SUPADUPA_AUTH_SECRET is required; run scripts/setup-compose.sh}
+      SUPADUPA_ALLOW_DEV_SECRETS: ${SUPADUPA_ALLOW_DEV_SECRETS:-}
       SUPADUPA_BOOTSTRAP_EMAIL: ${SUPADUPA_BOOTSTRAP_EMAIL:-}
       SUPADUPA_BOOTSTRAP_PASSWORD: ${SUPADUPA_BOOTSTRAP_PASSWORD:-}
       SUPADUPA_CORS_ORIGINS: ${SUPADUPA_CORS_ORIGINS:-https://${SUPADUPA_ADMIN_HOST:-admin.supadupa.test}}
@@ -37,7 +50,9 @@ services:
       SUPADUPA_DEFAULT_RESOURCE_TIER: ${SUPADUPA_DEFAULT_RESOURCE_TIER:-}
       SUPADUPA_DEFAULT_BACKUP_SCHEDULE: ${SUPADUPA_DEFAULT_BACKUP_SCHEDULE:-}
       SUPADUPA_PROVISIONER: ${SUPADUPA_PROVISIONER:-compose}
+      SUPADUPA_EDGE_ROUTER_CONTAINER: ${SUPADUPA_EDGE_ROUTER_CONTAINER:-supadupa-edge-router-1}
       SUPADUPA_PROJECT_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/projects
+      SUPADUPA_PROJECT_HOST_ROOT: ${SUPADUPA_PROJECT_HOST_ROOT:-${SUPADUPA_RUNTIME_HOST_DIR:-../runtime}/projects}
       SUPADUPA_ROUTES_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/routes
       SUPADUPA_CERT_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/certs
       SUPADUPA_BACKUP_ROOT: ${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}/backups
@@ -68,29 +83,51 @@ services:
       SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE: ${SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE:-}
       SUPADUPA_COMPOSE_APPLY: ${SUPADUPA_COMPOSE_APPLY:-false}
       SUPADUPA_COMPOSE_COMMAND: ${SUPADUPA_COMPOSE_COMMAND:-docker compose}
+      SUPADUPA_NODE_NET_DEV_PATH: /host/proc/net/dev
+      # Reach the host Docker daemon through the limited proxy (the control plane
+      # is cap_drop:ALL and never touches the raw socket directly). Without this
+      # the control plane can't run `docker compose ps`/`up` and reports every
+      # project as "error".
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
     ports:
       - "${SUPADUPA_API_ADDR:-127.0.0.1:8080}:8080"
     volumes:
       - ${SUPADUPA_RUNTIME_HOST_DIR:-../runtime}:${SUPADUPA_RUNTIME_CONTAINER_DIR:-/app/runtime}
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /proc/net/dev:/host/proc/net/dev:ro
     depends_on:
       meta-db:
         condition: service_healthy
+      docker-socket-proxy:
+        condition: service_started
     networks:
       - default
       - supadupa-ingress
-    labels:
-      traefik.enable: "true"
-      traefik.docker.network: supadupa-ingress
-      traefik.http.routers.supadupa-api.rule: Host(`${SUPADUPA_API_HOST:-api.supadupa.test}`)
-      traefik.http.routers.supadupa-api.entrypoints: websecure
-      traefik.http.routers.supadupa-api.tls: "true"
-      traefik.http.routers.supadupa-api.tls.certresolver: ${SUPADUPA_TLS_CERT_RESOLVER-letsencrypt}
-      traefik.http.routers.supadupa-api-http.rule: Host(`${SUPADUPA_API_HOST:-api.supadupa.test}`)
-      traefik.http.routers.supadupa-api-http.entrypoints: web
-      traefik.http.routers.supadupa-api-http.middlewares: supadupa-api-https
-      traefik.http.middlewares.supadupa-api-https.redirectscheme.scheme: https
-      traefik.http.services.supadupa-api.loadbalancer.server.port: "8080"
+      - docker-proxy
+
+  # Limited Docker API proxy: holds the real socket and translates project bind
+  # paths (container -> host) so the control plane can run compose without a raw
+  # socket mount of its own.
+  docker-socket-proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control-plane
+    command: ["supadupa-docker-proxy"]
+    # Runs as root so it can access the host docker socket (root:docker, 0660).
+    # This is the single privileged boundary; the control plane stays unprivileged
+    # and only talks to this proxy's limited HTTP API.
+    user: "0:0"
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SUPADUPA_DOCKER_PROXY_ADDR: ":2375"
+      SUPADUPA_DOCKER_SOCKET: /var/run/docker.sock
+      SUPADUPA_PROJECT_HOST_ROOT: ${SUPADUPA_PROJECT_HOST_ROOT:-${SUPADUPA_RUNTIME_HOST_DIR:-../runtime}/projects}
+      # The one platform container allowed to attach to per-project edge networks.
+      SUPADUPA_EDGE_ROUTER_CONTAINER: ${SUPADUPA_EDGE_ROUTER_CONTAINER:-supadupa-edge-router-1}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - docker-proxy
 
   admin-ui:
     build:
@@ -98,29 +135,23 @@ services:
       dockerfile: deploy/Dockerfile.admin
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-https://${SUPADUPA_API_HOST:-api.supadupa.test}}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
-      - "${SUPADUPA_ADMIN_ADDR:-127.0.0.1:3000}:80"
+      - "${SUPADUPA_ADMIN_ADDR:-127.0.0.1:3000}:8080"
     depends_on:
       - supadupavisor
     networks:
       - default
       - supadupa-ingress
-    labels:
-      traefik.enable: "true"
-      traefik.docker.network: supadupa-ingress
-      traefik.http.routers.supadupa-admin.rule: Host(`${SUPADUPA_ADMIN_HOST:-admin.supadupa.test}`)
-      traefik.http.routers.supadupa-admin.entrypoints: websecure
-      traefik.http.routers.supadupa-admin.tls: "true"
-      traefik.http.routers.supadupa-admin.tls.certresolver: ${SUPADUPA_TLS_CERT_RESOLVER-letsencrypt}
-      traefik.http.routers.supadupa-admin-http.rule: Host(`${SUPADUPA_ADMIN_HOST:-admin.supadupa.test}`)
-      traefik.http.routers.supadupa-admin-http.entrypoints: web
-      traefik.http.routers.supadupa-admin-http.middlewares: supadupa-admin-https
-      traefik.http.middlewares.supadupa-admin-https.redirectscheme.scheme: https
-      traefik.http.services.supadupa-admin.loadbalancer.server.port: "80"
 
   edge-router:
-    image: traefik:v3.3
+    image: traefik:v3.3@sha256:2cd5cc75530c8d07ae0587c743d23eb30cae2436d07017a5ff78498b1a43d09f
     profiles: ["edge"]
+    security_opt:
+      - no-new-privileges:true
     command:
       - --api.dashboard=${SUPADUPA_TRAEFIK_DASHBOARD_ENABLED:-false}
       - --api.insecure=${SUPADUPA_TRAEFIK_DASHBOARD_INSECURE:-false}
@@ -128,9 +159,6 @@ services:
       - --entrypoints.websecure.address=:443
       - --entrypoints.postgres.address=:5432
       - --entrypoints.pooler.address=:6543
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --providers.docker.network=supadupa-ingress
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
       - --certificatesresolvers.letsencrypt.acme.email=${SUPADUPA_ACME_EMAIL:-admin@example.com}
@@ -159,7 +187,6 @@ services:
       - ${SUPADUPA_ROUTES_HOST_DIR:-../runtime/routes}:/etc/traefik/dynamic:ro
       - ${SUPADUPA_CERTS_HOST_DIR:-../runtime/certs}:/certs:ro
       - supadupa-letsencrypt:/letsencrypt
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -173,3 +200,5 @@ networks:
   supadupa-ingress:
     name: supadupa-ingress
     external: true
+  docker-proxy:
+    internal: true

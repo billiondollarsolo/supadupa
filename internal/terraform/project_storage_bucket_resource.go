@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
@@ -131,15 +129,15 @@ func (r *projectStorageBucketResource) Schema(ctx context.Context, req resource.
 }
 
 func (r *projectStorageBucketResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectStorageBucketResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "name")
 }
 
 func (r *projectStorageBucketResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -191,32 +189,7 @@ func (r *projectStorageBucketResource) Read(ctx context.Context, req resource.Re
 }
 
 func (r *projectStorageBucketResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectStorageBucketResourceModel
-	var state projectStorageBucketResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := storageBucketInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectStorageBucket(ctx, state.Ref.ValueString(), state.Name.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project storage bucket", err.Error())
-		return
-	}
-	bucket, err := r.client.CreateProjectStorageBucket(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project storage bucket", err.Error())
-		return
-	}
-	setProjectStorageBucketState(ctx, &plan, bucket, input.Metadata, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project storage bucket")
 }
 
 func (r *projectStorageBucketResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -233,16 +206,7 @@ func (r *projectStorageBucketResource) Delete(ctx context.Context, req resource.
 }
 
 func (r *projectStorageBucketResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, name, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, name, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name, for example alpha/assets.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(name))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "name", "Use ref/name, for example alpha/assets.")
 }
 
 func (r *projectStorageBucketResource) findStorageBucket(ctx context.Context, ref string, name string) (ProjectStorageBucket, error) {
@@ -251,12 +215,12 @@ func (r *projectStorageBucketResource) findStorageBucket(ctx context.Context, re
 		return ProjectStorageBucket{}, err
 	}
 	normalized := strings.ToLower(strings.TrimSpace(name))
-	for _, bucket := range buckets {
+	return findInList(buckets, func(bucket ProjectStorageBucket) bool {
 		if bucket.Name == normalized {
-			return bucket, nil
+			return true
 		}
-	}
-	return ProjectStorageBucket{}, ErrNotFound
+		return false
+	})
 }
 
 func storageBucketInputFromModel(ctx context.Context, model projectStorageBucketResourceModel, addError func(string, string)) (ProjectStorageBucketInput, bool) {
@@ -308,9 +272,8 @@ func setProjectStorageBucketState(ctx context.Context, model *projectStorageBuck
 		return
 	}
 	model.AllowedMimeTypes = mimeTypes
-	metadata, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(bucket.Metadata, previousMetadata))
-	if diags.HasError() {
-		addError("Unable to encode metadata map", diags.Errors()[0].Detail())
+	metadata, ok := sensitiveStringMapStateValue(ctx, "metadata", bucket.Metadata, previousMetadata, addError)
+	if !ok {
 		return
 	}
 	model.Metadata = metadata

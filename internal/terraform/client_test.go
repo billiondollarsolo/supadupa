@@ -8,11 +8,31 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 const testCertificatePEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+
+func TestNewClientDefaultTimeoutSupportsLiveProvisioning(t *testing.T) {
+	client, err := NewClient("http://127.0.0.1:8080", "test-token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.client.Timeout != defaultClientTimeout || client.client.Timeout < 5*time.Minute {
+		t.Fatalf("expected provisioning-safe default timeout, got %s", client.client.Timeout)
+	}
+
+	custom := &http.Client{Timeout: 2 * time.Second}
+	client, err = NewClient("http://127.0.0.1:8080", "test-token", custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.client != custom {
+		t.Fatalf("expected custom HTTP client to be preserved")
+	}
+}
 
 func TestClientProjectLifecycleRequests(t *testing.T) {
 	var seen []string
@@ -188,14 +208,14 @@ func TestClientHostLifecycleRequests(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Name != "east-1a" || got.Address != "10.0.0.12" || got.Capacity.CPU != 8 || got.Capacity.RAMMB != 32768 || got.Capacity.DiskGB != 500 || got.Capacity.DiskIOPS != 24000 || got.Capacity.Project != 10 {
+			if got.Name != "east-1a" || got.Address != "10.0.0.12" || got.Capacity.CPU != 8 || got.Capacity.RAMMB != 32768 || got.Capacity.DiskGB != 500 || got.Capacity.Project != 10 {
 				t.Fatalf("unexpected host payload %#v", got)
 			}
-			_, _ = w.Write([]byte(`{"id":"host_1","name":"east-1a","address":"10.0.0.12","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10},"used":{"cpu":0,"ram_mb":0,"disk_gb":0,"disk_iops":0,"projects":0},"created_at":"2026-06-05T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"id":"host_1","name":"east-1a","address":"10.0.0.12","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10},"used":{"cpu":0,"ram_mb":0,"disk_gb":0,"projects":0},"created_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts/host_1":
-			_, _ = w.Write([]byte(`{"id":"host_1","name":"east-1a","address":"10.0.0.12","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10},"used":{"cpu":1,"ram_mb":2048,"disk_gb":20,"disk_iops":3000,"projects":1},"created_at":"2026-06-05T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"id":"host_1","name":"east-1a","address":"10.0.0.12","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10},"used":{"cpu":1,"ram_mb":2048,"disk_gb":20,"projects":1},"created_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts":
-			_, _ = w.Write([]byte(`[{"id":"host_1","name":"east-1a","address":"10.0.0.12","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"disk_iops":24000,"projects":10},"used":{"cpu":1,"ram_mb":2048,"disk_gb":20,"disk_iops":3000,"projects":1},"created_at":"2026-06-05T12:00:00Z"}]`))
+			_, _ = w.Write([]byte(`[{"id":"host_1","name":"east-1a","address":"10.0.0.12","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10},"used":{"cpu":1,"ram_mb":2048,"disk_gb":20,"projects":1},"created_at":"2026-06-05T12:00:00Z"}]`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/hosts/host_1":
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -212,11 +232,10 @@ func TestClientHostLifecycleRequests(t *testing.T) {
 		Name:    "east-1a",
 		Address: "10.0.0.12",
 		Capacity: HostCapacity{
-			CPU:      8,
-			RAMMB:    32768,
-			DiskGB:   500,
-			DiskIOPS: 24000,
-			Project:  10,
+			CPU:     8,
+			RAMMB:   32768,
+			DiskGB:  500,
+			Project: 10,
 		},
 	})
 	if err != nil {
@@ -229,7 +248,7 @@ func TestClientHostLifecycleRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get host: %v", err)
 	}
-	if host.Used.Project != 1 || host.Used.DiskIOPS != 3000 {
+	if host.Used.Project != 1 {
 		t.Fatalf("unexpected host usage %#v", host.Used)
 	}
 	hosts, err := client.ListHosts(context.Background())
@@ -261,16 +280,16 @@ func TestClientOrgTeamAccessQuotaRequests(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/orgs/org_1/quotas":
-			_, _ = w.Write([]byte(`{"org_id":"org_1","max_projects":10,"max_cpu":32,"max_ram_mb":65536,"max_disk_gb":2048,"max_disk_iops":12000,"used":{"cpu":4,"ram_mb":8192,"disk_gb":200,"disk_iops":1200},"updated_at":"2026-06-05T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"org_id":"org_1","max_projects":10,"max_cpu":32,"max_ram_mb":65536,"max_disk_gb":2048,"used":{"cpu":4,"ram_mb":8192,"disk_gb":200},"updated_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/orgs/org_1/quotas":
 			var got OrgQuotaInput
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got.MaxProjects != 20 || got.MaxCPU != 64 || got.MaxRAMMB != 131072 || got.MaxDiskGB != 4096 || got.MaxDiskIOPS != 24000 {
+			if got.MaxProjects != 20 || got.MaxCPU != 64 || got.MaxRAMMB != 131072 || got.MaxDiskGB != 4096 {
 				t.Fatalf("unexpected quota payload %#v", got)
 			}
-			_, _ = w.Write([]byte(`{"org_id":"org_1","max_projects":20,"max_cpu":64,"max_ram_mb":131072,"max_disk_gb":4096,"max_disk_iops":24000,"used":{"cpu":4,"ram_mb":8192,"disk_gb":200,"disk_iops":1200},"updated_at":"2026-06-05T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"org_id":"org_1","max_projects":20,"max_cpu":64,"max_ram_mb":131072,"max_disk_gb":4096,"used":{"cpu":4,"ram_mb":8192,"disk_gb":200},"updated_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/orgs/org_1/members":
 			_, _ = w.Write([]byte(`[{"user_id":"user_1","org_id":"org_1","email":"dev@example.com","role":"developer","created_at":"2026-06-05T12:00:00Z"}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/orgs/org_1/members":
@@ -340,11 +359,11 @@ func TestClientOrgTeamAccessQuotaRequests(t *testing.T) {
 	if quota.OrgID != "org_1" || quota.Used.CPU != 4 || quota.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected quota %#v", quota)
 	}
-	quota, err = client.UpdateOrgQuota(context.Background(), "org_1", OrgQuotaInput{MaxProjects: 20, MaxCPU: 64, MaxRAMMB: 131072, MaxDiskGB: 4096, MaxDiskIOPS: 24000})
+	quota, err = client.UpdateOrgQuota(context.Background(), "org_1", OrgQuotaInput{MaxProjects: 20, MaxCPU: 64, MaxRAMMB: 131072, MaxDiskGB: 4096})
 	if err != nil {
 		t.Fatalf("update org quota: %v", err)
 	}
-	if quota.MaxDiskIOPS != 24000 {
+	if quota.MaxDiskGB != 4096 {
 		t.Fatalf("unexpected updated quota %#v", quota)
 	}
 	members, err := client.ListOrgMembers(context.Background(), "org_1")
@@ -1031,6 +1050,15 @@ func TestClientProjectLogDrainLifecycleRequests(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"drain_1","project_ref":"alpha","target":"https","config":{"url":"https://logs.example.com/ingest","token":"********"},"created_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/alpha/log-drains":
 			_, _ = w.Write([]byte(`[{"id":"drain_1","project_ref":"alpha","target":"https","config":{"url":"https://logs.example.com/ingest","token":"********"},"created_at":"2026-06-05T12:00:00Z"}]`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/projects/alpha/log-drains/drain_1":
+			var got ProjectLogDrainInput
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Target != "loki" || got.Config["url"] != "https://loki.example.com/api/v1/push" {
+				t.Fatalf("unexpected log drain update payload %#v", got)
+			}
+			_, _ = w.Write([]byte(`{"id":"drain_1","project_ref":"alpha","target":"loki","config":{"url":"https://loki.example.com/api/v1/push"},"created_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/projects/alpha/log-drains/drain_1":
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -1063,6 +1091,16 @@ func TestClientProjectLogDrainLifecycleRequests(t *testing.T) {
 	if len(drains) != 1 || drains[0].ID != "drain_1" || drains[0].Target != "https" {
 		t.Fatalf("unexpected log drains %#v", drains)
 	}
+	updated, err := client.UpdateProjectLogDrain(context.Background(), "alpha", "drain_1", ProjectLogDrainInput{
+		Target: "loki",
+		Config: map[string]string{"url": "https://loki.example.com/api/v1/push"},
+	})
+	if err != nil {
+		t.Fatalf("update project log drain: %v", err)
+	}
+	if updated.ID != "drain_1" || updated.Target != "loki" {
+		t.Fatalf("unexpected updated log drain %#v", updated)
+	}
 	if err := client.DeleteProjectLogDrain(context.Background(), "alpha", "drain_1"); err != nil {
 		t.Fatalf("delete project log drain: %v", err)
 	}
@@ -1070,6 +1108,7 @@ func TestClientProjectLogDrainLifecycleRequests(t *testing.T) {
 	expected := []string{
 		"POST /v1/projects/alpha/log-drains",
 		"GET /v1/projects/alpha/log-drains",
+		"PUT /v1/projects/alpha/log-drains/drain_1",
 		"DELETE /v1/projects/alpha/log-drains/drain_1",
 	}
 	if strings.Join(seen, "\n") != strings.Join(expected, "\n") {

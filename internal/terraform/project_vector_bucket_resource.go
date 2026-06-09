@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
@@ -132,15 +130,15 @@ func (r *projectVectorBucketResource) Schema(ctx context.Context, req resource.S
 }
 
 func (r *projectVectorBucketResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectVectorBucketResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "name")
 }
 
 func (r *projectVectorBucketResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -192,32 +190,7 @@ func (r *projectVectorBucketResource) Read(ctx context.Context, req resource.Rea
 }
 
 func (r *projectVectorBucketResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectVectorBucketResourceModel
-	var state projectVectorBucketResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	input, ok := vectorBucketInputFromModel(ctx, plan, resp.Diagnostics.AddError)
-	if !ok {
-		return
-	}
-	err := r.client.DeleteProjectVectorBucket(ctx, state.Ref.ValueString(), state.Name.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project vector bucket", err.Error())
-		return
-	}
-	bucket, err := r.client.CreateProjectVectorBucket(ctx, plan.Ref.ValueString(), input)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project vector bucket", err.Error())
-		return
-	}
-	setProjectVectorBucketState(ctx, &plan, bucket, input.Metadata, resp.Diagnostics.AddError)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project vector bucket")
 }
 
 func (r *projectVectorBucketResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -234,16 +207,7 @@ func (r *projectVectorBucketResource) Delete(ctx context.Context, req resource.D
 }
 
 func (r *projectVectorBucketResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, name, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, name, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/name, for example alpha/documents.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), strings.TrimSpace(name))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "name", "Use ref/name, for example alpha/documents.")
 }
 
 func (r *projectVectorBucketResource) findVectorBucket(ctx context.Context, ref string, name string) (ProjectVectorBucket, error) {
@@ -252,12 +216,7 @@ func (r *projectVectorBucketResource) findVectorBucket(ctx context.Context, ref 
 		return ProjectVectorBucket{}, err
 	}
 	normalized := strings.ToLower(strings.TrimSpace(name))
-	for _, bucket := range buckets {
-		if bucket.Name == normalized {
-			return bucket, nil
-		}
-	}
-	return ProjectVectorBucket{}, ErrNotFound
+	return findInList(buckets, func(bucket ProjectVectorBucket) bool { return bucket.Name == normalized })
 }
 
 func vectorBucketInputFromModel(ctx context.Context, model projectVectorBucketResourceModel, addError func(string, string)) (ProjectVectorBucketInput, bool) {
@@ -290,9 +249,8 @@ func setProjectVectorBucketState(ctx context.Context, model *projectVectorBucket
 	model.CreatedAt = optionalTimeString(bucket.CreatedAt)
 	model.UpdatedAt = optionalTimeString(bucket.UpdatedAt)
 
-	metadata, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(bucket.Metadata, previousMetadata))
-	if diags.HasError() {
-		addError("Unable to encode metadata map", diags.Errors()[0].Detail())
+	metadata, ok := sensitiveStringMapStateValue(ctx, "metadata", bucket.Metadata, previousMetadata, addError)
+	if !ok {
 		return
 	}
 	model.Metadata = metadata

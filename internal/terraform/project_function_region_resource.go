@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -118,15 +115,15 @@ func (r *projectFunctionRegionResource) Schema(ctx context.Context, req resource
 }
 
 func (r *projectFunctionRegionResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
+}
+
+func (r *projectFunctionRegionResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	requireResourceReplaceOnUpdate(ctx, req, resp, "id")
 }
 
 func (r *projectFunctionRegionResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -164,25 +161,7 @@ func (r *projectFunctionRegionResource) Read(ctx context.Context, req resource.R
 }
 
 func (r *projectFunctionRegionResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan projectFunctionRegionResourceModel
-	var state projectFunctionRegionResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	err := r.client.DeleteProjectFunctionRegion(ctx, state.Ref.ValueString(), state.ID.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project function region", err.Error())
-		return
-	}
-	region, err := r.client.CreateProjectFunctionRegion(ctx, plan.Ref.ValueString(), functionRegionInputFromModel(plan))
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project function region", err.Error())
-		return
-	}
-	setProjectFunctionRegionState(&plan, region)
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportUnsupportedInPlaceUpdate(resp, "Supadupa project function region")
 }
 
 func (r *projectFunctionRegionResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -199,16 +178,7 @@ func (r *projectFunctionRegionResource) Delete(ctx context.Context, req resource
 }
 
 func (r *projectFunctionRegionResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, id, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, id, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(id) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/id, for example alpha/region_123.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strings.TrimSpace(id))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "id", "Use ref/id, for example alpha/region_123.")
 }
 
 func (r *projectFunctionRegionResource) findFunctionRegion(ctx context.Context, ref string, id string) (ProjectFunctionRegion, error) {
@@ -216,12 +186,7 @@ func (r *projectFunctionRegionResource) findFunctionRegion(ctx context.Context, 
 	if err != nil {
 		return ProjectFunctionRegion{}, err
 	}
-	for _, region := range regions {
-		if region.ID == id {
-			return region, nil
-		}
-	}
-	return ProjectFunctionRegion{}, ErrNotFound
+	return findInList(regions, func(region ProjectFunctionRegion) bool { return region.ID == id })
 }
 
 func functionRegionInputFromModel(model projectFunctionRegionResourceModel) ProjectFunctionRegionInput {

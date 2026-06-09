@@ -1,0 +1,159 @@
+{{- if .Values.operator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "supadupa.fullname" . }}-operator
+  labels:
+    {{- include "supadupa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  replicas: {{ if .Values.operator.leaderElection.enabled }}{{ .Values.operator.replicaCount }}{{ else }}1{{ end }}
+  selector:
+    matchLabels:
+      {{- include "supadupa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        {{- include "supadupa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: {{ include "supadupa.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.operator.podSecurityContext | nindent 8 }}
+      containers:
+        - name: operator
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: SUPADUPA_OPERATOR_NAMESPACE
+              value: {{ include "supadupa.runtimeNamespace" . | quote }}
+            - name: SUPADUPA_OPERATOR_INTERVAL
+              value: {{ .Values.operator.interval | quote }}
+            - name: SUPADUPA_OPERATOR_ISOLATION
+              value: {{ .Values.projectIsolation.enabled | quote }}
+            - name: SUPADUPA_OPERATOR_RUNTIME_NAMESPACE_PREFIX
+              value: {{ .Values.projectIsolation.runtimeNamespacePrefix | quote }}
+            - name: SUPADUPA_OPERATOR_POD_SECURITY_ENFORCE
+              value: {{ .Values.projectIsolation.podSecurity.enforce | quote }}
+            - name: SUPADUPA_OPERATOR_POD_SECURITY_AUDIT
+              value: {{ .Values.projectIsolation.podSecurity.audit | quote }}
+            - name: SUPADUPA_OPERATOR_POD_SECURITY_WARN
+              value: {{ .Values.projectIsolation.podSecurity.warn | quote }}
+            - name: SUPADUPA_OPERATOR_POD_SECURITY_ENFORCE_VERSION
+              value: {{ .Values.projectIsolation.podSecurity.enforceVersion | quote }}
+            - name: SUPADUPA_OPERATOR_POD_SECURITY_AUDIT_VERSION
+              value: {{ .Values.projectIsolation.podSecurity.auditVersion | quote }}
+            - name: SUPADUPA_OPERATOR_POD_SECURITY_WARN_VERSION
+              value: {{ .Values.projectIsolation.podSecurity.warnVersion | quote }}
+            - name: SUPADUPA_OPERATOR_NETWORK_POLICY_ENABLED
+              value: {{ .Values.projectIsolation.networkPolicy.enabled | quote }}
+            - name: SUPADUPA_OPERATOR_INGRESS_NAMESPACE
+              value: {{ .Values.projectIsolation.networkPolicy.ingressControllerNamespace | quote }}
+            {{- with .Values.projectIsolation.networkPolicy.ingressControllerNamespaceSelector }}
+            - name: SUPADUPA_OPERATOR_INGRESS_NAMESPACE_SELECTOR
+              value: {{ include "supadupa.kvCsv" . | quote }}
+            {{- end }}
+            - name: SUPADUPA_OPERATOR_DNS_NAMESPACE
+              value: {{ .Values.projectIsolation.networkPolicy.allowDNSNamespace | quote }}
+            {{- with .Values.projectIsolation.networkPolicy.extraEgressCIDRs }}
+            - name: SUPADUPA_OPERATOR_EXTRA_EGRESS_CIDRS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.projectIsolation.resourceQuota.enabled }}
+            {{- $hard := .Values.projectIsolation.resourceQuota.hard }}
+            {{- with index $hard "requests.cpu" }}
+            - name: SUPADUPA_OPERATOR_QUOTA_REQUESTS_CPU
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with index $hard "requests.memory" }}
+            - name: SUPADUPA_OPERATOR_QUOTA_REQUESTS_MEMORY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with index $hard "limits.cpu" }}
+            - name: SUPADUPA_OPERATOR_QUOTA_LIMITS_CPU
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with index $hard "limits.memory" }}
+            - name: SUPADUPA_OPERATOR_QUOTA_LIMITS_MEMORY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with index $hard "pods" }}
+            - name: SUPADUPA_OPERATOR_QUOTA_PODS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with index $hard "persistentvolumeclaims" }}
+            - name: SUPADUPA_OPERATOR_QUOTA_PVCS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.projectIsolation.limitRange.enabled }}
+            {{- with .Values.projectIsolation.limitRange.default.cpu }}
+            - name: SUPADUPA_OPERATOR_LIMIT_DEFAULT_CPU
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.projectIsolation.limitRange.default.memory }}
+            - name: SUPADUPA_OPERATOR_LIMIT_DEFAULT_MEMORY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.projectIsolation.limitRange.defaultRequest.cpu }}
+            - name: SUPADUPA_OPERATOR_LIMIT_REQUEST_CPU
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.projectIsolation.limitRange.defaultRequest.memory }}
+            - name: SUPADUPA_OPERATOR_LIMIT_REQUEST_MEMORY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            - name: SUPADUPA_OPERATOR_LEADER_ELECTION
+              value: {{ .Values.operator.leaderElection.enabled | quote }}
+            {{- if .Values.operator.leaderElection.enabled }}
+            - name: SUPADUPA_OPERATOR_LEADER_ELECTION_LEASE
+              value: {{ printf "%s-operator-leader" (include "supadupa.fullname" .) | quote }}
+            - name: SUPADUPA_OPERATOR_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
+            {{- if .Values.operator.health.port }}
+            - name: SUPADUPA_OPERATOR_HEALTH_ADDR
+              value: {{ printf ":%v" .Values.operator.health.port | quote }}
+            {{- end }}
+            {{- if .Values.operator.metrics.enabled }}
+            - name: SUPADUPA_OPERATOR_METRICS_ADDR
+              value: {{ printf ":%v" .Values.operator.metrics.port | quote }}
+            {{- end }}
+          {{- if or .Values.operator.health.port .Values.operator.metrics.enabled }}
+          ports:
+            {{- if .Values.operator.health.port }}
+            - name: health
+              containerPort: {{ .Values.operator.health.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.operator.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.operator.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          {{- end }}
+          {{- if .Values.operator.health.port }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.operator.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+{{- end }}

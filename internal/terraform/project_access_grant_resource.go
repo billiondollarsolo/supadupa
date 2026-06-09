@@ -3,10 +3,8 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -94,12 +92,8 @@ func (r *projectAccessGrantResource) Schema(ctx context.Context, req resource.Sc
 }
 
 func (r *projectAccessGrantResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -175,14 +169,7 @@ func (r *projectAccessGrantResource) Delete(ctx context.Context, req resource.De
 }
 
 func (r *projectAccessGrantResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	parts := strings.Split(req.ID, "/")
-	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/subject_type/subject_id, for example alpha/team/platform.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(parts[0]))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("subject_type"), strings.TrimSpace(parts[1]))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("subject_id"), strings.TrimSpace(parts[2]))...)
+	setThreePartImportState(ctx, req.ID, resp, "ref", "subject_type", "subject_id", "Use ref/subject_type/subject_id, for example alpha/team/platform.", false)
 }
 
 func (r *projectAccessGrantResource) findProjectAccessGrant(ctx context.Context, ref string, subjectType string, subjectID string) (ProjectAccessGrant, error) {
@@ -192,12 +179,9 @@ func (r *projectAccessGrantResource) findProjectAccessGrant(ctx context.Context,
 	}
 	normalizedType := strings.ToLower(strings.TrimSpace(subjectType))
 	normalizedID := strings.ToLower(strings.TrimSpace(subjectID))
-	for _, grant := range grants {
-		if grant.SubjectType == normalizedType && strings.ToLower(grant.SubjectID) == normalizedID {
-			return grant, nil
-		}
-	}
-	return ProjectAccessGrant{}, ErrNotFound
+	return findInList(grants, func(grant ProjectAccessGrant) bool {
+		return grant.SubjectType == normalizedType && strings.ToLower(grant.SubjectID) == normalizedID
+	})
 }
 
 func setProjectAccessGrantState(model *projectAccessGrantResourceModel, grant ProjectAccessGrant) {

@@ -14,8 +14,8 @@ Local loopback:
 
 - Linux or macOS with Docker.
 - Docker Compose v2.
-- Go 1.23+ if running binaries natively.
-- Node 22+ if running the admin UI natively.
+- Go 1.26.4+ if running binaries natively.
+- Node `^20.19.0` or `>=22.12.0` if running the admin UI natively.
 
 VPS:
 
@@ -23,15 +23,16 @@ VPS:
 - Docker and Docker Compose v2.
 - DNS control for the domain.
 - Cloudflare DNS API token for Let's Encrypt DNS-01.
-- Inbound ports `80`, `443`, `5432`, and `6543` open.
+- Inbound ports `80` and `443` open. Open `5432` and `6543` only when intentionally exposing public DB/pooler routes.
 
 ## Local Loopback Install
 
 Run:
 
 ```bash
-scripts/setup-compose.sh --mode local --bootstrap-password 'change-this-password'
-docker compose -f deploy/compose.yaml up -d --build
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
+scripts/setup-compose.sh --mode local
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml up -d --build
 ```
 
 Open:
@@ -45,7 +46,7 @@ Login with the bootstrap email/password in `.env`. The default bootstrap email i
 Stop:
 
 ```bash
-docker compose -f deploy/compose.yaml down
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml down
 ```
 
 Local loopback does not provide public project TLS routes. Use VPS mode for real DNS and certificates.
@@ -55,9 +56,10 @@ Local loopback does not provide public project TLS routes. Use VPS mode for real
 This mode is for running the edge stack without public DNS or Let's Encrypt. It generates a local CA and server certificate, disables the ACME resolver, and binds edge ports to loopback.
 
 ```bash
-scripts/setup-compose.sh --mode offline --bootstrap-password 'change-this-password'
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
+scripts/setup-compose.sh --mode offline
 scripts/setup-local-dns.sh --domain supadupa.test
-docker compose -f deploy/compose.yaml --profile edge up -d --build
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 Configure your OS resolver to use the generated dnsmasq config, or use explicit `/etc/hosts` entries for the projects you create:
@@ -92,13 +94,15 @@ Create a Cloudflare API token scoped to the zone with DNS edit permission, then 
 
 ```bash
 export CLOUDFLARE_API_TOKEN='...'
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
 scripts/setup-compose.sh \
   --mode vps \
   --domain example.com \
   --email ops@example.com \
-  --bootstrap-email admin@example.com \
-  --bootstrap-password 'change-this-password'
+  --bootstrap-email admin@example.com
 ```
+
+Add `--expose-db` only when this host should publish direct Postgres and pooler routes on `5432` and `6543`.
 
 For Route53, use `--dns-provider route53` and provide AWS credentials or an instance role:
 
@@ -106,13 +110,13 @@ For Route53, use `--dns-provider route53` and provide AWS credentials or an inst
 export AWS_ACCESS_KEY_ID='...'
 export AWS_SECRET_ACCESS_KEY='...'
 export AWS_REGION='us-east-1'
+export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
 scripts/setup-compose.sh \
   --mode vps \
   --dns-provider route53 \
   --domain example.com \
   --email ops@example.com \
-  --bootstrap-email admin@example.com \
-  --bootstrap-password 'change-this-password'
+  --bootstrap-email admin@example.com
 ```
 
 Create DNS records pointing at the VPS:
@@ -126,7 +130,7 @@ api.example.com         A/AAAA  <server-ip>
 Start:
 
 ```bash
-docker compose -f deploy/compose.yaml --profile edge up -d --build
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 Open:
@@ -138,7 +142,7 @@ https://admin.example.com
 ## Setup Script Options
 
 ```text
---mode local|vps
+--mode local|offline|vps
 --domain example.com
 --admin-host host
 --api-host host
@@ -146,6 +150,7 @@ https://admin.example.com
 --email email
 --bootstrap-email email
 --bootstrap-password value
+--expose-db
 --force
 ```
 
@@ -164,12 +169,32 @@ The helper writes `.env` with:
 - `VITE_API_BASE_URL`: API URL compiled into the admin UI.
 - `SUPADUPA_CORS_ORIGINS`: origins allowed to call the API.
 - `SUPADUPA_SECRET_KEY` and `SUPADUPA_AUTH_SECRET`: generated control-plane secrets.
-- `SUPADUPA_RUNTIME_HOST_DIR`: host-side runtime directory.
-- `SUPADUPA_COMPOSE_APPLY=true`: allows the control plane to apply project Compose stacks.
+- `SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER`: absent defaults to `false`; set manually only for development or controlled compatibility use of the normalized JSON SSO adapter, not for production SAML XML validation.
+- `SUPADUPA_META_DB_ADDR`: loopback metadata database bind address, defaulting to `127.0.0.1:15432`.
+- `SUPADUPA_POSTGRES_ADDR` and `SUPADUPA_POOLER_ADDR`: loopback by default; set through `--expose-db` for intentional public DB/pooler exposure.
+- `SUPADUPA_DB_INGRESS_ALLOWED_CIDRS`: optional comma-separated trusted client CIDRs used for database-ingress posture reporting and Traefik TCP allowlist middleware when raw DB/pooler ports are public.
+- `SUPADUPA_RUNTIME_HOST_DIR`: host-side runtime directory mounted into the control plane.
+- `SUPADUPA_RUNTIME_CONTAINER_DIR`: container-side runtime mount path where the control plane writes project files, routes, certs, and backups.
+- `SUPADUPA_PROJECT_HOST_ROOT`: host-side project directory used in generated per-project Compose bind mounts because those sources are resolved by the host Docker daemon.
+- `SUPADUPA_CONTROL_PLANE_USER`: numeric `uid:gid` used by the supadupavisor container; generated from the user running `setup-compose.sh` so runtime bind mounts stay writable without running the process as root.
+- `SUPADUPA_DOCKER_GID`: host Docker socket group ID, added as a supplemental container group only to the `docker-socket-proxy` service in `deploy/compose.apply.yaml`.
+- `SUPADUPA_COMPOSE_APPLY=true`: allows the control plane to apply project Compose stacks through the internal Docker API proxy when started with `deploy/compose.apply.yaml`.
+- `SUPADUPA_PROJECT_DOCKER_LOGS=false`: keeps generated project Vector services from mounting the host Docker socket; set true only for legacy Docker-log drain compatibility.
 - `CLOUDFLARE_API_TOKEN`: used by Traefik DNS-01 when the provider is Cloudflare.
 - `AWS_*`: used by Traefik DNS-01 when the provider is Route53.
 
+The helper writes `.env` with mode `0600` and rejects newline/control-character input before writing secret-bearing files. Host and email options are validated before runtime directories or Docker networks are created.
+For manual `.env` files, set `SUPADUPA_CONTROL_PLANE_USER` to a numeric user/group that can write `SUPADUPA_RUNTIME_HOST_DIR`; if `SUPADUPA_COMPOSE_APPLY=true`, use an absolute `SUPADUPA_RUNTIME_HOST_DIR`, keep `SUPADUPA_RUNTIME_CONTAINER_DIR` as a writable container path such as `/app/runtime`, set `SUPADUPA_PROJECT_HOST_ROOT` to the host-side projects directory, start with `-f deploy/compose.apply.yaml`, and set `SUPADUPA_DOCKER_GID` to `stat -c '%g' /var/run/docker.sock`. The base compose file intentionally does not mount the Docker socket, and the apply overlay mounts it only into the internal `docker-socket-proxy` service.
+
 On first startup, `SUPADUPA_APPS_DOMAIN` seeds the project default domain if the stored default is still `supadupa.test`. Set `SUPADUPA_PROJECT_DOMAIN` when the environment file should explicitly override the Admin UI default on restart.
+
+## Database Ingress
+
+Normal Supabase-style applications use the public HTTPS project routes for Auth, REST, GraphQL, Storage, Realtime, and Edge Functions. Those routes remain public when direct database ingress is private.
+
+Raw Postgres clients, migration tools, ORMs, database GUIs, and pooler clients use separate TCP ingress on `5432` and `6543`. Compose keeps those ports on loopback by default. Use an SSH tunnel for private operator access, or run setup with `--expose-db` only when external database clients need direct access.
+
+When `--expose-db` is used, restrict `5432` and `6543` to trusted client networks with host firewall/provider firewall rules. Configure the same trusted CIDRs in `Settings -> Database Ingress`; saving that setting rewrites existing project route manifests so Traefik's file provider reloads TCP `ipAllowList` middleware without restarting the platform. `SUPADUPA_DB_INGRESS_ALLOWED_CIDRS` remains an initial `.env` default for first boot and diagnostics.
 
 ## First Login Checklist
 
@@ -189,7 +214,7 @@ After login:
 Pull or update the code, then rebuild:
 
 ```bash
-docker compose -f deploy/compose.yaml --profile edge up -d --build
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 The control-plane API runs meta database migrations on startup and reconciles persisted project routes/runtime artifacts.

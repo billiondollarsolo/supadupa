@@ -3,10 +3,7 @@ package terraform
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -73,12 +70,8 @@ func (r *projectLogDrainResource) Schema(ctx context.Context, req resource.Schem
 }
 
 func (r *projectLogDrainResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := clientFromProviderData(req.ProviderData, resp.Diagnostics.AddError)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("Expected *terraform.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -137,9 +130,7 @@ func (r *projectLogDrainResource) Read(ctx context.Context, req resource.ReadReq
 
 func (r *projectLogDrainResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan projectLogDrainResourceModel
-	var state projectLogDrainResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -147,17 +138,12 @@ func (r *projectLogDrainResource) Update(ctx context.Context, req resource.Updat
 	if !ok {
 		return
 	}
-	err := r.client.DeleteProjectLogDrain(ctx, state.Ref.ValueString(), state.ID.ValueString())
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		resp.Diagnostics.AddError("Unable to replace Supadupa project log drain", err.Error())
-		return
-	}
-	drain, err := r.client.CreateProjectLogDrain(ctx, plan.Ref.ValueString(), ProjectLogDrainInput{
+	drain, err := r.client.UpdateProjectLogDrain(ctx, plan.Ref.ValueString(), plan.ID.ValueString(), ProjectLogDrainInput{
 		Target: plan.Target.ValueString(),
 		Config: config,
 	})
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to recreate Supadupa project log drain", err.Error())
+		resp.Diagnostics.AddError("Unable to update Supadupa project log drain", err.Error())
 		return
 	}
 	setProjectLogDrainState(ctx, &plan, drain, config, resp.Diagnostics.AddError)
@@ -181,16 +167,7 @@ func (r *projectLogDrainResource) Delete(ctx context.Context, req resource.Delet
 }
 
 func (r *projectLogDrainResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	ref, id, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		ref, id, ok = strings.Cut(req.ID, ":")
-	}
-	if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(id) == "" {
-		resp.Diagnostics.AddError("Invalid import ID", "Use ref/id, for example alpha/01HXYZ.")
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("ref"), strings.TrimSpace(ref))...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strings.TrimSpace(id))...)
+	setTwoPartImportState(ctx, req.ID, resp, "ref", "id", "Use ref/id, for example alpha/01HXYZ.")
 }
 
 func (r *projectLogDrainResource) findLogDrain(ctx context.Context, ref string, id string) (ProjectLogDrain, error) {
@@ -198,48 +175,17 @@ func (r *projectLogDrainResource) findLogDrain(ctx context.Context, ref string, 
 	if err != nil {
 		return ProjectLogDrain{}, err
 	}
-	for _, drain := range drains {
-		if drain.ID == id {
-			return drain, nil
-		}
-	}
-	return ProjectLogDrain{}, ErrNotFound
-}
-
-func optionalConfigMapFromTerraform(ctx context.Context, value types.Map, addError func(string, string)) (map[string]string, bool) {
-	if value.IsNull() || value.IsUnknown() {
-		return map[string]string{}, true
-	}
-	return configMapFromTerraform(ctx, value, addError)
+	return findInList(drains, func(drain ProjectLogDrain) bool { return drain.ID == id })
 }
 
 func setProjectLogDrainState(ctx context.Context, model *projectLogDrainResourceModel, drain ProjectLogDrain, previousConfig map[string]string, addError func(string, string)) {
 	model.ID = types.StringValue(drain.ID)
 	model.Ref = types.StringValue(drain.ProjectRef)
 	model.Target = types.StringValue(drain.Target)
-	if drain.CreatedAt.IsZero() {
-		model.CreatedAt = types.StringValue("")
-	} else {
-		model.CreatedAt = types.StringValue(drain.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-	}
-	value, diags := types.MapValueFrom(ctx, types.StringType, preserveMaskedConfigValues(drain.Config, previousConfig))
-	if diags.HasError() {
-		addError("Unable to encode config map", diags.Errors()[0].Detail())
+	model.CreatedAt = optionalTimeString(drain.CreatedAt)
+	value, ok := sensitiveStringMapStateValue(ctx, "config", drain.Config, previousConfig, addError)
+	if !ok {
 		return
 	}
 	model.Config = value
-}
-
-func preserveMaskedConfigValues(remote map[string]string, previous map[string]string) map[string]string {
-	merged := map[string]string{}
-	for key, value := range remote {
-		if value == "********" {
-			if previousValue, ok := previous[key]; ok && strings.TrimSpace(previousValue) != "" {
-				merged[key] = previousValue
-				continue
-			}
-		}
-		merged[key] = value
-	}
-	return merged
 }

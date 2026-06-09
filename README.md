@@ -84,11 +84,23 @@ For a real VPS install:
 - Cloudflare DNS API token for Let's Encrypt DNS-01
 - Open inbound ports `80` and `443`; open `5432` and `6543` only when intentionally exposing public DB/pooler routes.
 
+You only need Docker + Docker Compose v2 to run the platform — Go and Node are required only if you build/run the binaries or frontend natively (the Compose path builds them in containers).
+
+## Get the Code
+
+```bash
+git clone https://github.com/billiondollarsolo/supadupa.git
+cd supadupa
+```
+
+All commands below are run from the repository root.
+
 ## Quick Start: Local Loopback
 
 This starts the control plane, meta database, and admin UI on local ports. It does not give you public project TLS routes.
 
 ```bash
+# from the repo root (see "Get the Code" above)
 export SUPADUPA_BOOTSTRAP_PASSWORD='change-this-password'
 scripts/setup-compose.sh --mode local
 docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.apply.yaml up -d --build

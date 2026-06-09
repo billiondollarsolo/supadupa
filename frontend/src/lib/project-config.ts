@@ -12,10 +12,8 @@ export type ConfigField = {
 };
 // Data-plane surfaces (auth users, tables/rows, storage objects, function code,
 // realtime inspection) are owned by Studio — the admin UI does not duplicate
-// them. The project tabs below cover only control-plane / infrastructure
-// concerns. The "auth"/"storage"/"functions"/"realtime" literals remain in the
-// union for now so legacy references type-check; no route or tab produces them.
-export type ProjectTab = "overview" | "connect" | "access" | "auth" | "database" | "storage" | "functions" | "realtime" | "logs" | "backups" | "config" | "activity";
+// them. The project tabs below cover only control-plane / infrastructure concerns.
+export type ProjectTab = "overview" | "connect" | "access" | "database" | "logs" | "backups" | "config" | "activity";
 export type ConnectSection = "overview" | "endpoints" | "keys" | "jwt" | "database" | "storage" | "links" | "cli" | "snippets" | "secrets";
 export type AuthSection = "overview" | "runtime" | "providers" | "email" | "clients" | "hooks" | "access";
 // Database tab is infrastructure-only: connection pooling, read replicas,
@@ -268,13 +266,6 @@ export const configSchemas: Record<ConfigArea, ConfigField[]> = {
 // dedicated first-class tab are listed; others fall back to "no guided tab".
 export const configAreaGuidedTab: Partial<Record<ConfigArea, { tab: ProjectTab; label: string }>> = {
   database: { tab: "database", label: "Database" },
-  auth: { tab: "auth", label: "Auth" },
-  auth_providers: { tab: "auth", label: "Auth" },
-  email_templates: { tab: "auth", label: "Auth" },
-  smtp: { tab: "auth", label: "Auth" },
-  storage: { tab: "storage", label: "Storage" },
-  functions: { tab: "functions", label: "Functions" },
-  realtime: { tab: "realtime", label: "Realtime" },
   pooler: { tab: "database", label: "Database" },
   ai: { tab: "database", label: "Database" },
 };

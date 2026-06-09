@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 import type { ConfigArea, ProjectTab } from "./project-config";
-import type { AdvisorFinding, AuditEvent, AuditIntegrity, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, FleetMetrics, Host, LogDrain, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRouteManifest, ProjectServices, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "../types";
+import type { AdvisorFinding, AuditEvent, AuditIntegrity, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, FleetMetrics, Host, LogDrain, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, Project, ProjectAccessGrant, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDomain, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRouteManifest, ProjectServices, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, Team, TeamMember, UsageSnapshot, User, WALArchive } from "../types";
 
 export type QueryState<T> = {
   data: T | undefined;
@@ -60,29 +60,11 @@ export type DashboardContextValue = {
   domains: QueryState<ProjectDomain[]>;
   projectServices: QueryState<ProjectServices>;
   projectConfig: QueryState<ProjectConfig>;
-  authProviderConfig: QueryState<ProjectConfig>;
-  authEmailTemplatesConfig: QueryState<ProjectConfig>;
-  authSMTPConfig: QueryState<ProjectConfig>;
   databasePoolerConfig: QueryState<ProjectConfig>;
   projectBranches: QueryState<ProjectBranch[]>;
   projectReplicas: QueryState<ProjectReplica[]>;
   projectReplicaRouting: QueryState<ProjectReplicaRouting>;
-  projectFunctions: QueryState<ProjectFunction[]>;
-  functionRegions: QueryState<ProjectFunctionRegion[]>;
-  functionStorageMounts: QueryState<ProjectFunctionStorageMount[]>;
-  authClients: QueryState<ProjectAuthClient[]>;
-  authHooks: QueryState<ProjectAuthHook[]>;
   replicationPipelines: QueryState<ProjectReplicationPipeline[]>;
-  embeddingJobs: QueryState<ProjectEmbeddingJob[]>;
-  databaseExtensions: QueryState<ProjectDatabaseExtension[]>;
-  databaseCronJobs: QueryState<ProjectDatabaseCronJob[]>;
-  databaseQueues: QueryState<ProjectDatabaseQueue[]>;
-  databaseWebhooks: QueryState<ProjectDatabaseWebhook[]>;
-  databaseSchemas: QueryState<ProjectDatabaseSchema[]>;
-  databaseRoles: QueryState<ProjectDatabaseRole[]>;
-  storageBuckets: QueryState<ProjectStorageBucket[]>;
-  vectorBuckets: QueryState<ProjectVectorBucket[]>;
-  analyticsBuckets: QueryState<ProjectAnalyticsBucket[]>;
   cdnPolicy: QueryState<ProjectCDNPolicy>;
   cdnInvalidations: QueryState<CDNInvalidation[]>;
   networkPolicy: QueryState<ProjectNetworkPolicy>;

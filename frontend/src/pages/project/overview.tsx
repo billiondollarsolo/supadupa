@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, Boxes, Database, Globe2, KeyRound, Network, Play, RotateCcw, Shield } from "lucide-react";
+import { Activity, Database, Globe2, KeyRound, Network, Play, RotateCcw, Shield } from "lucide-react";
 import { AppPanel } from "../../components/app/app-panel";
 import { ResourceMeter } from "../../components/app/resource-meter";
 import { TelemetryLineChart } from "../../components/charts/telemetry-line-chart";
@@ -177,9 +177,7 @@ function OperationalSurfacePanel({ loading, metrics, onOpenTab }: { metrics?: Pr
       {loading ? <p className="mt-4 text-sm text-muted">Loading counters...</p> : null}
       {metrics ? (
         <div className="mt-4 grid grid-cols-4 gap-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
-          <SurfaceTile icon={Database} label="Database" value={`${metrics.database_extensions} ext`} detail={`${metrics.database_roles} roles`} onClick={() => onOpenTab("database")} />
-          <SurfaceTile icon={Boxes} label="Storage" value={`${metrics.storage_buckets} buckets`} detail={formatBytes(metrics.storage_bytes)} onClick={() => onOpenTab("storage")} />
-          <SurfaceTile icon={Activity} label="Functions" value={`${metrics.function_deployments}`} detail="deployed" onClick={() => onOpenTab("functions")} />
+          <SurfaceTile icon={Database} label="Replicas" value={`${metrics.read_replicas}`} detail="read scaling" onClick={() => onOpenTab("database")} />
           <SurfaceTile icon={Globe2} label="Routes" value={`${metrics.routes}`} detail={`${metrics.custom_domains} domains`} onClick={() => onOpenTab("config")} />
           <SurfaceTile icon={Network} label="Networks" value={`${metrics.network_connections}`} detail="private" onClick={() => onOpenTab("config")} />
           <SurfaceTile icon={Shield} label="Secrets" value={`${metrics.secrets}`} detail="handles" onClick={() => onOpenTab("connect")} />

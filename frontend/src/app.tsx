@@ -1,7 +1,7 @@
 import { KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Activity, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, Command, Database, KeyRound, LogOut, Moon, Pause, Play, Plus, RadioTower, RotateCcw, Search, Server, Shield, SlidersHorizontal, Sun, UserCircle, UserPlus, XCircle, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, CheckCircle2, Command, Database, KeyRound, LogOut, Moon, Pause, Play, Plus, RotateCcw, Search, Server, Shield, SlidersHorizontal, Sun, UserCircle, UserPlus, XCircle, type LucideIcon } from "lucide-react";
 import {
   createPlatformUser,
   getAuditIntegrity,
@@ -42,30 +42,15 @@ import {
   listOrgTeams,
   listOrgUsageSnapshots,
   listProjectAccess,
-  listProjectAnalyticsBuckets,
-  listProjectAuthClients,
-  listProjectAuthHooks,
   listWALArchives,
   listProjectDomains,
   listProjectBranches,
   listProjectCDNInvalidations,
-  listProjectDatabaseExtensions,
-  listProjectDatabaseCronJobs,
-  listProjectDatabaseQueues,
-  listProjectDatabaseWebhooks,
-  listProjectDatabaseSchemas,
-  listProjectDatabaseRoles,
-  listProjectEmbeddingJobs,
-  listProjectFunctions,
-  listProjectFunctionRegions,
-  listProjectFunctionStorageMounts,
   listProjectLogDrains,
   listProjectNetworkConnections,
   listProjectReplicas,
   listProjectReplicationPipelines,
   getProjectRouteManifest,
-  listProjectStorageBuckets,
-  listProjectVectorBuckets,
   changeAccountPassword,
   listProjectActivity,
   listProjectLogs,
@@ -235,11 +220,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const needsProjectOverview = hasProjectRoute && activeProjectTab === "overview";
   const needsProjectConnect = hasProjectRoute && activeProjectTab === "connect";
   const needsProjectAccess = hasProjectRoute && activeProjectTab === "access";
-  const needsProjectAuth = hasProjectRoute && activeProjectTab === "auth";
   const needsProjectDatabase = hasProjectRoute && activeProjectTab === "database";
-  const needsProjectStorage = hasProjectRoute && activeProjectTab === "storage";
-  const needsProjectFunctions = hasProjectRoute && activeProjectTab === "functions";
-  const needsProjectRealtime = hasProjectRoute && activeProjectTab === "realtime";
   const needsProjectLogs = hasProjectRoute && activeProjectTab === "logs";
   const needsProjectBackups = hasProjectRoute && activeProjectTab === "backups";
   const needsProjectConfig = hasProjectRoute && activeProjectTab === "config";
@@ -385,22 +366,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const projectConfig = useQuery({
     queryKey: ["project-config", activeRef, activeConfigArea],
     queryFn: () => getProjectConfig(activeRef, activeConfigArea),
-    enabled: (needsProjectAuth || needsProjectDatabase || needsProjectStorage || needsProjectFunctions || needsProjectRealtime || needsProjectConfig) && activeRef.length > 0,
-  });
-  const authProviderConfig = useQuery({
-    queryKey: ["project-config", activeRef, "auth_providers"],
-    queryFn: () => getProjectConfig(activeRef, "auth_providers"),
-    enabled: activeRef.length > 0 && activeProjectTab === "auth",
-  });
-  const authEmailTemplatesConfig = useQuery({
-    queryKey: ["project-config", activeRef, "email_templates"],
-    queryFn: () => getProjectConfig(activeRef, "email_templates"),
-    enabled: activeRef.length > 0 && activeProjectTab === "auth",
-  });
-  const authSMTPConfig = useQuery({
-    queryKey: ["project-config", activeRef, "smtp"],
-    queryFn: () => getProjectConfig(activeRef, "smtp"),
-    enabled: activeRef.length > 0 && activeProjectTab === "auth",
+    enabled: (needsProjectDatabase || needsProjectConfig) && activeRef.length > 0,
   });
   const databasePoolerConfig = useQuery({
     queryKey: ["project-config", activeRef, "pooler"],
@@ -422,85 +388,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     queryFn: () => getProjectReplicaRouting(activeRef),
     enabled: needsProjectDatabase && activeRef.length > 0,
   });
-  const projectFunctions = useQuery({
-    queryKey: ["project-functions", activeRef],
-    queryFn: () => listProjectFunctions(activeRef),
-    enabled: needsProjectFunctions && activeRef.length > 0,
-  });
-  const functionRegions = useQuery({
-    queryKey: ["function-regions", activeRef],
-    queryFn: () => listProjectFunctionRegions(activeRef),
-    enabled: needsProjectFunctions && activeRef.length > 0,
-  });
-  const functionStorageMounts = useQuery({
-    queryKey: ["function-storage-mounts", activeRef],
-    queryFn: () => listProjectFunctionStorageMounts(activeRef),
-    enabled: needsProjectFunctions && activeRef.length > 0,
-  });
-  const authClients = useQuery({
-    queryKey: ["auth-clients", activeRef],
-    queryFn: () => listProjectAuthClients(activeRef),
-    enabled: needsProjectAuth && activeRef.length > 0,
-  });
-  const authHooks = useQuery({
-    queryKey: ["auth-hooks", activeRef],
-    queryFn: () => listProjectAuthHooks(activeRef),
-    enabled: needsProjectAuth && activeRef.length > 0,
-  });
   const replicationPipelines = useQuery({
     queryKey: ["replication-pipelines", activeRef],
     queryFn: () => listProjectReplicationPipelines(activeRef),
-    enabled: needsProjectRealtime && activeRef.length > 0,
-  });
-  const embeddingJobs = useQuery({
-    queryKey: ["embedding-jobs", activeRef],
-    queryFn: () => listProjectEmbeddingJobs(activeRef),
     enabled: needsProjectDatabase && activeRef.length > 0,
-  });
-  const databaseExtensions = useQuery({
-    queryKey: ["database-extensions", activeRef],
-    queryFn: () => listProjectDatabaseExtensions(activeRef),
-    enabled: needsProjectDatabase && activeRef.length > 0,
-  });
-  const databaseCronJobs = useQuery({
-    queryKey: ["database-cron-jobs", activeRef],
-    queryFn: () => listProjectDatabaseCronJobs(activeRef),
-    enabled: needsProjectDatabase && activeRef.length > 0,
-  });
-  const databaseQueues = useQuery({
-    queryKey: ["database-queues", activeRef],
-    queryFn: () => listProjectDatabaseQueues(activeRef),
-    enabled: needsProjectDatabase && activeRef.length > 0,
-  });
-  const databaseWebhooks = useQuery({
-    queryKey: ["database-webhooks", activeRef],
-    queryFn: () => listProjectDatabaseWebhooks(activeRef),
-    enabled: needsProjectDatabase && activeRef.length > 0,
-  });
-  const databaseSchemas = useQuery({
-    queryKey: ["database-schemas", activeRef],
-    queryFn: () => listProjectDatabaseSchemas(activeRef),
-    enabled: needsProjectDatabase && activeRef.length > 0,
-  });
-  const databaseRoles = useQuery({
-    queryKey: ["database-roles", activeRef],
-    queryFn: () => listProjectDatabaseRoles(activeRef),
-    enabled: needsProjectDatabase && activeRef.length > 0,
-  });
-  const storageBuckets = useQuery({
-    queryKey: ["storage-buckets", activeRef],
-    queryFn: () => listProjectStorageBuckets(activeRef),
-    enabled: needsProjectStorage && activeRef.length > 0,
-  });
-  const vectorBuckets = useQuery({
-    queryKey: ["vector-buckets", activeRef],
-    queryFn: () => listProjectVectorBuckets(activeRef),
-    enabled: needsProjectStorage && activeRef.length > 0,
-  });
-  const analyticsBuckets = useQuery({
-    queryKey: ["analytics-buckets", activeRef],
-    queryFn: () => listProjectAnalyticsBuckets(activeRef),
-    enabled: needsProjectStorage && activeRef.length > 0,
   });
   const cdnPolicy = useQuery({
     queryKey: ["cdn-policy", activeRef],
@@ -679,13 +570,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       { id: "nav-create-project", title: "Create project", subtitle: "Provision a new Supabase stack", group: "Navigation", icon: Plus, run: () => routeTo("/projects/new", "create-project") },
       { id: "nav-overview", title: "Project overview", subtitle: activeProject ? `${activeProject.ref} metrics, health, and connection basics` : "Project dashboard", group: "Navigation", icon: Activity, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref) },
       { id: "nav-connect", title: "Connect surface", subtitle: activeProject ? `${activeProject.ref} credentials and links` : "Project credentials and links", group: "Navigation", icon: KeyRound, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "connect") },
-      { id: "nav-project-auth", title: "Project Auth", subtitle: "Clients, hooks, and project access", group: "Navigation", icon: Shield, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "auth") },
-      { id: "nav-project-database", title: "Project Database", subtitle: "Branches, replicas, extensions, queues, roles, and AI", group: "Navigation", icon: Database, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "database") },
-      { id: "nav-project-storage", title: "Project Storage", subtitle: "Buckets, CDN policy, and invalidations", group: "Navigation", icon: Boxes, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "storage") },
-      { id: "nav-project-functions", title: "Project Functions", subtitle: "Deployments, regions, logs, and mounts", group: "Navigation", icon: Command, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "functions") },
-      { id: "nav-project-realtime", title: "Project Realtime", subtitle: "Realtime configuration and service state", group: "Navigation", icon: RadioTower, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "realtime") },
+      { id: "nav-project-access", title: "Project Access", subtitle: "Project RBAC teams and role grants", group: "Navigation", icon: Shield, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "access") },
+      { id: "nav-project-database", title: "Project Database", subtitle: "Pooler, replicas, branches, and replication", group: "Navigation", icon: Database, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "database") },
       { id: "nav-project-logs", title: "Project Logs", subtitle: "Log tail and log drains", group: "Navigation", icon: Activity, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "logs") },
-      { id: "nav-config", title: "Project configuration", subtitle: "Auth, providers, templates, storage, functions, realtime, network, SMTP", group: "Navigation", icon: SlidersHorizontal, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "config") },
+      { id: "nav-config", title: "Project settings", subtitle: "Runtime config, services, domains, network, operations", group: "Navigation", icon: SlidersHorizontal, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "config") },
       { id: "nav-backups", title: "Backups and PITR", subtitle: "Logical backups, restore runs, and WAL archive", group: "Navigation", icon: RotateCcw, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "backups") },
       { id: "nav-project-activity", title: "Project Activity", subtitle: "Per-project activity and audit trail", group: "Navigation", icon: Activity, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref, "activity") },
       { id: "nav-security", title: "Security", subtitle: "MFA, access review, and fleet advisor", group: "Navigation", icon: Shield, run: () => routeTo("/security", "security") },
@@ -833,29 +721,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     domains,
     projectServices,
     projectConfig,
-    authProviderConfig,
-    authEmailTemplatesConfig,
-    authSMTPConfig,
     databasePoolerConfig,
     projectBranches,
     projectReplicas,
     projectReplicaRouting,
-    projectFunctions,
-    functionRegions,
-    functionStorageMounts,
-    authClients,
-    authHooks,
     replicationPipelines,
-    embeddingJobs,
-    databaseExtensions,
-    databaseCronJobs,
-    databaseQueues,
-    databaseWebhooks,
-    databaseSchemas,
-    databaseRoles,
-    storageBuckets,
-    vectorBuckets,
-    analyticsBuckets,
     cdnPolicy,
     cdnInvalidations,
     networkPolicy,

@@ -241,6 +241,32 @@ func projectsVisibleToRequest(r *http.Request, store control.Store) ([]control.P
 	return visible, nil
 }
 
+// orgsVisibleToRequest filters orgs to those the caller can see — platform
+// admins see all; everyone else sees only orgs where they hold >= viewer. This
+// mirrors projectsVisibleToRequest so /v1/orgs doesn't leak the full tenant list.
+func orgsVisibleToRequest(r *http.Request, store control.Store) ([]control.Org, error) {
+	orgs, err := store.ListOrgs(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := claimsFromRequest(r)
+	if !ok || strings.EqualFold(claims.Role, "admin") {
+		return orgs, nil
+	}
+	email := strings.ToLower(strings.TrimSpace(claims.Email))
+	visible := make([]control.Org, 0, len(orgs))
+	for _, org := range orgs {
+		role, err := orgRoleForEmail(r.Context(), store, org.ID, email)
+		if err != nil {
+			return nil, err
+		}
+		if roleRank(role) >= roleViewer {
+			visible = append(visible, org)
+		}
+	}
+	return visible, nil
+}
+
 func orgRoleForEmail(ctx context.Context, store control.Store, orgID string, email string) (string, error) {
 	members, err := store.ListOrgMembers(ctx, orgID)
 	if err != nil {

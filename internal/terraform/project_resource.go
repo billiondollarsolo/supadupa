@@ -8,6 +8,7 @@ import (
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -31,6 +32,7 @@ type projectResourceModel struct {
 	RAMMB         types.Int64  `tfsdk:"ram_mb"`
 	DiskGB        types.Int64  `tfsdk:"disk_gb"`
 	EnforceLimits types.Bool   `tfsdk:"enforce_limits"`
+	Services      types.Map    `tfsdk:"services"`
 	Status        types.String `tfsdk:"status"`
 }
 
@@ -46,6 +48,7 @@ func (r *projectResource) Schema(ctx context.Context, req resource.SchemaRequest
 	replace := []planmodifier.String{stringplanmodifier.RequiresReplace()}
 	replaceInt := []planmodifier.Int64{int64planmodifier.RequiresReplace()}
 	replaceBool := []planmodifier.Bool{boolplanmodifier.RequiresReplace()}
+	replaceMap := []planmodifier.Map{mapplanmodifier.RequiresReplace()}
 	resp.Schema = resourceschema.Schema{
 		Description: "Supadupa project backed by one isolated upstream Supabase stack.",
 		Attributes: map[string]resourceschema.Attribute{
@@ -125,6 +128,12 @@ func (r *projectResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Description:   "Apply hard CPU/memory limits to the database container.",
 				PlanModifiers: replaceBool,
 			},
+			"services": resourceschema.MapAttribute{
+				ElementType:   types.BoolType,
+				Optional:      true,
+				Description:   "Per-service enable map (e.g. { analytics = false }). Omitted services default to the stack profile.",
+				PlanModifiers: replaceMap,
+			},
 			"status": resourceschema.StringAttribute{
 				Computed:    true,
 				Description: "Current control-plane project status.",
@@ -150,6 +159,13 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	var services map[string]bool
+	if !plan.Services.IsNull() && !plan.Services.IsUnknown() {
+		resp.Diagnostics.Append(plan.Services.ElementsAs(ctx, &services, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
 	project, err := r.client.CreateProject(ctx, plan.OrgID.ValueString(), CreateProjectRequest{
 		Ref:           plan.Ref.ValueString(),
 		Name:          plan.Name.ValueString(),
@@ -162,6 +178,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		RAMMB:         int(plan.RAMMB.ValueInt64()),
 		DiskGB:        int(plan.DiskGB.ValueInt64()),
 		EnforceLimits: plan.EnforceLimits.ValueBool(),
+		Services:      services,
 	})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create Supadupa project", err.Error())

@@ -350,17 +350,18 @@ type ProjectSpec struct {
 }
 
 type CreateProjectRequest struct {
-	Ref           string `json:"ref"`
-	Name          string `json:"name"`
-	HostID        string `json:"host_id,omitempty"`
-	Domain        string `json:"domain,omitempty"`
-	StackVersion  string `json:"stack_version,omitempty"`
-	Profile       string `json:"profile,omitempty"`
-	ResourceTier  string `json:"resource_tier,omitempty"`
-	CPU           int    `json:"cpu,omitempty"`
-	RAMMB         int    `json:"ram_mb,omitempty"`
-	DiskGB        int    `json:"disk_gb,omitempty"`
-	EnforceLimits bool   `json:"enforce_limits,omitempty"`
+	Ref           string          `json:"ref"`
+	Name          string          `json:"name"`
+	HostID        string          `json:"host_id,omitempty"`
+	Domain        string          `json:"domain,omitempty"`
+	StackVersion  string          `json:"stack_version,omitempty"`
+	Profile       string          `json:"profile,omitempty"`
+	ResourceTier  string          `json:"resource_tier,omitempty"`
+	CPU           int             `json:"cpu,omitempty"`
+	RAMMB         int             `json:"ram_mb,omitempty"`
+	DiskGB        int             `json:"disk_gb,omitempty"`
+	EnforceLimits bool            `json:"enforce_limits,omitempty"`
+	Services      map[string]bool `json:"services,omitempty"`
 }
 
 type ProjectConfig struct {

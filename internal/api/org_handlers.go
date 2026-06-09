@@ -479,7 +479,7 @@ func deleteTeamMemberHandler(store control.Store) http.HandlerFunc {
 
 func listOrgsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		orgs, err := store.ListOrgs(r.Context())
+		orgs, err := orgsVisibleToRequest(r, store)
 		if err != nil {
 			writeStoreError(w, err)
 			return

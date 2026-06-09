@@ -60,6 +60,7 @@ func TestProjectResourceLifecycleSmokeAgainstFakeManagementAPI(t *testing.T) {
 		StackVersion: types.StringValue("2026.06.01"),
 		Profile:      types.StringValue("full"),
 		ResourceTier: types.StringValue("medium"),
+		Services:     types.MapNull(types.BoolType),
 	})
 	if diags.HasError() {
 		t.Fatalf("set plan diagnostics: %v", diags)

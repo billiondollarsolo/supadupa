@@ -15,6 +15,9 @@ import (
 // so search reaches all history rather than just a recent client-side window.
 func listAuditEventsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
 		q := r.URL.Query()
 		query := control.AuditEventQuery{
 			Limit:   atoiDefault(q.Get("limit"), 100),
@@ -64,6 +67,9 @@ func parseAuditTime(raw string, endOfDay bool) time.Time {
 
 func getAuditIntegrityHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
 		integrity, err := store.VerifyAuditLog(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
@@ -95,6 +101,9 @@ func createHostHandler(store control.Store) http.HandlerFunc {
 
 func listHostsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
 		hosts, err := store.ListHosts(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
@@ -106,6 +115,9 @@ func listHostsHandler(store control.Store) http.HandlerFunc {
 
 func getHostHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
 		host, err := store.GetHost(r.Context(), r.PathValue("id"))
 		if err != nil {
 			writeStoreError(w, err)

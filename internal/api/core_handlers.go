@@ -16,6 +16,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func provisionerHandler(provisioner control.Provisioner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePlatformAdmin(w, r) {
+			return
+		}
 		name := "unconfigured"
 		if provisioner != nil {
 			name = provisioner.Name()

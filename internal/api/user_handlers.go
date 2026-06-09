@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 
 	"supadupa2026/internal/control"
@@ -52,7 +53,7 @@ func updateUserHandler(store control.Store) http.HandlerFunc {
 			writeStoreError(w, err)
 			return
 		}
-		control.Audit(r.Context(), store, "user.update", "user:"+user.ID, map[string]string{"email": user.Email, "role": user.Role, "password_changed": boolString(payload.Password != "")})
+		control.Audit(r.Context(), store, "user.update", "user:"+user.ID, map[string]string{"email": user.Email, "role": user.Role, "password_changed": fmt.Sprintf("%t", payload.Password != "")})
 		writeJSON(w, http.StatusOK, user)
 	}
 }
@@ -98,13 +99,6 @@ func lastAdmin(r *http.Request, store control.Store, id string) bool {
 		}
 	}
 	return admins <= 1
-}
-
-func boolString(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
 }
 
 func listUsersHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {

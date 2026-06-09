@@ -38,7 +38,6 @@ export type DashboardContextValue = {
   scimServiceProviderConfig: QueryState<SCIMServiceProviderConfig>;
   scimUsers: QueryState<SCIMListResponse<SCIMUser>>;
   scimGroups: QueryState<SCIMListResponse<SCIMGroup>>;
-  auditEvents: QueryState<AuditEvent[]>;
   auditIntegrity: QueryState<AuditIntegrity>;
   users: QueryState<User[]>;
   mfaStatus: QueryState<MFAStatus>;

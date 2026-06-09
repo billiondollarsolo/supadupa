@@ -32,7 +32,6 @@ import {
   getProvisionerStatus,
   getRuntimeConfig,
   getSCIMServiceProviderConfig,
-  listAuditEvents,
   listBackupStorageTargets,
   listPlatformBackups,
   listBillingInvoices,
@@ -265,7 +264,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const scimServiceProviderConfig = useQuery({ queryKey: ["scim-service-provider-config"], queryFn: getSCIMServiceProviderConfig, enabled: needsPlatformSettings });
   const scimUsers = useQuery({ queryKey: ["scim-users"], queryFn: listSCIMUsers, enabled: needsPlatformSettings });
   const scimGroups = useQuery({ queryKey: ["scim-groups"], queryFn: () => listSCIMGroups(), enabled: needsPlatformSettings });
-  const auditEvents = useQuery({ queryKey: ["audit-events"], queryFn: async () => (await listAuditEvents({ limit: 200 })).events, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
+  // The full audit page (AuditLogPage) owns its own server-paginated query; the
+  // dashboard context only needs the integrity badge.
   const auditIntegrity = useQuery({ queryKey: ["audit-integrity"], queryFn: getAuditIntegrity, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
   const users = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: needsPlatformSettings || isSecurityRoute || isOrganizationsRoute });
   const mfaStatus = useQuery({ queryKey: ["account-mfa"], queryFn: getAccountMFA, enabled: isSecurityRoute });
@@ -324,13 +324,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     queryFn: listProjects,
   });
   const projectList = projects.data ?? [];
-  const activeConfigArea: ConfigArea =
-    activeProjectTab === "auth" ? "auth" :
-      activeProjectTab === "database" ? "database" :
-        activeProjectTab === "functions" ? "functions" :
-          activeProjectTab === "realtime" ? "realtime" :
-            activeProjectTab === "storage" ? "storage" :
-              configArea;
+  const activeConfigArea: ConfigArea = activeProjectTab === "database" ? "database" : configArea;
   const activeRef = routeRef || selectedRef || projectList[0]?.ref || "";
   const activeProjectListItem = useMemo(
     () => projectList.find((project) => project.ref === activeRef) ?? projectList[0],
@@ -817,7 +811,6 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     scimServiceProviderConfig,
     scimUsers,
     scimGroups,
-    auditEvents,
     auditIntegrity,
     users,
     mfaStatus,

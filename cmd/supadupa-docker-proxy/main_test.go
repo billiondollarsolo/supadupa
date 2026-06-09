@@ -83,8 +83,9 @@ func TestDockerContainerCreateValidationAllowsSupadupaComposePayload(t *testing.
 		"Labels": {"com.docker.compose.project": "alpha"},
 		"HostConfig": {
 			"Binds": [
-				"/srv/supadupa/runtime/projects/alpha/functions:/home/deno/functions:ro",
+				"/root/supadupa/runtime/projects/alpha/functions:/home/deno/functions:ro",
 				"/root/supadupa/runtime/projects/alpha/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro",
+				"db-data:/var/lib/postgresql/data",
 				"./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"
 			],
 			"NetworkMode": "alpha_internal"
@@ -130,6 +131,22 @@ func TestDockerContainerCreateValidationBlocksHostTakeoverPayloads(t *testing.T)
 		{
 			name: "root sibling bind",
 			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Mounts":[{"Type":"bind","Source":"/root/supadupa/runtime/projects/beta/pg_hba.conf","Target":"/etc/postgresql/pg_hba.conf"}]}}`,
+		},
+		{
+			name: "out-of-root absolute bind",
+			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Binds":["/srv/supadupa/runtime/projects/alpha/functions:/home/deno/functions"]}}`,
+		},
+		{
+			name: "docker volumes escape",
+			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Mounts":[{"Type":"bind","Source":"/var/lib/docker/volumes","Target":"/v"}]}}`,
+		},
+		{
+			name: "home directory escape",
+			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Binds":["/home/ops/.ssh:/keys:ro"]}}`,
+		},
+		{
+			name: "relative traversal bind",
+			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Binds":["../beta/pg_hba.conf:/etc/postgresql/pg_hba.conf"]}}`,
 		},
 		{
 			name: "device mapping",

@@ -928,16 +928,16 @@ func validateDockerHostConfig(projectRef string, config dockerHostConfig, extraM
 	}
 	for _, bind := range config.Binds {
 		source, _ := splitDockerBind(bind)
-		if dangerousDockerMountPath(source) && !allowedProjectBindMountPath(projectRef, source) {
-			return fmt.Errorf("dangerous bind mount is not allowed through docker proxy")
+		if !projectBindSourceAllowed(projectRef, source) {
+			return fmt.Errorf("bind mount source %q is outside the project's allowed paths", source)
 		}
 	}
 	for _, mount := range append(config.Mounts, extraMounts...) {
 		if !strings.EqualFold(strings.TrimSpace(mount.Type), "bind") {
 			continue
 		}
-		if dangerousDockerMountPath(mount.Source) && !allowedProjectBindMountPath(projectRef, mount.Source) {
-			return fmt.Errorf("dangerous bind mount is not allowed through docker proxy")
+		if !projectBindSourceAllowed(projectRef, mount.Source) {
+			return fmt.Errorf("bind mount source %q is outside the project's allowed paths", mount.Source)
 		}
 	}
 	return nil
@@ -952,27 +952,29 @@ func splitDockerBind(bind string) (string, string) {
 	return strings.TrimSpace(source), strings.TrimSpace(target)
 }
 
-func dangerousDockerMountPath(path string) bool {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return false
-	}
-	if len(path) > 1 {
-		path = strings.TrimRight(path, "/")
-	}
-	switch path {
-	case "", ".", "..":
-		return false
-	case "/", "/var/run/docker.sock", "/run/docker.sock", "/var/run/docker", "/run/docker", "/proc", "/sys", "/dev", "/etc", "/root":
+// projectBindSourceAllowed is an ALLOWLIST for container bind-mount sources
+// arriving through the proxy. The proxy is the single privileged boundary
+// (it holds the real root-owned docker socket), so instead of denylisting known
+// dangerous host paths we permit ONLY:
+//   - named docker volumes / in-project relative paths that don't traverse up
+//     (e.g. "db-data", "./pg_hba.conf"), and
+//   - absolute host paths inside THIS project's own directory under the
+//     configured SUPADUPA_PROJECT_HOST_ROOT.
+//
+// Everything else — the docker socket, /var/lib/docker, /home, /etc, another
+// project's directory, or any host path outside the project root — is rejected,
+// closing the host-takeover and cross-tenant escape surface a denylist missed.
+func projectBindSourceAllowed(projectRef string, source string) bool {
+	source = strings.TrimSpace(source)
+	if source == "" {
 		return true
 	}
-	return strings.HasPrefix(path, "/var/run/docker/") ||
-		strings.HasPrefix(path, "/run/docker/") ||
-		strings.HasPrefix(path, "/proc/") ||
-		strings.HasPrefix(path, "/sys/") ||
-		strings.HasPrefix(path, "/dev/") ||
-		strings.HasPrefix(path, "/etc/") ||
-		strings.HasPrefix(path, "/root/")
+	if !strings.HasPrefix(source, "/") {
+		// Named volume or in-project relative path; allow unless it escapes upward.
+		cleaned := filepath.Clean(source)
+		return cleaned != ".." && !strings.HasPrefix(cleaned, ".."+string(os.PathSeparator))
+	}
+	return allowedProjectBindMountPath(projectRef, source)
 }
 
 func allowedProjectBindMountPath(projectRef string, path string) bool {

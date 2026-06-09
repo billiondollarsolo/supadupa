@@ -1,7 +1,10 @@
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Building2, CreditCard, Plus, Save, UserPlus, X } from "lucide-react";
+import type { ColumnDef } from "@tanstack/react-table";
+import { Building2, CreditCard, Pencil, Plus, Save, Trash2, UserPlus, X } from "lucide-react";
+import { DataTable } from "../../components/data-table";
+import { Modal } from "../../components/modal";
 import {
   createBillingInvoice,
   createOrg,
@@ -11,8 +14,10 @@ import {
   deleteOrgMember,
   deleteOrgTeam,
   deleteTeamMember,
+  deleteUser,
   updateOrgFeatureFlags,
   updateOrgQuota,
+  updateUser,
   upsertOrgMember,
   upsertTeamMember,
 } from "../../api";
@@ -102,10 +107,11 @@ export function CreateOrgPanel({ onCreated }: { onCreated: (id: string) => void 
 
 export function MembersPanel({ orgId, members, users, loading }: { orgId: string; members: Membership[]; users: User[]; loading: boolean }) {
   const queryClient = useQueryClient();
+  const [addOpen, setAddOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("developer");
-  const usersByEmail = new Map(users.map((user) => [user.email.toLowerCase(), user]));
+  const usersByEmail = useMemo(() => new Map(users.map((user) => [user.email.toLowerCase(), user])), [users]);
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["org-members", orgId] });
     void queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -125,12 +131,36 @@ export function MembersPanel({ orgId, members, users, loading }: { orgId: string
     onSuccess: () => {
       setEmail("");
       setPassword("");
+      setRole("developer");
+      setAddOpen(false);
       invalidate();
     },
   });
   const deleteMutation = useMutation({
     mutationFn: (memberEmail: string) => deleteOrgMember(orgId, memberEmail),
     onSuccess: invalidate,
+  });
+
+  // Platform-user edit (role + optional password reset) and delete.
+  const [editUser, setEditUser] = useState<User | null>(null);
+  const [editRole, setEditRole] = useState("developer");
+  const [editPassword, setEditPassword] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<User | null>(null);
+  const editMutation = useMutation({
+    mutationFn: ({ id, nextEmail, nextRole, nextPassword }: { id: string; nextEmail: string; nextRole: string; nextPassword: string }) =>
+      updateUser(id, { email: nextEmail, role: nextRole, password: nextPassword || undefined }),
+    onSuccess: () => {
+      setEditUser(null);
+      setEditPassword("");
+      invalidate();
+    },
+  });
+  const deleteUserMutation = useMutation({
+    mutationFn: (id: string) => deleteUser(id),
+    onSuccess: () => {
+      setDeleteTarget(null);
+      invalidate();
+    },
   });
 
   function submit(event: FormEvent) {
@@ -141,82 +171,202 @@ export function MembersPanel({ orgId, members, users, loading }: { orgId: string
     upsertMutation.mutate({ nextEmail: email, nextPassword: password, nextRole: role });
   }
 
+  const memberColumns = useMemo<ColumnDef<Membership>[]>(
+    () => [
+      {
+        header: "Member",
+        accessorKey: "email",
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main">{row.original.email}</p>
+            <p className="cell-sub font-mono">{row.original.user_id}</p>
+          </>
+        ),
+      },
+      { header: "Role", accessorKey: "role", size: 130, cell: ({ row }) => <StatusPill tone="info" label={row.original.role} /> },
+      {
+        header: "Login",
+        id: "login",
+        size: 130,
+        cell: ({ row }) => {
+          const backingUser = usersByEmail.get(row.original.email.toLowerCase());
+          return backingUser ? (
+            <StatusPill tone={backingUser.mfa_enabled ? "success" : "neutral"} label={backingUser.mfa_enabled ? "MFA on" : "No MFA"} />
+          ) : (
+            <StatusPill tone="warning" label="No login" />
+          );
+        },
+      },
+      {
+        header: "",
+        id: "actions",
+        size: 64,
+        cell: ({ row }) => (
+          <Button variant="ghost" size="icon" disabled={!orgId || row.original.role === "owner" || deleteMutation.isPending} onClick={() => deleteMutation.mutate(row.original.email)} type="button" aria-label={`Remove ${row.original.email}`}>
+            <X size={14} />
+          </Button>
+        ),
+      },
+    ],
+    [orgId, usersByEmail, deleteMutation],
+  );
+
+  const userColumns = useMemo<ColumnDef<User>[]>(
+    () => [
+      {
+        header: "User",
+        accessorKey: "email",
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main">{row.original.email}</p>
+            <p className="cell-sub font-mono">{row.original.id}</p>
+          </>
+        ),
+      },
+      {
+        header: "Role",
+        accessorKey: "role",
+        size: 150,
+        cell: ({ row }) => <StatusPill tone={row.original.role === "admin" ? "success" : "info"} label={row.original.role === "admin" ? "global admin" : row.original.role} />,
+      },
+      { header: "MFA", id: "mfa", size: 110, cell: ({ row }) => <StatusPill tone={row.original.mfa_enabled ? "success" : "neutral"} label={row.original.mfa_enabled ? "MFA on" : "No MFA"} /> },
+      {
+        header: "",
+        id: "actions",
+        size: 96,
+        cell: ({ row }) => (
+          <div className="flex items-center justify-end gap-1">
+            <Button variant="ghost" size="icon" onClick={() => { setEditUser(row.original); setEditRole(row.original.role); setEditPassword(""); }} type="button" aria-label={`Edit ${row.original.email}`}>
+              <Pencil size={14} />
+            </Button>
+            <Button variant="ghost" size="icon" onClick={() => setDeleteTarget(row.original)} type="button" aria-label={`Delete ${row.original.email}`}>
+              <Trash2 size={14} />
+            </Button>
+          </div>
+        ),
+      },
+    ],
+    [],
+  );
+
   return (
     <AppPanel
       eyebrow="Members"
-      title="Global org access"
-      actions={<UserPlus size={15} className="text-faint" />}
-    >
-      <form className="mt-4 grid grid-cols-[minmax(0,1fr)_minmax(140px,0.6fr)_120px_auto] items-end gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1" onSubmit={submit}>
-        <Field label="Email">
-          <Input placeholder="teammate@example.com" aria-label="Member email" value={email} onChange={(event) => setEmail(event.target.value)} type="email" />
-        </Field>
-        <Field label="Password" hint="Sets a password for a new platform login; leave blank to grant access to an existing user.">
-          <Input placeholder="Optional" aria-label="Initial password" value={password} onChange={(event) => setPassword(event.target.value)} type="password" />
-        </Field>
-        <Field label="Role">
-          <NativeSelect aria-label="Member role" value={role} onChange={(event) => setRole(event.target.value)}>
-            <option value="owner">Owner</option>
-            <option value="admin">Admin</option>
-            <option value="developer">Developer</option>
-            <option value="viewer">Viewer</option>
-          </NativeSelect>
-        </Field>
-        <Button className="justify-self-start max-xl:col-span-2 max-sm:col-span-1" disabled={!orgId || upsertMutation.isPending || email.trim().length === 0} type="submit" variant="secondary">
+      title="Users & access"
+      actions={
+        <Button size="sm" disabled={!orgId} onClick={() => setAddOpen(true)} type="button">
           <Plus size={14} />
-          Add
+          Add user
         </Button>
-      </form>
-      <div className="mt-4 grid gap-2">
-        {loading ? <p className="text-sm text-muted">Loading members...</p> : null}
-        {!loading && members.length === 0 ? <p className="text-sm text-muted">No members assigned yet.</p> : null}
-        {members.map((member) => {
-          const backingUser = usersByEmail.get(member.email.toLowerCase());
-          return (
-            <div className="member-row" key={`${member.org_id}:${member.email}`}>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{member.email}</p>
-                <p className="truncate font-mono text-xs text-muted">{member.user_id}</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <StatusPill tone="info" label={member.role} />
-                {backingUser ? (
-                  <StatusPill tone={backingUser.mfa_enabled ? "success" : "neutral"} label={backingUser.mfa_enabled ? "MFA" : "No MFA"} />
-                ) : (
-                  <StatusPill tone="warning" label="No login" />
-                )}
-                <Button variant="ghost" size="icon" disabled={!orgId || member.role === "owner" || deleteMutation.isPending} onClick={() => deleteMutation.mutate(member.email)} type="button">
-                  <X size={14} />
-                </Button>
-              </div>
-            </div>
-          );
-        })}
-        {upsertMutation.error ? <p className="text-sm text-danger">{upsertMutation.error.message}</p> : null}
+      }
+    >
+      <div className="mt-4 grid gap-5">
+        <section className="grid gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <p className="label">Organization access</p>
+            <Badge variant="muted">{members.length}</Badge>
+          </div>
+          <DataTable columns={memberColumns} data={members} emptyText={loading ? "Loading members..." : "No members assigned yet. Use “Add user” to grant access."} minWidth={560} sortable />
+        </section>
+        <section className="grid gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <p className="label">Platform users</p>
+            <Badge variant="muted">{users.length}</Badge>
+          </div>
+          <DataTable columns={userColumns} data={users} emptyText={loading ? "Loading users..." : "No platform users created yet."} minWidth={560} sortable />
+        </section>
         {deleteMutation.error ? <p className="text-sm text-danger">{deleteMutation.error.message}</p> : null}
       </div>
-      <div className="mt-5 border-t border-border pt-4">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <p className="label">Platform users</p>
-          <Badge variant="muted">{users.length}</Badge>
-        </div>
-        <div className="grid gap-2">
-          {loading ? <p className="text-sm text-muted">Loading users...</p> : null}
-          {!loading && users.length === 0 ? <p className="text-sm text-muted">No platform users created yet.</p> : null}
-          {users.map((user) => (
-            <div className="member-row" key={user.id}>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{user.email}</p>
-                <p className="truncate font-mono text-xs text-muted">{user.id}</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <StatusPill tone={user.mfa_enabled ? "success" : "neutral"} label={user.mfa_enabled ? "MFA" : "No MFA"} />
-                <StatusPill tone={user.role === "admin" ? "success" : "info"} label={user.role === "admin" ? "global admin" : user.role} />
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+
+      <Modal
+        open={addOpen}
+        onClose={() => !upsertMutation.isPending && setAddOpen(false)}
+        title="Add user"
+        description="Grant a user access to this organization. Set a password to create a new platform login, or leave it blank to grant an existing user."
+        footer={
+          <>
+            <Button variant="secondary" disabled={upsertMutation.isPending} onClick={() => setAddOpen(false)} type="button">Cancel</Button>
+            <Button form="add-user-form" disabled={!orgId || upsertMutation.isPending || email.trim().length === 0} type="submit">
+              <Plus size={14} />
+              Add user
+            </Button>
+          </>
+        }
+      >
+        <form id="add-user-form" className="grid gap-3" onSubmit={submit}>
+          <Field label="Email">
+            <Input placeholder="teammate@example.com" aria-label="Member email" value={email} onChange={(event) => setEmail(event.target.value)} type="email" />
+          </Field>
+          <Field label="Password" hint="Sets a password for a new platform login; leave blank to grant access to an existing user.">
+            <Input placeholder="Optional" aria-label="Initial password" value={password} onChange={(event) => setPassword(event.target.value)} type="password" />
+          </Field>
+          <Field label="Role">
+            <NativeSelect aria-label="Member role" value={role} onChange={(event) => setRole(event.target.value)}>
+              <option value="owner">Owner</option>
+              <option value="admin">Admin</option>
+              <option value="developer">Developer</option>
+              <option value="viewer">Viewer</option>
+            </NativeSelect>
+          </Field>
+          {upsertMutation.error ? <p className="text-sm text-danger">{upsertMutation.error.message}</p> : null}
+        </form>
+      </Modal>
+
+      <Modal
+        open={Boolean(editUser)}
+        onClose={() => !editMutation.isPending && setEditUser(null)}
+        title={editUser ? `Edit ${editUser.email}` : "Edit user"}
+        description="Change the platform role or set a new password. Leave the password blank to keep the current one."
+        footer={
+          <>
+            <Button variant="secondary" disabled={editMutation.isPending} onClick={() => setEditUser(null)} type="button">Cancel</Button>
+            <Button form="edit-user-form" disabled={editMutation.isPending} type="submit">
+              <Save size={14} />
+              Save changes
+            </Button>
+          </>
+        }
+      >
+        <form
+          id="edit-user-form"
+          className="grid gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!editUser) return;
+            editMutation.mutate({ id: editUser.id, nextEmail: editUser.email, nextRole: editRole, nextPassword: editPassword });
+          }}
+        >
+          <Field label="Role">
+            <NativeSelect aria-label="User role" value={editRole} onChange={(event) => setEditRole(event.target.value)}>
+              <option value="admin">Admin</option>
+              <option value="developer">Developer</option>
+              <option value="viewer">Viewer</option>
+            </NativeSelect>
+          </Field>
+          <Field label="New password" hint="Leave blank to keep the current password.">
+            <Input placeholder="••••••••" aria-label="New password" value={editPassword} onChange={(event) => setEditPassword(event.target.value)} type="password" />
+          </Field>
+          {editMutation.error ? <p className="text-sm text-danger">{editMutation.error.message}</p> : null}
+        </form>
+      </Modal>
+
+      <Modal
+        open={Boolean(deleteTarget)}
+        onClose={() => !deleteUserMutation.isPending && setDeleteTarget(null)}
+        title="Delete user"
+        description={deleteTarget ? `Permanently remove ${deleteTarget.email} and revoke their access. This cannot be undone.` : ""}
+        footer={
+          <>
+            <Button variant="secondary" disabled={deleteUserMutation.isPending} onClick={() => setDeleteTarget(null)} type="button">Cancel</Button>
+            <Button disabled={deleteUserMutation.isPending} onClick={() => deleteTarget && deleteUserMutation.mutate(deleteTarget.id)} type="button">
+              <Trash2 size={14} />
+              Delete user
+            </Button>
+          </>
+        }
+      >
+        {deleteUserMutation.error ? <p className="text-sm text-danger">{deleteUserMutation.error.message}</p> : null}
+      </Modal>
     </AppPanel>
   );
 }
@@ -273,6 +423,32 @@ export function TeamsPanel({ orgId, teams, selectedSlug, members, onSelect, load
     addMemberMutation.mutate();
   }
 
+  const memberColumns = useMemo<ColumnDef<TeamMember>[]>(
+    () => [
+      {
+        header: "Member",
+        accessorKey: "email",
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main">{row.original.email}</p>
+            <p className="cell-sub font-mono">{row.original.user_id}</p>
+          </>
+        ),
+      },
+      {
+        header: "",
+        id: "actions",
+        size: 56,
+        cell: ({ row }) => (
+          <Button variant="ghost" size="icon" disabled={deleteMemberMutation.isPending} onClick={() => deleteMemberMutation.mutate(row.original.email)} type="button" aria-label={`Remove ${row.original.email}`}>
+            <X size={14} />
+          </Button>
+        ),
+      },
+    ],
+    [deleteMemberMutation],
+  );
+
   return (
     <AppPanel
       eyebrow="Teams"
@@ -311,19 +487,7 @@ export function TeamsPanel({ orgId, teams, selectedSlug, members, onSelect, load
               Add
             </Button>
           </form>
-          <div className="mt-3 grid gap-2">
-            {members.map((member) => (
-              <div className="member-row" key={`${member.team_id}:${member.email}`}>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{member.email}</p>
-                  <p className="truncate font-mono text-xs text-muted">{member.user_id}</p>
-                </div>
-                <Button variant="ghost" size="icon" disabled={deleteMemberMutation.isPending} onClick={() => deleteMemberMutation.mutate(member.email)} type="button">
-                  <X size={14} />
-                </Button>
-              </div>
-            ))}
-          </div>
+          <DataTable className="mt-3" columns={memberColumns} data={members} emptyText={loading ? "Loading members..." : "No team members yet."} minWidth={420} sortable />
         </div>
       ) : null}
       {createMutation.error ? <p className="mt-3 text-sm text-danger">{createMutation.error.message}</p> : null}
@@ -646,6 +810,24 @@ export function BillingPanel({ orgId, invoices, loading, enabled }: { orgId: str
     },
   });
   const latest = invoices[0];
+  const invoiceColumns = useMemo<ColumnDef<BillingInvoice>[]>(
+    () => [
+      {
+        header: "Invoice",
+        accessorKey: "number",
+        cell: ({ row }) => (
+          <>
+            <p className="cell-main">{row.original.number}</p>
+            <p className="cell-sub">{formatTime(row.original.period_start)} – {formatTime(row.original.period_end)} · {row.original.line_items.length} line items</p>
+          </>
+        ),
+      },
+      { header: "Amount", accessorKey: "total_cents", size: 160, cell: ({ row }) => <span className="text-sm">{formatMoney(row.original.total_cents, row.original.currency)}</span> },
+      { header: "Due", id: "due", size: 150, cell: ({ row }) => <span className="text-xs text-muted">{formatTime(row.original.due_at)}</span> },
+      { header: "Status", accessorKey: "status", size: 120, cell: ({ row }) => <StatusPill status={row.original.status} /> },
+    ],
+    [],
+  );
   return (
     <AppPanel
       eyebrow="Billing"
@@ -678,18 +860,7 @@ export function BillingPanel({ orgId, invoices, loading, enabled }: { orgId: str
             <MetricCard label="Due" value={formatTime(latest.due_at)} />
           </div>
         ) : null}
-        {enabled ? invoices.map((invoice) => (
-          <div className="billing-row" key={invoice.id}>
-            <div>
-              <p className="truncate text-sm font-medium">{invoice.number}</p>
-              <p className="truncate text-xs text-muted">{formatTime(invoice.period_start)} to {formatTime(invoice.period_end)} · {invoice.line_items.length} line items</p>
-            </div>
-            <div className="flex items-center gap-2 text-right text-xs text-muted">
-              <span>{formatMoney(invoice.total_cents, invoice.currency)} · due {formatTime(invoice.due_at)}</span>
-              <StatusPill status={invoice.status} />
-            </div>
-          </div>
-        )) : null}
+        {enabled ? <DataTable columns={invoiceColumns} data={invoices} emptyText={loading ? "Loading invoices..." : "No invoices generated yet."} minWidth={560} sortable /> : null}
         {invoiceMutation.error ? <p className="text-sm text-danger">{invoiceMutation.error.message}</p> : null}
       </div>
     </AppPanel>

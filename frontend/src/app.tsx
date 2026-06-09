@@ -67,6 +67,7 @@ import {
   getProjectRouteManifest,
   listProjectStorageBuckets,
   listProjectVectorBuckets,
+  changeAccountPassword,
   listProjectActivity,
   listProjectLogs,
   listProjects,
@@ -93,6 +94,7 @@ import { Modal } from "./components/modal";
 import { StatusPill } from "./components/ui/status-pill";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
+import { Input } from "./components/ui/input";
 
 type PaletteAction = {
   id: string;
@@ -233,6 +235,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const needsOrgWorkspace = isOrganizationsRoute || isSecurityRoute;
   const needsProjectOverview = hasProjectRoute && activeProjectTab === "overview";
   const needsProjectConnect = hasProjectRoute && activeProjectTab === "connect";
+  const needsProjectAccess = hasProjectRoute && activeProjectTab === "access";
   const needsProjectAuth = hasProjectRoute && activeProjectTab === "auth";
   const needsProjectDatabase = hasProjectRoute && activeProjectTab === "database";
   const needsProjectStorage = hasProjectRoute && activeProjectTab === "storage";
@@ -262,7 +265,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const scimServiceProviderConfig = useQuery({ queryKey: ["scim-service-provider-config"], queryFn: getSCIMServiceProviderConfig, enabled: needsPlatformSettings });
   const scimUsers = useQuery({ queryKey: ["scim-users"], queryFn: listSCIMUsers, enabled: needsPlatformSettings });
   const scimGroups = useQuery({ queryKey: ["scim-groups"], queryFn: () => listSCIMGroups(), enabled: needsPlatformSettings });
-  const auditEvents = useQuery({ queryKey: ["audit-events"], queryFn: listAuditEvents, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
+  const auditEvents = useQuery({ queryKey: ["audit-events"], queryFn: async () => (await listAuditEvents({ limit: 200 })).events, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
   const auditIntegrity = useQuery({ queryKey: ["audit-integrity"], queryFn: getAuditIntegrity, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
   const users = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: needsPlatformSettings || isSecurityRoute });
   const mfaStatus = useQuery({ queryKey: ["account-mfa"], queryFn: getAccountMFA, enabled: isSecurityRoute });
@@ -275,7 +278,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const teams = useQuery({
     queryKey: ["org-teams", activeOrgId],
     queryFn: () => listOrgTeams(activeOrgId),
-    enabled: needsOrgWorkspace && activeOrgId.length > 0,
+    enabled: (needsOrgWorkspace || needsProjectAccess) && activeOrgId.length > 0,
   });
   const activeTeamSlug = selectedTeamSlug || teams.data?.[0]?.slug || "";
   const teamMembers = useQuery({
@@ -368,7 +371,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const projectAccess = useQuery({
     queryKey: ["project-access", activeRef],
     queryFn: () => listProjectAccess(activeRef),
-    enabled: needsProjectAuth && activeRef.length > 0,
+    enabled: needsProjectAccess && activeRef.length > 0,
   });
   const routeManifest = useQuery({
     queryKey: ["project-route-manifest", activeRef],
@@ -508,12 +511,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const cdnPolicy = useQuery({
     queryKey: ["cdn-policy", activeRef],
     queryFn: () => getProjectCDNPolicy(activeRef),
-    enabled: needsProjectStorage && activeRef.length > 0,
+    enabled: needsProjectConfig && activeRef.length > 0,
   });
   const cdnInvalidations = useQuery({
     queryKey: ["cdn-invalidations", activeRef],
     queryFn: () => listProjectCDNInvalidations(activeRef),
-    enabled: needsProjectStorage && activeRef.length > 0,
+    enabled: needsProjectConfig && activeRef.length > 0,
   });
   const networkConnections = useQuery({
     queryKey: ["network-connections", activeRef],
@@ -578,9 +581,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     if (!platformDefaults.data) {
       return;
     }
-    if (!orgsEnabled && isOrganizationsRoute) {
-      void navigate({ to: "/" });
-    }
+    // When multi-org is off, /organizations stays reachable as the single-org
+    // "Access" workspace (users, teams/roles, quotas) — only billing/usage and
+    // multi-org management are hidden inside it.
     if (!ssoScimEnabled && (pathname === "/settings/sso" || pathname === "/settings/scim")) {
       void navigate({ to: "/settings" });
     }
@@ -677,7 +680,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const paletteActions = useMemo<PaletteAction[]>(() => {
     const actions: PaletteAction[] = [
       { id: "nav-fleet", title: "Dashboard", subtitle: "At-a-glance health, server usage, and projects", group: "Navigation", icon: Activity, run: () => routeTo("/", "fleet-dashboard") },
-      { id: "nav-orgs", title: "Organizations", subtitle: "Orgs, members, quotas, and usage", group: "Navigation", icon: UserPlus, run: () => routeTo("/organizations", "organizations") },
+      { id: "nav-orgs", title: orgsEnabled ? "Organizations" : "Access", subtitle: orgsEnabled ? "Orgs, members, quotas, and usage" : "Users, teams, roles, and quotas", group: "Navigation", icon: orgsEnabled ? UserPlus : Shield, run: () => routeTo("/organizations", "organizations") },
       { id: "nav-projects", title: "Projects list", subtitle: "Browse isolated stacks", group: "Navigation", icon: Database, run: () => routeTo("/projects", "projects-list") },
       { id: "nav-create-project", title: "Create project", subtitle: "Provision a new Supabase stack", group: "Navigation", icon: Plus, run: () => routeTo("/projects/new", "create-project") },
       { id: "nav-overview", title: "Project overview", subtitle: activeProject ? `${activeProject.ref} metrics, health, and connection basics` : "Project dashboard", group: "Navigation", icon: Activity, disabled: !activeProject, run: () => activeProject && routeToProject(activeProject.ref) },
@@ -749,7 +752,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         },
       );
     }
-    return orgsEnabled ? actions : actions.filter((action) => action.id !== "nav-orgs");
+    return actions;
   }, [activeProject, hasProjectRoute, orgsEnabled, projectActionBusy, projectList, routeTo, routeToProject, triggerBackupMutation.isPending]);
 
   const onOrgCreated = (orgId: string) => {
@@ -979,9 +982,20 @@ function AccountMenu({
   theme: "dark" | "light";
 }) {
   const [open, setOpen] = useState(false);
+  const [pwOpen, setPwOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const menuID = useId();
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const passwordMutation = useMutation({
+    mutationFn: () => changeAccountPassword({ current_password: currentPassword, new_password: newPassword }),
+    onSuccess: () => {
+      setPwOpen(false);
+      setCurrentPassword("");
+      setNewPassword("");
+    },
+  });
 
   function navigate(to: string, id: string) {
     setOpen(false);
@@ -1103,6 +1117,10 @@ function AccountMenu({
               <Shield size={14} />
               Account security
             </button>
+            <button className="nav-item h-9 justify-start" onClick={() => { setOpen(false); setPwOpen(true); }} role="menuitem" type="button">
+              <KeyRound size={14} />
+              Change password
+            </button>
             <button className="nav-item h-9 justify-start" onClick={() => navigate("/settings", "settings")} role="menuitem" type="button">
               <SlidersHorizontal size={14} />
               Platform settings
@@ -1117,6 +1135,33 @@ function AccountMenu({
           </div>
         </div>
       ) : null}
+      <Modal
+        open={pwOpen}
+        onClose={() => !passwordMutation.isPending && setPwOpen(false)}
+        title="Change password"
+        description="Update the password for your own account. You'll stay signed in."
+        footer={
+          <>
+            <Button variant="secondary" disabled={passwordMutation.isPending} onClick={() => setPwOpen(false)} type="button">Cancel</Button>
+            <Button form="change-password-form" disabled={passwordMutation.isPending || currentPassword.length === 0 || newPassword.length === 0} type="submit">
+              <KeyRound size={14} />
+              Update password
+            </Button>
+          </>
+        }
+      >
+        <form id="change-password-form" className="grid gap-3" onSubmit={(event) => { event.preventDefault(); passwordMutation.mutate(); }}>
+          <label className="grid gap-1">
+            <span className="label">Current password</span>
+            <Input autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} type="password" />
+          </label>
+          <label className="grid gap-1">
+            <span className="label">New password</span>
+            <Input autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} type="password" />
+          </label>
+          {passwordMutation.error ? <p className="text-sm text-danger">{passwordMutation.error.message}</p> : null}
+        </form>
+      </Modal>
     </div>
   );
 }
@@ -1452,8 +1497,9 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
 
   const navItems: Array<{ label: string; icon: LucideIcon; to: string }> = [
     { label: "Dashboard", icon: Activity, to: "/" },
-    // Organizations only when multi-org is enabled (off by default for MVP).
-    ...(orgsEnabled ? [{ label: "Organizations", icon: UserPlus, to: "/organizations" }] : []),
+    // Same workspace, framed for the mode: full "Organizations" when multi-org is
+    // on; a single-org "Access" (users, teams/roles, quotas) when it's off.
+    { label: orgsEnabled ? "Organizations" : "Access", icon: orgsEnabled ? UserPlus : Shield, to: "/organizations" },
     { label: "Projects", icon: Database, to: "/projects" },
     { label: "Security", icon: Shield, to: "/security" },
     { label: "Hosts", icon: Server, to: "/hosts" },

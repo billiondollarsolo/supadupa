@@ -10,11 +10,12 @@ import { MetricCard } from "../../components/app/metric-card";
 import { StatusPill } from "../../components/ui/status-pill";
 import { ConfigPanel, DangerZonePanel, DatabaseExposurePanel, DomainsPanel, NetworkConnectionsPanel, ServicesPanel } from "./config-panels";
 import { RoutesPanel } from "./connect-panels";
+import { CDNPanel } from "./cdn-panel";
 import { ProjectPage } from "./layout";
 import { LifecyclePanel, RuntimeStatusPanel } from "./side-panels";
 
 export function ProjectConfigPage() {
-  const { activeFeatureFlags, activeOrgId, activeProject, configArea, domains, networkConnections, networkPolicy, onProjectDestroyed, projectConfig, projectServices, routeManifest, setConfigArea } = useDashboardContext();
+  const { activeFeatureFlags, activeOrgId, activeProject, cdnInvalidations, cdnPolicy, configArea, domains, networkConnections, networkPolicy, onProjectDestroyed, projectConfig, projectServices, routeManifest, setConfigArea } = useDashboardContext();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const selectedSection = projectSectionFromPathname(pathname, "config");
@@ -80,6 +81,7 @@ export function ProjectConfigPage() {
           <DatabaseExposurePanel project={activeProject} hostPublished={routeManifest.data?.database_ingress_published} masterEnabled={routeManifest.data?.database_external_access_enabled} />
           <RoutesPanel manifest={routeManifest.data} loading={routeManifest.isLoading} />
           <NetworkConnectionsPanel project={activeProject} policy={networkPolicy.data} connections={networkConnections.data ?? []} loading={networkConnections.isLoading || networkPolicy.isLoading} enabled={Boolean(activeFeatureFlags.network_restrictions)} />
+          <CDNPanel project={activeProject} policy={cdnPolicy.data} invalidations={cdnInvalidations.data ?? []} loading={cdnPolicy.isLoading || cdnInvalidations.isLoading} />
         </div>
       ) : null}
       {activeSection === "operations" ? (

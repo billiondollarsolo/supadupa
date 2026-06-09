@@ -807,12 +807,9 @@ export function ConfigPanel({
     >
       {project ? (
         <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
-          <span className="text-faint">Guided editors:</span>
-          <Link className="text-primary hover:underline" params={{ ref: project.ref }} to="/projects/$ref/auth">Auth</Link>
-          <Link className="text-primary hover:underline" params={{ ref: project.ref }} to="/projects/$ref/database">Database</Link>
-          <Link className="text-primary hover:underline" params={{ ref: project.ref }} to="/projects/$ref/storage">Storage</Link>
-          <Link className="text-primary hover:underline" params={{ ref: project.ref }} to="/projects/$ref/functions">Functions</Link>
-          <Link className="text-primary hover:underline" params={{ ref: project.ref }} to="/projects/$ref/realtime">Realtime</Link>
+          <span className="text-faint">Database infrastructure:</span>
+          <Link className="text-primary hover:underline" params={{ ref: project.ref }} to="/projects/$ref/database">Pooler, replicas &amp; branches</Link>
+          <span className="text-faint">· Tables, auth users, storage objects &amp; functions live in Studio.</span>
         </div>
       ) : null}
       <div className="mt-4 grid gap-3">

@@ -930,11 +930,16 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 		stackVersion := fs.String("stack-version", "", "Stack version")
 		hostID := fs.String("host-id", "", "Host ID")
 		profile := fs.String("profile", "", "Stack profile")
-		tier := fs.String("tier", "", "Resource tier")
+		tier := fs.String("tier", "", "Resource tier preset (small|medium|large)")
+		cpu := fs.Int("cpu", 0, "Exact CPU cores (0 = use tier preset)")
+		ramMB := fs.Int("ram-mb", 0, "Exact RAM in MB (0 = use tier preset)")
+		diskGB := fs.Int("disk-gb", 0, "Exact disk in GB (0 = use tier preset)")
+		enforceLimits := fs.Bool("enforce-limits", false, "Apply hard CPU/memory limits to the database container")
+		disableService := fs.String("disable-service", "", "Comma-separated services to disable (e.g. analytics,vector,imgproxy)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		payload := map[string]string{
+		payload := map[string]any{
 			"ref":           *ref,
 			"name":          *name,
 			"domain":        *domain,
@@ -942,6 +947,36 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 			"host_id":       *hostID,
 			"profile":       *profile,
 			"resource_tier": *tier,
+		}
+		if *cpu > 0 {
+			payload["cpu"] = *cpu
+		}
+		if *ramMB > 0 {
+			payload["ram_mb"] = *ramMB
+		}
+		if *diskGB > 0 {
+			payload["disk_gb"] = *diskGB
+		}
+		if *enforceLimits {
+			payload["enforce_limits"] = true
+		}
+		if strings.TrimSpace(*disableService) != "" {
+			known := map[string]bool{"auth": true, "rest": true, "graphql": true, "realtime": true, "storage": true, "imgproxy": true, "functions": true, "pooler": true, "studio": true, "analytics": true, "vector": true}
+			services := map[string]bool{}
+			for name := range known {
+				services[name] = true
+			}
+			for _, entry := range strings.Split(*disableService, ",") {
+				name := strings.TrimSpace(entry)
+				if name == "" {
+					continue
+				}
+				if !known[name] {
+					return fmt.Errorf("unknown service %q (valid: auth, rest, graphql, realtime, storage, imgproxy, functions, pooler, studio, analytics, vector)", name)
+				}
+				services[name] = false
+			}
+			payload["services"] = services
 		}
 		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/orgs/"+url.PathEscape(*orgID)+"/projects", payload, false))
 	case "get", "connect", "cli-profile", "activity", "pause", "resume", "restart", "destroy":

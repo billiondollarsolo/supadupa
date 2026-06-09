@@ -10,17 +10,14 @@ import {
   HostsPage,
   LoginPage,
   OrganizationsPage,
+  ProjectAccessPage,
   ProjectActivityPage,
-  ProjectAuthPage,
   ProjectBackupsPage,
   ProjectConfigPage,
   ProjectConnectPage,
   ProjectDatabasePage,
-  ProjectFunctionsPage,
   ProjectLogsPage,
   ProjectOverviewPage,
-  ProjectRealtimePage,
-  ProjectStoragePage,
   ProjectsListPage,
   SecurityRoutePage,
   SettingsRoutePage,
@@ -96,22 +93,10 @@ const projectConnectSectionRoute = createRoute({
   component: ProjectConnectPage,
 });
 
-const projectAuthRoute = createRoute({
+const projectAccessRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "projects/$ref/auth",
-  component: ProjectAuthPage,
-});
-
-const projectAuthSectionRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/auth/$section",
-  component: ProjectAuthPage,
-});
-
-const projectAuthSectionItemRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/auth/$section/$item",
-  component: ProjectAuthPage,
+  path: "projects/$ref/access",
+  component: ProjectAccessPage,
 });
 
 const projectDatabaseRoute = createRoute({
@@ -130,48 +115,6 @@ const projectDatabaseSectionItemRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "projects/$ref/database/$section/$item",
   component: ProjectDatabasePage,
-});
-
-const projectStorageRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/storage",
-  component: ProjectStoragePage,
-});
-
-const projectStorageSectionRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/storage/$section",
-  component: ProjectStoragePage,
-});
-
-const projectStorageSectionItemRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/storage/$section/$item",
-  component: ProjectStoragePage,
-});
-
-const projectFunctionsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/functions",
-  component: ProjectFunctionsPage,
-});
-
-const projectFunctionsSectionRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/functions/$section",
-  component: ProjectFunctionsPage,
-});
-
-const projectFunctionsSectionItemRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/functions/$section/$item",
-  component: ProjectFunctionsPage,
-});
-
-const projectRealtimeRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "projects/$ref/realtime",
-  component: ProjectRealtimePage,
 });
 
 const projectLogsRoute = createRoute({
@@ -280,19 +223,10 @@ const routeTree = rootRoute.addChildren([
   projectRoute,
   projectConnectRoute,
   projectConnectSectionRoute,
-  projectAuthRoute,
-  projectAuthSectionRoute,
-  projectAuthSectionItemRoute,
+  projectAccessRoute,
   projectDatabaseRoute,
   projectDatabaseSectionRoute,
   projectDatabaseSectionItemRoute,
-  projectStorageRoute,
-  projectStorageSectionRoute,
-  projectStorageSectionItemRoute,
-  projectFunctionsRoute,
-  projectFunctionsSectionRoute,
-  projectFunctionsSectionItemRoute,
-  projectRealtimeRoute,
   projectLogsRoute,
   projectLogsSectionRoute,
   projectLogsSectionItemRoute,

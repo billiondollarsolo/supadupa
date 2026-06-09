@@ -61,11 +61,14 @@ func (routes routeRegistry) registerAccountRoutes() {
 	routes.mux.HandleFunc("POST /v1/account/mfa/enroll", enrollAccountMFAHandler(routes.store))
 	routes.mux.HandleFunc("POST /v1/account/mfa/verify", verifyAccountMFAHandler(routes.store, routes.mfaAccessLimiter))
 	routes.mux.HandleFunc("DELETE /v1/account/mfa", disableAccountMFAHandler(routes.store, routes.mfaAccessLimiter))
+	routes.mux.HandleFunc("POST /v1/account/password", changeAccountPasswordHandler(routes.store))
 }
 
 func (routes routeRegistry) registerUserRoutes() {
 	routes.mux.HandleFunc("GET /v1/users", listUsersHandler(routes.store, routes.auth))
 	routes.mux.HandleFunc("POST /v1/users", createUserHandler(routes.store))
+	routes.mux.HandleFunc("PUT /v1/users/{id}", updateUserHandler(routes.store))
+	routes.mux.HandleFunc("DELETE /v1/users/{id}", deleteUserHandler(routes.store))
 }
 
 func (routes routeRegistry) registerSCIMRoutes() {

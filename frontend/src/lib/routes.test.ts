@@ -9,25 +9,25 @@ import {
 
 describe("project route helpers", () => {
   it("encodes dynamic project route segments", () => {
-    expect(projectPath("org/project ref", "storage", "buckets", "assets/2026%raw")).toBe(
-      "/projects/org%2Fproject%20ref/storage/buckets/assets%2F2026%25raw",
+    expect(projectPath("org/project ref", "database", "replicas", "assets/2026%raw")).toBe(
+      "/projects/org%2Fproject%20ref/database/replicas/assets%2F2026%25raw",
     );
   });
 
   it("decodes project refs, sections, and item ids from pathnames", () => {
-    const pathname = projectPath("org/project ref", "storage", "buckets", "assets/2026%raw");
+    const pathname = projectPath("org/project ref", "database", "replicas", "assets/2026%raw");
 
     expect(projectRefFromPathname(pathname)).toBe("org/project ref");
-    expect(projectTabFromPathname(pathname)).toBe("storage");
-    expect(projectSectionFromPathname(pathname, "storage")).toBe("buckets");
-    expect(projectSubrouteFromPathname(pathname, "storage")).toEqual({
-      section: "buckets",
+    expect(projectTabFromPathname(pathname)).toBe("database");
+    expect(projectSectionFromPathname(pathname, "database")).toBe("replicas");
+    expect(projectSubrouteFromPathname(pathname, "database")).toEqual({
+      section: "replicas",
       item: "assets/2026%raw",
     });
   });
 
   it("keeps unmatched tab subroutes on the overview fallback", () => {
-    expect(projectSubrouteFromPathname(projectPath("demo", "logs", "drains", "new"), "storage")).toEqual({
+    expect(projectSubrouteFromPathname(projectPath("demo", "logs", "drains", "new"), "database")).toEqual({
       section: "overview",
       item: "",
     });
@@ -37,7 +37,7 @@ describe("project route helpers", () => {
     expect(projectRefFromPathname("/settings")).toBe("");
     expect(projectRefFromPathname("/projects/%E0%A4%A")).toBe("");
     expect(projectTabFromPathname("/projects/demo/%E0%A4%A")).toBe("overview");
-    expect(projectSubrouteFromPathname("/projects/demo/storage/%E0%A4%A/new", "storage")).toEqual({
+    expect(projectSubrouteFromPathname("/projects/demo/database/%E0%A4%A/new", "database")).toEqual({
       section: "overview",
       item: "new",
     });

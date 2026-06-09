@@ -41,25 +41,92 @@ function matchesQuery(event: AuditEvent, query: string) {
   return haystack.some((value) => value.toLowerCase().includes(query));
 }
 
-export function AuditPanel({ events, integrity, loading, maxEvents }: { events: AuditEvent[]; integrity?: AuditIntegrity; loading: boolean; maxEvents?: number }) {
+// Export the currently-filtered events as CSV (client-side download).
+function exportAuditCSV(events: AuditEvent[]) {
+  const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+  const header = ["seq", "time", "action", "target", "actor", "metadata"];
+  const rows = events.map((event) =>
+    [event.chain_index, event.created_at, event.action, event.target, event.actor_id ?? "system", JSON.stringify(event.metadata ?? {})]
+      .map(escape)
+      .join(","),
+  );
+  const csv = [header.join(","), ...rows].join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `supadupa-audit-${events.length}.csv`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+type AuditServer = {
+  total: number;
+  limit: number;
+  offset: number;
+  action: string;
+  since: string;
+  until: string;
+  setAction: (value: string) => void;
+  setSince: (value: string) => void;
+  setUntil: (value: string) => void;
+  setOffset: (value: number) => void;
+};
+
+export function AuditPanel({ events, integrity, loading, maxEvents, server }: { events: AuditEvent[]; integrity?: AuditIntegrity; loading: boolean; maxEvents?: number; server?: AuditServer }) {
   const compact = typeof maxEvents === "number";
+  // Server mode: the parent fetches a server-filtered, paginated page. Action /
+  // date filtering and paging are driven server-side; text search and sort stay
+  // client-side over the current page.
+  const serverMode = Boolean(server) && !compact;
   const [query, setQuery] = useState("");
   const [actionFilter, setActionFilter] = useState("all");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  // Distinct action types for the type filter, sorted for stable display.
+  const actionValue = serverMode ? server!.action : actionFilter;
+  const fromValue = serverMode ? server!.since : fromDate;
+  const toValue = serverMode ? server!.until : toDate;
+  const setActionValue = serverMode ? server!.setAction : setActionFilter;
+  const setFromValue = serverMode ? server!.setSince : setFromDate;
+  const setToValue = serverMode ? server!.setUntil : setToDate;
+  const allActionsValue = serverMode ? "" : "all";
+
+  // Distinct action types for the type filter, sorted for stable display. In
+  // server mode this lists actions present on the current page plus the active
+  // selection (so it stays selectable across pages).
   const actionTypes = useMemo(() => {
     const set = new Set(events.map((event) => event.action));
+    if (serverMode && server!.action) set.add(server!.action);
     return Array.from(set).sort();
-  }, [events]);
+  }, [events, serverMode, server]);
 
   const filtered = useMemo(() => {
     if (compact) return events.slice(0, maxEvents);
     const normalized = query.trim().toLowerCase();
-    return events.filter(
-      (event) => (actionFilter === "all" || event.action === actionFilter) && matchesQuery(event, normalized),
-    );
-  }, [events, compact, maxEvents, query, actionFilter]);
+    // In server mode, action + date are already applied upstream; only search
+    // and sort run over the current page.
+    const fromMs = !serverMode && fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : null;
+    const toMs = !serverMode && toDate ? new Date(`${toDate}T23:59:59.999`).getTime() : null;
+    const result = events.filter((event) => {
+      if (!serverMode && actionFilter !== "all" && event.action !== actionFilter) return false;
+      if (!matchesQuery(event, normalized)) return false;
+      if (fromMs !== null || toMs !== null) {
+        const at = new Date(event.created_at).getTime();
+        if (fromMs !== null && at < fromMs) return false;
+        if (toMs !== null && at > toMs) return false;
+      }
+      return true;
+    });
+    result.sort((left, right) => {
+      const diff = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+      return sortDir === "asc" ? diff : -diff;
+    });
+    return result;
+  }, [events, compact, maxEvents, query, serverMode, actionFilter, fromDate, toDate, sortDir]);
 
   const columns = useMemo<ColumnDef<AuditEvent>[]>(
     () => {
@@ -178,13 +245,32 @@ export function AuditPanel({ events, integrity, loading, maxEvents }: { events: 
               value={query}
             />
           </div>
-          <NativeSelect aria-label="Filter by action type" className="w-auto" onChange={(event) => setActionFilter(event.target.value)} value={actionFilter}>
-            <option value="all">All actions</option>
+          <NativeSelect aria-label="Filter by action type" className="w-auto" onChange={(event) => setActionValue(event.target.value)} value={actionValue}>
+            <option value={allActionsValue}>All actions</option>
             {actionTypes.map((action) => (
               <option key={action} value={action}>{humanizeAction(action)}</option>
             ))}
           </NativeSelect>
-          <span className="ml-auto text-xs text-faint">Showing {filtered.length} of {events.length} events</span>
+          <Input aria-label="From date" className="w-auto" type="date" value={fromValue} onChange={(event) => setFromValue(event.target.value)} title="From date" />
+          <Input aria-label="To date" className="w-auto" type="date" value={toValue} onChange={(event) => setToValue(event.target.value)} title="To date" />
+          <Button variant="secondary" size="sm" type="button" onClick={() => setSortDir((dir) => (dir === "desc" ? "asc" : "desc"))}>
+            {sortDir === "desc" ? "Newest first" : "Oldest first"}
+          </Button>
+          <Button variant="secondary" size="sm" type="button" disabled={filtered.length === 0} onClick={() => exportAuditCSV(filtered)}>
+            Export CSV
+          </Button>
+          {query || actionValue !== allActionsValue || fromValue || toValue ? (
+            <Button variant="ghost" size="sm" type="button" onClick={() => { setQuery(""); setActionValue(allActionsValue); setFromValue(""); setToValue(""); }}>Clear</Button>
+          ) : null}
+          {serverMode ? (
+            <div className="ml-auto flex items-center gap-2 text-xs text-faint">
+              <span>{server!.total === 0 ? "No events" : `${server!.offset + 1}–${server!.offset + filtered.length} of ${server!.total}`}</span>
+              <Button variant="secondary" size="sm" type="button" disabled={server!.offset <= 0} onClick={() => server!.setOffset(Math.max(0, server!.offset - server!.limit))}>Prev</Button>
+              <Button variant="secondary" size="sm" type="button" disabled={server!.offset + server!.limit >= server!.total} onClick={() => server!.setOffset(server!.offset + server!.limit)}>Next</Button>
+            </div>
+          ) : (
+            <span className="ml-auto text-xs text-faint">Showing {filtered.length} of {events.length} events</span>
+          )}
         </div>
       ) : null}
 

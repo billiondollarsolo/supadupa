@@ -237,7 +237,7 @@ export function AccessReviewPanel({ review, loading }: { review?: OrgAccessRevie
           <Link
             className={buttonVariants({ variant: "secondary", size: "sm" })}
             params={{ ref: row.original.project_ref }}
-            to="/projects/$ref/auth"
+            to="/projects/$ref/access"
           >
             Manage
             <ExternalLink size={12} />

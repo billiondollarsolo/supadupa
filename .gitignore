@@ -17,3 +17,7 @@ frontend/playwright-report/
 artifacts/
 scripts/compat/artifacts/
 scripts/compat/.artifacts/
+
+# Local review artifacts
+/screenshots/
+frontend/_shots.cjs

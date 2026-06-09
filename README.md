@@ -20,9 +20,9 @@ Supadupa lets an operator run many isolated Supabase projects on their own infra
 
 This repo is currently in MVP shape. The Docker Compose backend is the supported runtime for bringing projects up on a Linux host or VPS. Kubernetes support exists as a renderer/operator contract, but it is not the primary MVP install path yet.
 
-The old long-form README has been preserved at [docs/README-legacy.md](docs/README-legacy.md).
-
 ## MVP Status
+
+This is a very early release. There will be many rough edges, missing features, and potential instability. There will also likely be breaking changes to the API, CLI, and runtime behavior as we iterate quickly toward a more stable v1.0.
 
 Supadupa is good enough for MVP evaluation and internal dev environments where the operator understands the remaining hosted-grade gaps.
 

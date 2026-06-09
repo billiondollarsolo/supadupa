@@ -6,6 +6,8 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -16,16 +18,20 @@ type projectResource struct {
 }
 
 type projectResourceModel struct {
-	ID           types.String `tfsdk:"id"`
-	OrgID        types.String `tfsdk:"org_id"`
-	Ref          types.String `tfsdk:"ref"`
-	Name         types.String `tfsdk:"name"`
-	HostID       types.String `tfsdk:"host_id"`
-	Domain       types.String `tfsdk:"domain"`
-	StackVersion types.String `tfsdk:"stack_version"`
-	Profile      types.String `tfsdk:"profile"`
-	ResourceTier types.String `tfsdk:"resource_tier"`
-	Status       types.String `tfsdk:"status"`
+	ID            types.String `tfsdk:"id"`
+	OrgID         types.String `tfsdk:"org_id"`
+	Ref           types.String `tfsdk:"ref"`
+	Name          types.String `tfsdk:"name"`
+	HostID        types.String `tfsdk:"host_id"`
+	Domain        types.String `tfsdk:"domain"`
+	StackVersion  types.String `tfsdk:"stack_version"`
+	Profile       types.String `tfsdk:"profile"`
+	ResourceTier  types.String `tfsdk:"resource_tier"`
+	CPU           types.Int64  `tfsdk:"cpu"`
+	RAMMB         types.Int64  `tfsdk:"ram_mb"`
+	DiskGB        types.Int64  `tfsdk:"disk_gb"`
+	EnforceLimits types.Bool   `tfsdk:"enforce_limits"`
+	Status        types.String `tfsdk:"status"`
 }
 
 func NewProjectResource() resource.Resource {
@@ -38,6 +44,8 @@ func (r *projectResource) Metadata(ctx context.Context, req resource.MetadataReq
 
 func (r *projectResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	replace := []planmodifier.String{stringplanmodifier.RequiresReplace()}
+	replaceInt := []planmodifier.Int64{int64planmodifier.RequiresReplace()}
+	replaceBool := []planmodifier.Bool{boolplanmodifier.RequiresReplace()}
 	resp.Schema = resourceschema.Schema{
 		Description: "Supadupa project backed by one isolated upstream Supabase stack.",
 		Attributes: map[string]resourceschema.Attribute{
@@ -90,8 +98,32 @@ func (r *projectResource) Schema(ctx context.Context, req resource.SchemaRequest
 			"resource_tier": resourceschema.StringAttribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Resource tier, such as small, medium, or large. Platform defaults apply when omitted.",
+				Description:   "Resource tier preset, such as small, medium, or large. Platform defaults apply when omitted.",
 				PlanModifiers: replace,
+			},
+			"cpu": resourceschema.Int64Attribute{
+				Optional:      true,
+				Computed:      true,
+				Description:   "Exact CPU cores. 0 (or omitted) uses the tier preset.",
+				PlanModifiers: replaceInt,
+			},
+			"ram_mb": resourceschema.Int64Attribute{
+				Optional:      true,
+				Computed:      true,
+				Description:   "Exact RAM in MB. 0 (or omitted) uses the tier preset.",
+				PlanModifiers: replaceInt,
+			},
+			"disk_gb": resourceschema.Int64Attribute{
+				Optional:      true,
+				Computed:      true,
+				Description:   "Exact disk in GB. 0 (or omitted) uses the tier preset.",
+				PlanModifiers: replaceInt,
+			},
+			"enforce_limits": resourceschema.BoolAttribute{
+				Optional:      true,
+				Computed:      true,
+				Description:   "Apply hard CPU/memory limits to the database container.",
+				PlanModifiers: replaceBool,
 			},
 			"status": resourceschema.StringAttribute{
 				Computed:    true,
@@ -119,13 +151,17 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 	project, err := r.client.CreateProject(ctx, plan.OrgID.ValueString(), CreateProjectRequest{
-		Ref:          plan.Ref.ValueString(),
-		Name:         plan.Name.ValueString(),
-		HostID:       stringValue(plan.HostID),
-		Domain:       stringValue(plan.Domain),
-		StackVersion: stringValue(plan.StackVersion),
-		Profile:      stringValue(plan.Profile),
-		ResourceTier: stringValue(plan.ResourceTier),
+		Ref:           plan.Ref.ValueString(),
+		Name:          plan.Name.ValueString(),
+		HostID:        stringValue(plan.HostID),
+		Domain:        stringValue(plan.Domain),
+		StackVersion:  stringValue(plan.StackVersion),
+		Profile:       stringValue(plan.Profile),
+		ResourceTier:  stringValue(plan.ResourceTier),
+		CPU:           int(plan.CPU.ValueInt64()),
+		RAMMB:         int(plan.RAMMB.ValueInt64()),
+		DiskGB:        int(plan.DiskGB.ValueInt64()),
+		EnforceLimits: plan.EnforceLimits.ValueBool(),
 	})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create Supadupa project", err.Error())
@@ -185,6 +221,10 @@ func setProjectState(model *projectResourceModel, project Project) {
 	model.StackVersion = optionalString(project.Spec.StackVersion)
 	model.Profile = optionalString(project.Spec.Profile)
 	model.ResourceTier = optionalString(project.Spec.ResourceTier)
+	model.CPU = types.Int64Value(int64(project.Spec.CPU))
+	model.RAMMB = types.Int64Value(int64(project.Spec.RAMMB))
+	model.DiskGB = types.Int64Value(int64(project.Spec.DiskGB))
+	model.EnforceLimits = types.BoolValue(project.Spec.EnforceLimits)
 	model.Status = types.StringValue(project.Status)
 }
 

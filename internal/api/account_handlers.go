@@ -9,6 +9,40 @@ import (
 	"supadupa2026/internal/control"
 )
 
+func changeAccountPasswordHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := userIDFromRequest(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "missing token claims")
+			return
+		}
+		var payload struct {
+			CurrentPassword string `json:"current_password"`
+			NewPassword     string `json:"new_password"`
+		}
+		if err := decodeJSON(r, &payload); err != nil {
+			writeDecodeError(w, err)
+			return
+		}
+		user, err := store.GetUserByID(r.Context(), userID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		// Verify the current password before allowing a change.
+		if _, err := store.AuthenticateUser(r.Context(), user.Email, payload.CurrentPassword); err != nil {
+			writeError(w, http.StatusUnauthorized, "current password is incorrect")
+			return
+		}
+		if _, err := store.UpdateUser(r.Context(), userID, control.UpdateUserRequest{Email: user.Email, Role: user.Role, Password: payload.NewPassword}); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		control.Audit(r.Context(), store, "account.password_change", "user:"+userID, map[string]string{"email": user.Email})
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func getAccountMFAHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok := userIDFromRequest(r)

@@ -1,4 +1,4 @@
-import type { AdvisorFinding, AuditEvent, AuditIntegrity, AuthResponse, AuthState, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, CreateBranchResponse, FleetMetrics, Host, HostCapacity, LogDrain, MFAEnrollment, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, PlatformSSOInitiation, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectRouteManifest, ProjectSecret, ProjectSecretReveal, ProjectServices, ProjectStudioSession, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RestoreToTimeResponse, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest, Team, TeamMember, UpgradeProjectResponse, UsageSnapshot, User, WALArchive } from "./types";
+import type { AdvisorFinding, AuditEvent, AuditEventPage, AuditIntegrity, AuthResponse, AuthState, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, CreateBranchResponse, FleetMetrics, Host, HostCapacity, LogDrain, MFAEnrollment, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, PlatformSSOInitiation, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectRouteManifest, ProjectSecret, ProjectSecretReveal, ProjectServices, ProjectStudioSession, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RestoreToTimeResponse, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest, Team, TeamMember, UpgradeProjectResponse, UsageSnapshot, User, WALArchive } from "./types";
 
 const apiBase = resolveApiBase();
 
@@ -417,6 +417,24 @@ export function createPlatformUser(input: { email: string; password: string; rol
 
 export function listUsers() {
   return request<User[]>("/v1/users");
+}
+
+export function updateUser(id: string, input: { email: string; role: string; password?: string }) {
+  return request<User>(`/v1/users/${segment(id)}`, {
+    method: "PUT",
+    body: JSON.stringify({ email: input.email, role: input.role, password: input.password ?? "" }),
+  });
+}
+
+export function deleteUser(id: string) {
+  return request<void>(`/v1/users/${segment(id)}`, { method: "DELETE" });
+}
+
+export function changeAccountPassword(input: { current_password: string; new_password: string }) {
+  return request<void>("/v1/account/password", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export function listHosts() {
@@ -1097,8 +1115,16 @@ export function deleteProjectLogDrain(ref: string, id: string) {
   });
 }
 
-export function listAuditEvents() {
-  return request<AuditEvent[]>("/v1/audit-events");
+export function listAuditEvents(params?: { limit?: number; offset?: number; action?: string; actor?: string; since?: string; until?: string }) {
+  const qs = new URLSearchParams();
+  if (params?.limit != null) qs.set("limit", String(params.limit));
+  if (params?.offset != null) qs.set("offset", String(params.offset));
+  if (params?.action) qs.set("action", params.action);
+  if (params?.actor) qs.set("actor", params.actor);
+  if (params?.since) qs.set("since", params.since);
+  if (params?.until) qs.set("until", params.until);
+  const query = qs.toString();
+  return request<AuditEventPage>(`/v1/audit-events${query ? `?${query}` : ""}`);
 }
 
 export function getAuditIntegrity() {

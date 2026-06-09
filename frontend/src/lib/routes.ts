@@ -3,11 +3,14 @@ import { projectTabs, type ProjectTab } from "./project-config";
 export const projectRouteByTab: Record<ProjectTab, string> = {
   overview: "/projects/$ref",
   connect: "/projects/$ref/connect",
-  auth: "/projects/$ref/auth",
+  access: "/projects/$ref/access",
   database: "/projects/$ref/database",
-  storage: "/projects/$ref/storage",
-  functions: "/projects/$ref/functions",
-  realtime: "/projects/$ref/realtime",
+  // Legacy data-plane tabs (now owned by Studio) map to surviving routes only so
+  // this ProjectTab-keyed record stays exhaustive; no tab or nav links to them.
+  auth: "/projects/$ref/access",
+  storage: "/projects/$ref/config",
+  functions: "/projects/$ref",
+  realtime: "/projects/$ref",
   logs: "/projects/$ref/logs",
   backups: "/projects/$ref/backups",
   config: "/projects/$ref/config",

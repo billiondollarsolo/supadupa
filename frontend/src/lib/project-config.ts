@@ -10,24 +10,23 @@ export type ConfigField = {
   kind?: "text" | "number" | "boolean" | "textarea" | "select";
   options?: Array<{ value: string; label: string }>;
 };
-export type ProjectTab = "overview" | "connect" | "auth" | "database" | "storage" | "functions" | "realtime" | "logs" | "backups" | "config" | "activity";
+// Data-plane surfaces (auth users, tables/rows, storage objects, function code,
+// realtime inspection) are owned by Studio — the admin UI does not duplicate
+// them. The project tabs below cover only control-plane / infrastructure
+// concerns. The "auth"/"storage"/"functions"/"realtime" literals remain in the
+// union for now so legacy references type-check; no route or tab produces them.
+export type ProjectTab = "overview" | "connect" | "access" | "auth" | "database" | "storage" | "functions" | "realtime" | "logs" | "backups" | "config" | "activity";
 export type ConnectSection = "overview" | "endpoints" | "keys" | "jwt" | "database" | "storage" | "links" | "cli" | "snippets" | "secrets";
 export type AuthSection = "overview" | "runtime" | "providers" | "email" | "clients" | "hooks" | "access";
+// Database tab is infrastructure-only: connection pooling, read replicas,
+// preview branches, and logical replication. Schema/roles/extensions/cron/
+// queues/webhooks/vector live in Studio.
 export type DatabaseSection =
   | "overview"
-  | "config"
   | "pooler"
-  | "branches"
   | "replicas"
-  | "replication"
-  | "analytics"
-  | "extensions"
-  | "cron"
-  | "queues"
-  | "webhooks"
-  | "schemas"
-  | "roles"
-  | "ai";
+  | "branches"
+  | "replication";
 export type ProjectSettingsSection = "overview" | "runtime" | "services" | "domains" | "network" | "operations" | "danger";
 export type PlatformSettingsSection = "overview" | "defaults" | "features" | "db-ingress" | "backups" | "smtp" | "sso" | "scim" | "hosts";
 export type OrganizationSection = "overview" | "members" | "teams" | "features" | "quotas" | "usage" | "billing";
@@ -348,11 +347,8 @@ export const projectServiceLabels = [
 export const projectTabs: Array<{ id: ProjectTab; label: string; suffix: string; icon: LucideIcon }> = [
   { id: "overview", label: "Overview", suffix: "", icon: Gauge },
   { id: "connect", label: "Connect", suffix: "connect", icon: KeyRound },
-  { id: "auth", label: "Auth", suffix: "auth", icon: Shield },
+  { id: "access", label: "Access", suffix: "access", icon: Shield },
   { id: "database", label: "Database", suffix: "database", icon: Database },
-  { id: "storage", label: "Storage", suffix: "storage", icon: Boxes },
-  { id: "functions", label: "Functions", suffix: "functions", icon: Command },
-  { id: "realtime", label: "Realtime", suffix: "realtime", icon: RadioTower },
   { id: "logs", label: "Logs", suffix: "logs", icon: Activity },
   { id: "backups", label: "Backups", suffix: "backups", icon: RotateCcw },
   { id: "config", label: "Settings", suffix: "config", icon: SlidersHorizontal },
@@ -383,20 +379,11 @@ export const authSections: Array<ProjectSubnavItem<AuthSection>> = [
 ];
 
 export const databaseSections: Array<ProjectSubnavItem<DatabaseSection>> = [
-  { id: "overview", label: "Overview", description: "Database posture and configured surfaces." },
-  { id: "config", label: "Runtime", description: "GraphQL, webhooks, cron, queues, FDW, Vault, SSL.", group: "Connectivity" },
-  { id: "pooler", label: "Pooler", description: "Supavisor modes and connection limits.", group: "Connectivity" },
-  { id: "replicas", label: "Replicas", description: "Read replicas, routing, promotion, and failover.", group: "Connectivity" },
-  { id: "branches", label: "Branches", description: "Preview branches and clone state.", group: "Connectivity" },
-  { id: "replication", label: "Replication", description: "Logical publications and external destinations.", group: "Data movement" },
-  { id: "analytics", label: "Analytics", description: "Iceberg analytics buckets.", group: "Data movement" },
-  { id: "extensions", label: "Extensions", description: "Postgres extension toggles.", group: "Extensions & jobs" },
-  { id: "cron", label: "Cron", description: "Scheduled database jobs.", group: "Extensions & jobs" },
-  { id: "queues", label: "Queues", description: "pgmq queues and retention.", group: "Extensions & jobs" },
-  { id: "webhooks", label: "Webhooks", description: "Database change webhooks.", group: "Extensions & jobs" },
-  { id: "schemas", label: "Schemas", description: "Declarative schema versions.", group: "Schema & access" },
-  { id: "roles", label: "Roles", description: "Database roles and schema grants.", group: "Schema & access" },
-  { id: "ai", label: "Vector / AI", description: "Embeddings jobs and vector buckets.", group: "Vector / AI" },
+  { id: "overview", label: "Overview", description: "Database connectivity and infrastructure at a glance." },
+  { id: "pooler", label: "Pooler", description: "Supavisor modes and connection limits." },
+  { id: "replicas", label: "Replicas", description: "Read replicas, routing, promotion, and failover." },
+  { id: "branches", label: "Branches", description: "Preview branches and clone state." },
+  { id: "replication", label: "Replication", description: "Logical publications and external destinations." },
 ];
 
 export const projectSettingsSections: Array<ProjectSubnavItem<ProjectSettingsSection>> = [
@@ -440,7 +427,6 @@ export const securitySections: Array<ProjectSubnavItem<SecuritySection>> = [
 
 export const projectSubnav: Partial<Record<ProjectTab, Array<ProjectSubnavItem>>> = {
   connect: connectSections,
-  auth: authSections,
   database: databaseSections,
   config: projectSettingsSections,
 };

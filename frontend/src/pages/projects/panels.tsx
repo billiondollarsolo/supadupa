@@ -206,9 +206,9 @@ export function ProjectsListPanel({
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
-          <Button className="justify-center" onClick={onCreate} size="sm" type="button" variant="secondary">
+          <Button onClick={onCreate} type="button">
             <Plus size={14} />
-            Create project
+            New project
           </Button>
         </div>
       }

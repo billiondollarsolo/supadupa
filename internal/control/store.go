@@ -656,6 +656,7 @@ type Store interface {
 	ListProjectLogs(ctx context.Context, ref string, limit int) ([]ProjectLog, error)
 	RecordAuditEvent(ctx context.Context, event AuditEventInput) (AuditEvent, error)
 	ListAuditEvents(ctx context.Context, limit int) ([]AuditEvent, error)
+	ListAuditEventsPage(ctx context.Context, query AuditEventQuery) (AuditEventPage, error)
 	ListProjectAuditEvents(ctx context.Context, ref string, limit int) ([]AuditEvent, error)
 	VerifyAuditLog(ctx context.Context) (AuditIntegrity, error)
 	GetFleetMetrics(ctx context.Context) (FleetMetrics, error)
@@ -1236,6 +1237,22 @@ type AuditEvent struct {
 	Target       string            `json:"target"`
 	Metadata     map[string]string `json:"metadata"`
 	CreatedAt    time.Time         `json:"created_at"`
+}
+
+type AuditEventQuery struct {
+	Limit   int
+	Offset  int
+	Action  string
+	ActorID string
+	Since   time.Time
+	Until   time.Time
+}
+
+type AuditEventPage struct {
+	Events []AuditEvent `json:"events"`
+	Total  int          `json:"total"`
+	Limit  int          `json:"limit"`
+	Offset int          `json:"offset"`
 }
 
 type AuditEventInput struct {
@@ -6758,6 +6775,59 @@ func (s *MemoryStore) ListAuditEvents(ctx context.Context, limit int) ([]AuditEv
 		return events[i].CreatedAt.After(events[j].CreatedAt)
 	})
 	return events, nil
+}
+
+// ListAuditEventsPage applies server-side filtering (action / actor / time
+// window) and pagination over the full audit history, returning the matching
+// slice plus the total match count. The full chain lives in memory, so this is
+// an in-memory scan — no per-query SQL.
+func (s *MemoryStore) ListAuditEventsPage(ctx context.Context, query AuditEventQuery) (AuditEventPage, error) {
+	limit := query.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	offset := query.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	action := strings.TrimSpace(query.Action)
+	actor := strings.TrimSpace(query.ActorID)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	filtered := make([]AuditEvent, 0, len(s.auditEvents))
+	for _, event := range s.auditEvents {
+		if action != "" && event.Action != action {
+			continue
+		}
+		if actor != "" && event.ActorID != actor {
+			continue
+		}
+		if !query.Since.IsZero() && event.CreatedAt.Before(query.Since) {
+			continue
+		}
+		if !query.Until.IsZero() && event.CreatedAt.After(query.Until) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].CreatedAt.After(filtered[j].CreatedAt)
+	})
+	total := len(filtered)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return AuditEventPage{
+		Events: append([]AuditEvent(nil), filtered[offset:end]...),
+		Total:  total,
+		Limit:  limit,
+		Offset: offset,
+	}, nil
 }
 
 func (s *MemoryStore) ListProjectAuditEvents(ctx context.Context, ref string, limit int) ([]AuditEvent, error) {

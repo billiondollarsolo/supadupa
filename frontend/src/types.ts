@@ -626,6 +626,13 @@ export type AuditEvent = {
   created_at: string;
 };
 
+export type AuditEventPage = {
+  events: AuditEvent[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 export type AuditIntegrity = {
   verified: boolean;
   events: number;

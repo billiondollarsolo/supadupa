@@ -148,16 +148,20 @@ type orgUpdateArgs struct {
 }
 
 type projectCreateArgs struct {
-	OrgID        string            `json:"org_id"`
-	Ref          string            `json:"ref"`
-	Name         string            `json:"name"`
-	HostID       string            `json:"host_id"`
-	Domain       string            `json:"domain"`
-	StackVersion string            `json:"stack_version"`
-	Profile      string            `json:"profile"`
-	ResourceTier string            `json:"resource_tier"`
-	Services     map[string]bool   `json:"services"`
-	Environment  map[string]string `json:"environment"`
+	OrgID         string            `json:"org_id"`
+	Ref           string            `json:"ref"`
+	Name          string            `json:"name"`
+	HostID        string            `json:"host_id"`
+	Domain        string            `json:"domain"`
+	StackVersion  string            `json:"stack_version"`
+	Profile       string            `json:"profile"`
+	ResourceTier  string            `json:"resource_tier"`
+	CPU           int               `json:"cpu"`
+	RAMMB         int               `json:"ram_mb"`
+	DiskGB        int               `json:"disk_gb"`
+	EnforceLimits bool              `json:"enforce_limits"`
+	Services      map[string]bool   `json:"services"`
+	Environment   map[string]string `json:"environment"`
 }
 
 type projectServicesArgs struct {
@@ -987,6 +991,18 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 		}
 		if args.ResourceTier != "" {
 			projectBody["resource_tier"] = args.ResourceTier
+		}
+		if args.CPU > 0 {
+			projectBody["cpu"] = args.CPU
+		}
+		if args.RAMMB > 0 {
+			projectBody["ram_mb"] = args.RAMMB
+		}
+		if args.DiskGB > 0 {
+			projectBody["disk_gb"] = args.DiskGB
+		}
+		if args.EnforceLimits {
+			projectBody["enforce_limits"] = true
 		}
 		if len(args.Services) > 0 {
 			projectBody["services"] = args.Services
@@ -2483,14 +2499,18 @@ func tools() []map[string]any {
 	projectCreateSchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"org_id":        map[string]string{"type": "string", "description": "Organization ID"},
-			"ref":           map[string]string{"type": "string", "description": "Project ref"},
-			"name":          map[string]string{"type": "string", "description": "Project display name"},
-			"host_id":       map[string]string{"type": "string", "description": "Target host ID"},
-			"domain":        map[string]string{"type": "string", "description": "Base domain for project routing"},
-			"stack_version": map[string]string{"type": "string", "description": "Upstream Supabase stack version"},
-			"profile":       map[string]string{"type": "string", "description": "Stack profile: full, essential, or orioledb"},
-			"resource_tier": map[string]string{"type": "string", "description": "Resource tier: small, medium, or large"},
+			"org_id":         map[string]string{"type": "string", "description": "Organization ID"},
+			"ref":            map[string]string{"type": "string", "description": "Project ref"},
+			"name":           map[string]string{"type": "string", "description": "Project display name"},
+			"host_id":        map[string]string{"type": "string", "description": "Target host ID"},
+			"domain":         map[string]string{"type": "string", "description": "Base domain for project routing"},
+			"stack_version":  map[string]string{"type": "string", "description": "Upstream Supabase stack version"},
+			"profile":        map[string]string{"type": "string", "description": "Stack profile: full, essential, or orioledb"},
+			"resource_tier":  map[string]string{"type": "string", "description": "Resource tier preset: small, medium, or large"},
+			"cpu":            map[string]string{"type": "integer", "description": "Exact CPU cores (0 = use tier preset)"},
+			"ram_mb":         map[string]string{"type": "integer", "description": "Exact RAM in MB (0 = use tier preset)"},
+			"disk_gb":        map[string]string{"type": "integer", "description": "Exact disk in GB (0 = use tier preset)"},
+			"enforce_limits": map[string]string{"type": "boolean", "description": "Apply hard CPU/memory limits to the database container"},
 			"services": map[string]any{
 				"type":                 "object",
 				"description":          "Per-service enablement map",

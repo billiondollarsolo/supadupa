@@ -25,6 +25,7 @@ export function OrganizationsPage() {
     usage,
     usageSnapshots,
     users,
+    orgsEnabled,
   } = useDashboardContext();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -48,16 +49,20 @@ export function OrganizationsPage() {
     const projectsNearQuota = Boolean(quotaData && quotaData.max_projects > 0 && !projectsOverQuota && quotaData.used.projects / quotaData.max_projects >= 0.8);
     return (
       <div className="grid gap-6">
-        <OrgSwitcher orgs={orgs.data ?? []} selectedOrgId={activeOrgId} onSelectOrg={setSelectedOrgId} />
-        <CreateOrgPanel onCreated={onOrgCreated} />
-        <AppPanel eyebrow="Organizations" title="Admin overview" description="Open any area to manage it. Counts reflect the selected org.">
+        {orgsEnabled ? <OrgSwitcher orgs={orgs.data ?? []} selectedOrgId={activeOrgId} onSelectOrg={setSelectedOrgId} /> : null}
+        {orgsEnabled ? <CreateOrgPanel onCreated={onOrgCreated} /> : null}
+        <AppPanel
+          eyebrow={orgsEnabled ? "Organizations" : "Access"}
+          title={orgsEnabled ? "Admin overview" : "Users, teams & access"}
+          description={orgsEnabled ? "Open any area to manage it. Counts reflect the selected org." : "Manage platform users, RBAC teams, and resource quotas. Enable multi-org in Settings → Features for multiple organizations."}
+        >
           <div className="mt-4 grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
             <OrgSummaryCard icon={Users} label="Members" value={`${members.data?.length ?? 0} org grants`} detail={`${users.data?.length ?? 0} platform users`} onClick={() => openSection("members")} />
             <OrgSummaryCard icon={Shield} label="Teams" value={`${teams.data?.length ?? 0} teams`} onClick={() => openSection("teams")} />
             <OrgSummaryCard icon={Shield} label="Features" value={`${Object.values(orgFeatures.data?.effective ?? {}).filter(Boolean).length} enabled`} detail={`${Object.keys(orgFeatures.data?.overrides ?? {}).length} org overrides`} onClick={() => openSection("features")} />
             <OrgSummaryCard icon={Gauge} label="Quotas" value={`${quotaData?.used.projects ?? 0}/${quotaData?.max_projects || "—"} projects`} tone={projectsOverQuota ? "danger" : projectsNearQuota ? "warning" : "neutral"} detail={quotaData ? `${quotaData.used.cpu}/${quotaData.max_cpu || "—"} vCPU · ${formatBytes(quotaData.used.ram_mb * 1024 * 1024)} RAM` : "Quota sample pending"} onClick={() => openSection("quotas")} />
-            <OrgSummaryCard icon={Gauge} label="Usage" value={`${usage.data?.resources.projects ?? 0} projects`} detail={usage.data ? `${formatBytes(usage.data.db_allocated_bytes)} DB allocation` : "Metering sample pending"} badge={usageMeteringEnabled ? undefined : "metering off"} onClick={() => openSection("usage")} />
-            <OrgSummaryCard icon={CreditCard} label="Billing" value={billingEnabled ? `${billingInvoices.data?.length ?? 0} invoices` : "—"} detail={billingEnabled ? undefined : "metering snapshots required"} badge={billingEnabled ? undefined : "disabled"} onClick={() => openSection("billing")} />
+            {orgsEnabled ? <OrgSummaryCard icon={Gauge} label="Usage" value={`${usage.data?.resources.projects ?? 0} projects`} detail={usage.data ? `${formatBytes(usage.data.db_allocated_bytes)} DB allocation` : "Metering sample pending"} badge={usageMeteringEnabled ? undefined : "metering off"} onClick={() => openSection("usage")} /> : null}
+            {orgsEnabled ? <OrgSummaryCard icon={CreditCard} label="Billing" value={billingEnabled ? `${billingInvoices.data?.length ?? 0} invoices` : "—"} detail={billingEnabled ? undefined : "metering snapshots required"} badge={billingEnabled ? undefined : "disabled"} onClick={() => openSection("billing")} /> : null}
           </div>
         </AppPanel>
       </div>
@@ -66,7 +71,7 @@ export function OrganizationsPage() {
 
   return (
     <div className="grid gap-6">
-      <OrgSwitcher orgs={orgs.data ?? []} selectedOrgId={activeOrgId} onSelectOrg={setSelectedOrgId} />
+      {orgsEnabled ? <OrgSwitcher orgs={orgs.data ?? []} selectedOrgId={activeOrgId} onSelectOrg={setSelectedOrgId} /> : null}
       {section === "members" ? <MembersPanel orgId={activeOrgId} members={members.data ?? []} users={users.data ?? []} loading={members.isLoading || users.isLoading} /> : null}
       {section === "teams" ? (
         <TeamsPanel
@@ -81,7 +86,7 @@ export function OrganizationsPage() {
       {section === "features" ? <OrgFeaturesPanel orgId={activeOrgId} features={orgFeatures.data} loading={orgFeatures.isLoading} /> : null}
       {section === "quotas" ? <QuotaPanel orgId={activeOrgId} quota={quota.data} loading={quota.isLoading} /> : null}
       {section === "usage" ? <UsagePanel orgId={activeOrgId} usage={usage.data} snapshots={usageSnapshots.data ?? []} loading={usage.isLoading} snapshotsLoading={usageSnapshots.isLoading} snapshotEnabled={usageMeteringEnabled} /> : null}
-      {section === "billing" ? <BillingPanel orgId={activeOrgId} invoices={billingInvoices.data ?? []} loading={billingInvoices.isLoading} enabled={billingEnabled} /> : null}
+      {section === "billing" && orgsEnabled ? <BillingPanel orgId={activeOrgId} invoices={billingInvoices.data ?? []} loading={billingInvoices.isLoading} enabled={billingEnabled} /> : null}
     </div>
   );
 }

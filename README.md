@@ -1,6 +1,22 @@
-# Supadupa
+<p align="center">
+  <img src="supadupa-logo-wide.png" alt="Supadupa" width="440" />
+</p>
 
-Supadupa is a self-hosted Supabase-style control plane. It lets an operator run many isolated Supabase projects on their own infrastructure, expose each project through its own public API, Studio, Postgres, pooler, Storage, Realtime, and Functions routes, and manage those projects from a browser admin UI, CLI, Terraform provider, and Management API.
+<p align="center">
+  Self-hosted, multi-project Supabase control plane — run an isolated Supabase stack per project on your own infrastructure.
+</p>
+
+<p align="center">
+  <a href="#quick-start-local-loopback">Quick start</a> ·
+  <a href="#how-routing-works">Routing</a> ·
+  <a href="#backups-and-recovery">Backups</a> ·
+  <a href="#security-notes">Security</a> ·
+  <a href="docs/README-legacy.md">Full reference</a>
+</p>
+
+---
+
+Supadupa lets an operator run many isolated Supabase projects on their own infrastructure, expose each project through its own public API, Studio, Postgres, pooler, Storage, Realtime, and Functions routes, and manage those projects from a browser admin UI, CLI, Terraform provider, and Management API.
 
 This repo is currently in MVP shape. The Docker Compose backend is the supported runtime for bringing projects up on a Linux host or VPS. Kubernetes support exists as a renderer/operator contract, but it is not the primary MVP install path yet.
 
@@ -56,7 +72,7 @@ For local loopback evaluation:
 
 - Linux or macOS with Docker
 - Docker Compose v2
-- Go 1.26.4+ if running binaries natively
+- Go 1.25+ if running binaries natively
 - Node `^20.19.0` or `>=22.12.0`
 
 For a real VPS install:
@@ -154,12 +170,13 @@ After login:
 
 ## Creating A Project
 
-From the UI:
+From the UI (`Projects` -> add project), the wizard has three steps:
 
-1. Open `Projects`.
-2. Click add project.
-3. Pick org, ref, name, profile, tier, and stack version.
-4. Wait for runtime status to become healthy.
+1. **Identity** — project name, ref, and base domain.
+2. **Org & placement** — organization and host (or the default local runtime).
+3. **Stack** — stack version, profile (database engine + starting service set), size (a small/medium/large preset or exact CPU/RAM/disk), per-service toggles, and optional database container resource-limit enforcement.
+
+Then wait for the runtime status to become healthy.
 
 From the CLI:
 

@@ -267,7 +267,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const scimGroups = useQuery({ queryKey: ["scim-groups"], queryFn: () => listSCIMGroups(), enabled: needsPlatformSettings });
   const auditEvents = useQuery({ queryKey: ["audit-events"], queryFn: async () => (await listAuditEvents({ limit: 200 })).events, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
   const auditIntegrity = useQuery({ queryKey: ["audit-integrity"], queryFn: getAuditIntegrity, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
-  const users = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: needsPlatformSettings || isSecurityRoute });
+  const users = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: needsPlatformSettings || isSecurityRoute || isOrganizationsRoute });
   const mfaStatus = useQuery({ queryKey: ["account-mfa"], queryFn: getAccountMFA, enabled: isSecurityRoute });
   const activeOrgId = selectedOrgId || orgs.data?.[0]?.id || "";
   const members = useQuery({

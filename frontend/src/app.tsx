@@ -124,8 +124,8 @@ function panelIdForPathname(pathname: string) {
   return "fleet-dashboard";
 }
 
-function pageTitleForPathname(pathname: string, activeProject: Project | undefined, activeProjectTab: ProjectTab) {
-  if (pathname === "/organizations" || pathname.startsWith("/organizations/")) return "Organizations";
+function pageTitleForPathname(pathname: string, activeProject: Project | undefined, activeProjectTab: ProjectTab, orgsEnabled: boolean) {
+  if (pathname === "/organizations" || pathname.startsWith("/organizations/")) return orgsEnabled ? "Organizations" : "Access";
   if (pathname === "/projects") return "Projects";
   if (pathname === "/projects/new") return "Create project";
   if (pathname.startsWith("/projects/")) {
@@ -781,7 +781,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     void queryClient.invalidateQueries({ queryKey: ["org-quota", activeOrgId] });
     void queryClient.invalidateQueries({ queryKey: ["org-usage", activeOrgId] });
   };
-  const pageTitle = pageTitleForPathname(pathname, activeProject, activeProjectTab);
+  const pageTitle = pageTitleForPathname(pathname, activeProject, activeProjectTab, orgsEnabled);
   const pageScopeLabel = routeRef ? "Project workspace" : "Control plane";
   const account = useMemo(() => accountSummaryFromUser(user), [user]);
   const apiStatusLabel = apiHealth.isError ? "API offline" : apiHealth.isLoading ? "API checking" : "API online";

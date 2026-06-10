@@ -1,0 +1,9 @@
+{
+  "name": "supadupa-loadtest",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Repeatable real-world load/soak test for a Supadupa-hosted Supabase project (supabase-js SDK).",
+  "scripts": { "start": "node loadtest.mjs" },
+  "dependencies": { "@supabase/supabase-js": "^2.45.0", "ws": "^8.18.0" }
+}

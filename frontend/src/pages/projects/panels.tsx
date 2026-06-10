@@ -195,8 +195,8 @@ export function ProjectsListPanel({
       eyebrow="Projects"
       title={`${projects.length} project${projects.length === 1 ? "" : "s"}`}
       actions={
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative w-full max-w-xs">
+        <div className="flex items-center gap-2">
+          <div className="relative w-44 sm:w-56">
             <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" size={14} />
             <Input
               aria-label="Search projects"
@@ -206,7 +206,7 @@ export function ProjectsListPanel({
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
-          <Button onClick={onCreate} type="button">
+          <Button className="shrink-0" onClick={onCreate} type="button">
             <Plus size={14} />
             New project
           </Button>

@@ -25,6 +25,26 @@ VPS:
 - Cloudflare DNS API token for Let's Encrypt DNS-01.
 - Inbound ports `80` and `443` open. Open `5432` and `6543` only when intentionally exposing public DB/pooler routes.
 
+## Resource Requirements
+
+Each project runs its **own** full Supabase stack (Postgres, Auth, REST, GraphQL, Realtime, Storage, Studio, Kong, Edge Functions, and — on the `full` profile — Logflare analytics). Size the host for the control plane **plus** every project you intend to run concurrently.
+
+| Component | RAM | Notes |
+|-----------|-----|-------|
+| Control plane | ~0.5 GB | Control API, admin UI, metadata Postgres, Traefik, Docker proxy. |
+| Project on the `full` profile | ~3–4 GB | Includes Logflare (analytics) — an Elixir/BEAM service that is the single heaviest container. |
+| Project with analytics disabled | ~1.5–2 GB | Dropping analytics roughly halves the per-project footprint. |
+
+Guidance:
+
+- **Minimum for the `full` profile with one project is ~4 GB RAM.** On a 2 GB host the Logflare/analytics container is OOM-killed during startup (exit code 137), and the project reports `degraded` with `analytics: expected service is missing from Docker Compose state`. That is a host-memory limit, not a bug — give the host more RAM, or disable analytics.
+- Add roughly the per-project figure above for **each additional concurrent project**.
+- Provision **swap** (2–4 GB) as a cushion for startup memory spikes, but treat it as a backstop only — BEAM on swap is slow and is not a substitute for RAM.
+- **Disk:** budget ~5–10 GB for platform images plus each project's volumes and backups.
+- **CPU:** 2 vCPU is workable for evaluation; 4+ vCPU for multiple active projects.
+
+On a small node, disable the analytics service (or choose a lighter profile) to fit the smaller footprint. You lose the Logs Explorer backend in Studio, but every other surface (Auth, REST, GraphQL, Realtime, Storage, Edge Functions) is unaffected.
+
 ## Local Loopback Install
 
 Run:

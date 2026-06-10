@@ -86,6 +86,8 @@ For a real VPS install:
 
 You only need Docker + Docker Compose v2 to run the platform — Go and Node are required only if you build/run the binaries or frontend natively (the Compose path builds them in containers).
 
+Plan for **~4 GB RAM per `full`-profile project** plus ~0.5 GB for the control plane: each project runs its own full Supabase stack, and on under ~4 GB the Logflare/analytics container is OOM-killed and the project shows `degraded`. See [Resource Requirements](docs/install.md#resource-requirements) for per-profile sizing and how to run leaner.
+
 ## Get the Code
 
 ```bash

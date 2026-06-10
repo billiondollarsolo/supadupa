@@ -11,6 +11,15 @@ import (
 	"supadupa2026/internal/scheduler"
 )
 
+// edgeNetworkEnsurer is implemented by provisioners that attach the shared
+// edge-router to each project's isolated edge network. The reconciler re-runs it
+// every cycle so routing self-heals if the edge-router restarts independently of
+// the control plane (which would otherwise leave it detached and 502 all
+// projects until the next control-plane restart). The call is idempotent.
+type edgeNetworkEnsurer interface {
+	EnsureEdgeNetworking(ctx context.Context, ref string) error
+}
+
 // provisionGracePeriod is how long the reconciler leaves a project in the
 // "provisioning" phase untouched. While a project is provisioning it is owned by
 // the in-flight create goroutine (api.provisionNewProject), which runs compose up
@@ -103,6 +112,14 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		// still-provisioning project means the goroutine died and we take over.
 		if project.Status == control.ProjectProvisioning && now().Sub(project.UpdatedAt) < grace {
 			continue
+		}
+		// Re-attach the edge-router to this project's edge network. Idempotent and
+		// best-effort: a no-op when already connected, but it transparently heals
+		// routing if the edge-router container restarted on its own.
+		if ensurer, ok := r.provisioner.(edgeNetworkEnsurer); ok {
+			if err := ensurer.EnsureEdgeNetworking(ctx, project.Ref); err != nil {
+				r.logger.Debug("ensure edge networking failed", "project", project.Ref, "error", err)
+			}
 		}
 		status, err := r.provisioner.Status(ctx, project.Ref)
 		if err != nil {

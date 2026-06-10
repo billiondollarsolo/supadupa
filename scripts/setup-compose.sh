@@ -19,7 +19,8 @@ Options:
   --email email                 Let's Encrypt email
   --bootstrap-email email       optional first admin email
   --bootstrap-password value    optional first admin password; prefer SUPADUPA_BOOTSTRAP_PASSWORD
-  --expose-db                   bind Postgres and pooler edge ports publicly in VPS mode
+  --db-loopback                 bind Postgres/pooler edge ports to 127.0.0.1 (default: 0.0.0.0, Traefik-gated)
+  --expose-db                   deprecated no-op (ports publish on 0.0.0.0 by default now)
   --force                       overwrite existing .env
   -h, --help                    show this help
 
@@ -40,6 +41,7 @@ email=""
 bootstrap_email=""
 bootstrap_password=""
 expose_db=false
+db_loopback=false
 force=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -81,7 +83,13 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       ;;
     --expose-db)
+      # Deprecated: DB/pooler ports now publish on 0.0.0.0 by default and are
+      # gated by Traefik. Accepted as a no-op for backward compatibility.
       expose_db=true
+      shift
+      ;;
+    --db-loopback)
+      db_loopback=true
       shift
       ;;
     --force)
@@ -207,11 +215,16 @@ else
   acme_dns_provider="${dns_provider:-cloudflare}"
   http_addr="0.0.0.0:80"
   https_addr="0.0.0.0:443"
-  postgres_addr="127.0.0.1:5432"
-  pooler_addr="127.0.0.1:6543"
-  if [[ "$expose_db" == "true" ]]; then
-    postgres_addr="0.0.0.0:5432"
-    pooler_addr="0.0.0.0:6543"
+  # DB/pooler edge ports publish on 0.0.0.0 by default (matching .env.example).
+  # Reachability is gated by Traefik, not the host bind: the platform
+  # database_external_access flag (default off) and each project's
+  # db_ingress_mode (default private) must both be enabled before any external
+  # client can connect. Use --db-loopback to bind to 127.0.0.1 instead.
+  postgres_addr="0.0.0.0:5432"
+  pooler_addr="0.0.0.0:6543"
+  if [[ "$db_loopback" == "true" ]]; then
+    postgres_addr="127.0.0.1:5432"
+    pooler_addr="127.0.0.1:6543"
   fi
 fi
 
@@ -455,10 +468,17 @@ echo "Created runtime directories under $runtime_dir"
 echo "Ensured Docker network supadupa-ingress exists"
 echo "Configured control-plane container user $control_plane_user and Docker proxy socket group $docker_gid"
 echo "Project defaults will seed from SUPADUPA_APPS_DOMAIN on first startup"
-if [[ "$expose_db" == "true" ]]; then
+if [[ "$mode" != "local" && "$mode" != "offline" ]]; then
   echo
-  echo "Warning: --expose-db publishes raw Postgres and pooler ingress on $postgres_addr and $pooler_addr."
-  echo "Only use this when external database clients need direct access; keep firewall rules or SUPADUPA_DB_INGRESS_ALLOWED_CIDRS aligned with trusted client networks."
+  if [[ "$db_loopback" == "true" ]]; then
+    echo "Database/pooler edge ports bound to loopback ($postgres_addr / $pooler_addr); external DB clients cannot reach them."
+  else
+    echo "Note: Postgres/pooler edge ports publish on $postgres_addr / $pooler_addr."
+    echo "Reachability is gated by Traefik — the platform database_external_access flag (default off) and each"
+    echo "project's db_ingress_mode (default private) must both be enabled before any external client connects."
+    echo "Set per-project db_allowlist (or SUPADUPA_DB_INGRESS_ALLOWED_CIDRS) to trusted client networks, and keep any"
+    echo "host/provider firewall aligned. Use --db-loopback to bind these ports to 127.0.0.1 instead."
+  fi
 fi
 if [[ "$mode" == "offline" ]]; then
   echo "Generated local TLS CA and certificate under $runtime_dir/certs/local"
@@ -495,7 +515,8 @@ Next:
      $api_host -> this server
      *.$apps_domain -> this server
   2. Make sure ports 80 and 443 are reachable.
-     If you used --expose-db, also allow 5432 and 6543 intentionally and restrict them to trusted client IPs.
+     Postgres/pooler publish on 5432 and 6543 (Traefik-gated, default-private per project); when you enable
+     external DB access, also allow 5432/6543 at any host/provider firewall and restrict to trusted client IPs.
   3. Start:
      docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
   4. Open:

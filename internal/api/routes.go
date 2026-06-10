@@ -18,6 +18,7 @@ type routeRegistrationConfig struct {
 	ssoCallbackLimiter  *fixedWindowLimiter
 	studioSessions      *studioSessionStore
 	ssoAssertions       *ssoAssertionReplayCache
+	traffic             *control.TrafficCollector
 }
 
 type routeRegistry struct {
@@ -42,6 +43,7 @@ func (routes routeRegistry) registerCoreRoutes() {
 	routes.mux.HandleFunc("GET /v1/health", healthHandler)
 	routes.mux.HandleFunc("GET /metrics", prometheusMetricsHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/metrics", getFleetMetricsHandler(routes.store))
+	routes.mux.HandleFunc("GET /v1/metrics/traffic", getFleetTrafficHandler(routes.store, routes.traffic))
 	routes.mux.HandleFunc("GET /v1/runtime-config", getRuntimeConfigHandler(routes.provisioner))
 	routes.mux.HandleFunc("GET /v1/advisor", getAdvisorFindingsHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/compliance/report", getComplianceReportHandler(routes.store))
@@ -157,6 +159,7 @@ func (routes routeRegistry) registerProjectOverviewRoutes() {
 	routes.mux.HandleFunc("GET /v1/projects/{ref}", getProjectHandler(routes.store, routes.provisioner))
 	routes.mux.HandleFunc("GET /v1/projects/{ref}/metrics", getProjectMetricsHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/projects/{ref}/stats", getProjectStatsHandler(routes.store))
+	routes.mux.HandleFunc("GET /v1/projects/{ref}/traffic", getProjectTrafficHandler(routes.store, routes.traffic))
 	routes.mux.HandleFunc("POST /v1/projects/{ref}/telemetry", recordProjectTelemetryHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/projects/{ref}/connect", getConnectHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/projects/{ref}/connect/cli", getCLIProfileHandler(routes.store))

@@ -12,7 +12,7 @@ import { CardButton } from "../../components/ui/card-button";
 import { RevealField } from "../../components/ui/reveal-field";
 import { RuntimeLink } from "../../components/runtime-link";
 import { StatusPill } from "../../components/ui/status-pill";
-import { auditProjectSecretCopy, getProjectStats } from "../../api";
+import { auditProjectSecretCopy, getProjectStats, getProjectTraffic } from "../../api";
 import { useDashboardContext } from "../../lib/dashboard-context";
 import { formatBytes, formatTime } from "../../lib/format";
 import type { ProjectTab } from "../../lib/project-config";
@@ -55,6 +55,7 @@ export function ProjectOverviewPage() {
       <ObservedMetricsPanel history={telemetryHistory} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
       <OperationalSurfacePanel metrics={projectMetrics.data} loading={projectMetrics.isLoading} onOpenTab={openTab} />
       <UsageStatsPanel projectRef={activeProject?.ref} status={activeProject?.status} />
+      <TrafficPanel projectRef={activeProject?.ref} />
       <ConnectionBasicsPanel payload={connect.data} loading={connect.isLoading} onOpenConnect={() => openTab("connect")} project={activeProject} />
       <RuntimeStatusPanel project={activeProject} />
     </ProjectPage>
@@ -196,6 +197,49 @@ function UsageStatsPanel({ projectRef, status }: { projectRef?: string; status?:
       </div>
       {stats.isLoading ? <p className="mt-3 text-xs text-muted">Probing project database…</p> : null}
       {d && !d.available ? <p className="mt-3 text-xs text-faint">Live stats unavailable — the project may be paused or its database unreachable.</p> : null}
+    </AppPanel>
+  );
+}
+
+function TrafficPanel({ projectRef }: { projectRef?: string }) {
+  const traffic = useQuery({
+    queryKey: ["project-traffic", projectRef],
+    queryFn: () => getProjectTraffic(projectRef as string),
+    enabled: Boolean(projectRef),
+    refetchInterval: 15_000,
+  });
+  const d = traffic.data;
+  const t = d?.totals;
+  const rps = (n?: number) => (n !== undefined ? `${n.toFixed(n < 10 ? 2 : 0)}/s` : "—");
+  const pct = (n?: number) => (n !== undefined ? `${(n * 100).toFixed(1)}%` : "—");
+  const ms = (n?: number) => (n !== undefined ? `${n.toFixed(0)} ms` : "—");
+  return (
+    <AppPanel eyebrow="Traffic" title="Edge traffic (Traefik)" description="Live request rate, error rate, and latency across this project's public routes.">
+      {d && !d.enabled ? (
+        <p className="mt-3 text-sm text-muted">Edge traffic metrics are not enabled on this deployment.</p>
+      ) : (
+        <>
+          <div className="mt-4 grid grid-cols-4 gap-2 max-sm:grid-cols-2">
+            <MetricCard label="Requests/sec" value={rps(t?.requests_per_sec)} detail="across all routes" />
+            <MetricCard label="Error rate" value={pct(t?.error_rate)} tone={t && t.error_rate > 0.05 ? "danger" : t && t.error_rate > 0.01 ? "warning" : "default"} detail="4xx + 5xx" />
+            <MetricCard label="Avg latency" value={ms(t?.avg_latency_ms)} detail="this window" />
+            <MetricCard label="Requests total" value={t ? Math.round(t.requests_total).toLocaleString() : "—"} detail="since edge start" />
+          </div>
+          {d?.routes?.length ? (
+            <div className="mt-4 grid gap-1">
+              <p className="label">Per route</p>
+              {d.routes.map((rt) => (
+                <div className="usage-row" key={rt.route}>
+                  <p className="truncate text-sm font-medium">{rt.route}</p>
+                  <p className="text-right text-xs text-muted">{rps(rt.requests_per_sec)} · {pct(rt.error_rate)} err · {ms(rt.avg_latency_ms)}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 text-xs text-faint">No traffic observed yet in the current window.</p>
+          )}
+        </>
+      )}
     </AppPanel>
   );
 }

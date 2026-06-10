@@ -486,6 +486,32 @@ export type ProjectStats = {
   storage_bytes: number;
 };
 
+export type TrafficTotals = {
+  requests_total: number;
+  requests_per_sec: number;
+  error_rate: number;
+  avg_latency_ms: number;
+};
+
+export type RouteTraffic = TrafficTotals & { route: string; router: string };
+
+export type ProjectTraffic = {
+  enabled: boolean;
+  last_scrape?: string;
+  window_seconds: number;
+  routes: RouteTraffic[];
+  totals: TrafficTotals;
+};
+
+export type FleetTraffic = {
+  enabled: boolean;
+  last_scrape?: string;
+  window_seconds: number;
+  projects: (TrafficTotals & { ref: string })[];
+  entrypoint_connections: Record<string, number>;
+  totals: TrafficTotals;
+};
+
 export type ProjectServices = {
   project_ref: string;
   services: Record<string, boolean>;

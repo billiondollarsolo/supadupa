@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowRight, Cpu, Database, Gauge, HardDrive, Network, Plus, Server, ShieldAlert, type LucideIcon } from "lucide-react";
 import { AppPanel } from "../components/app/app-panel";
@@ -11,6 +12,7 @@ import { Button } from "../components/ui/button";
 import { CollapsibleCard } from "../components/ui/collapsible-card";
 import { EmptyState } from "../components/ui/empty-state";
 import { StatusPill } from "../components/ui/status-pill";
+import { getFleetTraffic } from "../api";
 import { useDashboardContext } from "../lib/dashboard-context";
 import { formatBytes, formatTime } from "../lib/format";
 import { type Tone } from "../lib/status";
@@ -181,6 +183,8 @@ export function FleetDashboardPage() {
         )}
       </AppPanel>
 
+      <FleetTrafficPanel />
+
       <AppPanel
         actions={
           <Button onClick={() => void navigate({ to: "/projects" })} size="sm" type="button" variant="secondary">
@@ -226,6 +230,45 @@ export function FleetDashboardPage() {
         </div>
       </AppPanel>
     </div>
+  );
+}
+
+function FleetTrafficPanel() {
+  const traffic = useQuery({ queryKey: ["fleet-traffic"], queryFn: getFleetTraffic, refetchInterval: 15_000 });
+  const d = traffic.data;
+  const t = d?.totals;
+  const rps = (n?: number) => (n !== undefined ? `${n.toFixed(n < 10 ? 2 : 0)}/s` : "—");
+  const pct = (n?: number) => (n !== undefined ? `${(n * 100).toFixed(1)}%` : "—");
+  const conns = d?.entrypoint_connections ?? {};
+  const dbConns = (conns.postgres ?? 0) + (conns.pooler ?? 0);
+  return (
+    <AppPanel eyebrow="Traffic" title="Edge traffic" description="Live request flow across all projects, measured at the Traefik edge. DB/pooler shown as open TCP connections.">
+      {d && !d.enabled ? (
+        <p className="mt-3 text-sm text-muted">Edge traffic metrics are not enabled on this deployment.</p>
+      ) : (
+        <>
+          <div className="mt-4 grid grid-cols-4 gap-2 max-sm:grid-cols-2">
+            <MetricCard label="Requests/sec" value={rps(t?.requests_per_sec)} detail="all HTTP routes" />
+            <MetricCard label="Error rate" value={pct(t?.error_rate)} tone={t && t.error_rate > 0.05 ? "danger" : t && t.error_rate > 0.01 ? "warning" : "default"} detail="4xx + 5xx" />
+            <MetricCard label="Avg latency" value={t ? `${t.avg_latency_ms.toFixed(0)} ms` : "—"} detail="this window" />
+            <MetricCard label="DB connections" value={String(Math.round(dbConns))} detail="postgres + pooler (open)" />
+          </div>
+          {d?.projects?.length ? (
+            <div className="mt-4 grid gap-1">
+              <p className="label">Busiest projects</p>
+              {d.projects.slice(0, 8).map((p) => (
+                <div className="usage-row" key={p.ref}>
+                  <p className="truncate font-mono text-sm">{p.ref}</p>
+                  <p className="text-right text-xs text-muted">{rps(p.requests_per_sec)} · {pct(p.error_rate)} err</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 text-xs text-faint">No HTTP traffic observed yet in the current window.</p>
+          )}
+        </>
+      )}
+    </AppPanel>
   );
 }
 

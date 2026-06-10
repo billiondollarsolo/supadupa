@@ -16,6 +16,9 @@ type Config struct {
 	Auth         *control.AuthService
 	AuthRequired bool
 	CORSOrigins  []string
+	// Traffic is the optional Traefik metrics collector powering the traffic
+	// endpoints. Nil/disabled when no metrics URL is configured.
+	Traffic *control.TrafficCollector
 
 	// provisionDispatcher runs long-running provisioning work off the request
 	// path. It defaults to launching a goroutine (asynchronous provisioning);
@@ -74,6 +77,7 @@ func NewServer(cfg Config) *http.Server {
 		ssoCallbackLimiter:  ssoCallbackLimiter,
 		studioSessions:      studioSessions,
 		ssoAssertions:       ssoAssertions,
+		traffic:             cfg.Traffic,
 	})
 
 	return &http.Server{

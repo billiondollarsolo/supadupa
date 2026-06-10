@@ -159,6 +159,12 @@ services:
       - --entrypoints.websecure.address=:443
       - --entrypoints.postgres.address=:5432
       - --entrypoints.pooler.address=:6543
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entrypoint=metrics
+      - --metrics.prometheus.addrouterslabel=true
+      - --metrics.prometheus.addentrypointslabel=true
+      - --metrics.prometheus.addserviceslabel=true
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
       - --certificatesresolvers.letsencrypt.acme.email=${SUPADUPA_ACME_EMAIL:-admin@example.com}

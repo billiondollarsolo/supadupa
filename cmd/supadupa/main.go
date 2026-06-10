@@ -79,12 +79,14 @@ func main() {
 		logger.Error("project route reconciliation failed", "error", err)
 		os.Exit(1)
 	}
+	trafficCollector := control.NewTrafficCollector(env.OrDefault("SUPADUPA_TRAEFIK_METRICS_URL", "http://edge-router:8082/metrics"))
 	server := api.NewServer(api.Config{
 		Addr:         addr,
 		Logger:       logger,
 		Provisioner:  provisioner,
 		Store:        store,
 		AuthRequired: true,
+		Traffic:      trafficCollector,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -101,6 +103,25 @@ func main() {
 		}
 	}()
 	go reconciler.New(store, provisioner, logger).Run(ctx)
+	if trafficCollector.Enabled() {
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			if err := trafficCollector.Scrape(ctx, time.Now()); err != nil {
+				logger.Debug("traefik metrics scrape failed", "error", err)
+			}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case t := <-ticker.C:
+					if err := trafficCollector.Scrape(ctx, t); err != nil {
+						logger.Debug("traefik metrics scrape failed", "error", err)
+					}
+				}
+			}
+		}()
+	}
 	backupScheduler := scheduler.NewBackupScheduler(store, nil, logger)
 	if tick, err := scheduler.BackupSchedulerTickFromEnv(os.Getenv); err != nil {
 		logger.Warn("invalid backup scheduler tick; using default", "env", scheduler.BackupSchedulerTickEnv, "default", scheduler.DefaultBackupSchedulerTick.String(), "error", err)

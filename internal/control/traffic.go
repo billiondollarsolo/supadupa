@@ -84,7 +84,7 @@ func (c *TrafficCollector) Scrape(ctx context.Context, now time.Time) error {
 			if r := snap.router(labels["router"]); r != nil {
 				r.durCount += value
 			}
-		case "traefik_entrypoint_open_connections":
+		case "traefik_open_connections":
 			snap.epConns[labels["entrypoint"]] += value
 		case "traefik_entrypoint_requests_total":
 			snap.epReqs[labels["entrypoint"]] += value

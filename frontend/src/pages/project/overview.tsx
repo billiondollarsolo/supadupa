@@ -9,6 +9,7 @@ import { Badge } from "../../components/ui/badge";
 import { DbExposureBadge } from "../../components/db-exposure-badge";
 import { Button, buttonVariants } from "../../components/ui/button";
 import { CardButton } from "../../components/ui/card-button";
+import { CollapsibleCard } from "../../components/ui/collapsible-card";
 import { RevealField } from "../../components/ui/reveal-field";
 import { RuntimeLink } from "../../components/runtime-link";
 import { StatusPill } from "../../components/ui/status-pill";
@@ -198,7 +199,12 @@ function DatabasePanel({ projectRef, status }: { projectRef?: string; status?: s
   const c = d?.connections;
   const connPct = c && c.max > 0 ? c.total / c.max : 0;
   return (
-    <AppPanel eyebrow="Database" title="Postgres" description="Live size, connections, throughput, and the largest tables, queried from the project database.">
+    <CollapsibleCard
+      eyebrow="Database"
+      title="Postgres"
+      description="Size, connections, throughput, and the largest tables, queried live from the project database."
+      actions={d?.available ? <span className="font-mono text-xs text-muted">{size(d.db_size_bytes)} · {c?.total}/{c?.max} conns</span> : null}
+    >
       <div className="mt-4 grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
         <MetricCard label="Database size" value={size(d?.db_size_bytes, ready)} detail={`${num(d?.table_count, ready)} public tables`} />
         <MetricCard label="Connections" value={c ? `${c.total} / ${c.max}` : "—"} tone={connPct > 0.85 ? "danger" : connPct > 0.6 ? "warning" : "default"} detail={c ? `${c.active} active · ${c.idle} idle${c.idle_in_txn ? ` · ${c.idle_in_txn} idle-txn` : ""}` : "active / max"} />
@@ -218,7 +224,7 @@ function DatabasePanel({ projectRef, status }: { projectRef?: string; status?: s
       ) : null}
       {stats.isLoading && !d ? <p className="mt-3 text-xs text-muted">Probing project database…</p> : null}
       {d && !d.available ? <p className="mt-3 text-xs text-faint">Live stats unavailable — the project may be paused or its database unreachable.</p> : null}
-    </AppPanel>
+    </CollapsibleCard>
   );
 }
 
@@ -227,7 +233,12 @@ function StoragePanel({ projectRef, status }: { projectRef?: string; status?: st
   const d = stats.data;
   const ready = Boolean(d?.available);
   return (
-    <AppPanel eyebrow="Storage" title="Object storage" description="S3-compatible storage usage, broken down per bucket.">
+    <CollapsibleCard
+      eyebrow="Storage"
+      title="Object storage"
+      description="S3-compatible storage usage, broken down per bucket."
+      actions={ready && d ? <span className="font-mono text-xs text-muted">{size(d.storage_bytes)} · {num(d.objects)} files</span> : null}
+    >
       <div className="mt-4 grid grid-cols-3 gap-2 max-sm:grid-cols-1">
         <MetricCard label="Storage used" value={size(d?.storage_bytes, ready)} detail="across all buckets" />
         <MetricCard label="Files" value={num(d?.objects, ready)} detail="objects stored" />
@@ -246,7 +257,7 @@ function StoragePanel({ projectRef, status }: { projectRef?: string; status?: st
       ) : ready ? (
         <p className="mt-3 text-xs text-faint">No buckets created yet.</p>
       ) : null}
-    </AppPanel>
+    </CollapsibleCard>
   );
 }
 
@@ -265,11 +276,16 @@ function TrafficPanel({ projectRef }: { projectRef?: string }) {
   const bps = (n?: number) => (n !== undefined ? `${formatBytes(n)}/s` : "—");
   const certDays = d?.cert_expires_at ? Math.round((new Date(d.cert_expires_at).getTime() - Date.now()) / 86_400_000) : undefined;
   return (
-    <AppPanel
+    <CollapsibleCard
       eyebrow="Traffic"
       title="Edge traffic (Traefik)"
-      description="Live request rate, latency percentiles, throughput, and status mix across this project's public routes."
-      actions={certDays !== undefined ? <StatusPill tone={certDays < 14 ? "danger" : certDays < 30 ? "warning" : "neutral"} label={`TLS ${certDays}d`} /> : undefined}
+      description="Request rate, latency percentiles, throughput, and status mix across this project's public routes."
+      actions={
+        <div className="flex items-center gap-2">
+          {t ? <span className="font-mono text-xs text-muted">{rps(t.requests_per_sec)} · p95 {ms(t.p95_ms)}</span> : null}
+          {certDays !== undefined ? <StatusPill tone={certDays < 14 ? "danger" : certDays < 30 ? "warning" : "neutral"} label={`TLS ${certDays}d`} /> : null}
+        </div>
+      }
     >
       {d && !d.enabled ? (
         <p className="mt-3 text-sm text-muted">Edge traffic metrics are not enabled on this deployment.</p>
@@ -304,7 +320,7 @@ function TrafficPanel({ projectRef }: { projectRef?: string }) {
           )}
         </>
       )}
-    </AppPanel>
+    </CollapsibleCard>
   );
 }
 

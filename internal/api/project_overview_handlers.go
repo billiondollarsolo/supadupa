@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -12,7 +13,10 @@ type projectStudioSessionResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-func createProjectHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
+func createProjectHandler(store control.Store, provisioner control.Provisioner, dispatch provisionDispatcher) http.HandlerFunc {
+	if dispatch == nil {
+		dispatch = asyncProvisionDispatcher
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if provisioner == nil {
 			writeError(w, http.StatusServiceUnavailable, "provisioner is not configured")
@@ -29,6 +33,8 @@ func createProjectHandler(store control.Store, provisioner control.Provisioner) 
 			return
 		}
 
+		// The project row is persisted in the "provisioning" phase; the actual
+		// runtime is brought up asynchronously below.
 		project, err := store.CreateProject(r.Context(), payload)
 		if err != nil {
 			writeStoreError(w, err)
@@ -40,35 +46,59 @@ func createProjectHandler(store control.Store, provisioner control.Provisioner) 
 			return
 		}
 
-		if err := provisioner.Create(r.Context(), control.ProjectSpecWithSecrets(project.Spec, secrets)); err != nil {
-			project.Status = control.ProjectError
-			project.Message = err.Error()
-			_, _ = store.UpdateProjectStatus(r.Context(), project.Ref, control.ProjectError, err.Error())
-			control.Audit(r.Context(), store, "project.provision_failed", "project:"+project.Ref, map[string]string{"error": err.Error()})
-			writeJSON(w, http.StatusAccepted, sanitizeProjectForResponse(project))
-			return
-		}
+		// Provisioning is infrastructure work that runs for tens of seconds (compose
+		// up plus attaching the shared edge-router to the new per-project network).
+		// It must not run on the request path: holding the response that long is
+		// fragile behind a reverse proxy, and the request connection is reset long
+		// before provisioning finishes — which, on a request-scoped context, would
+		// SIGKILL the in-flight `docker` commands ("connect edge router ... signal:
+		// killed") and leave the project half-created. Instead we accept the request
+		// (202), provision in the background on a context detached from request
+		// cancellation, and let the reconciler converge the project to healthy/error.
+		// Clients poll GET /v1/projects/{ref} for the live phase.
+		provCtx := context.WithoutCancel(r.Context())
+		provisionerName := cfgProvisionerName(provisioner)
+		dispatch(func() {
+			provisionNewProject(provCtx, store, provisioner, project, secrets, provisionerName)
+		})
 
-		project.Status = control.ProjectHealthy
-		project.Message = "project provisioned"
-		_, _ = store.UpdateProjectStatus(r.Context(), project.Ref, control.ProjectHealthy, project.Message)
-		routePath, err := reconcileProjectRoutes(r, store, project.Ref)
-		if err != nil {
-			writeError(w, http.StatusConflict, err.Error())
-			return
-		}
-		// Best-effort: enforce RLS on internal tables if the project opts in. The
-		// internal tables may not exist until Realtime finishes migrating, so this
-		// is also re-applied whenever the database config is saved.
-		if err := applyProjectSystemRLS(r.Context(), store, project); err != nil {
-			control.LogProject(r.Context(), store, project.Ref, "warning", "System-table RLS enforcement skipped", map[string]string{"error": err.Error()})
-		}
-		control.LogProject(r.Context(), store, project.Ref, "info", "Project secrets generated", map[string]string{"scope": "connect"})
-		control.LogProject(r.Context(), store, project.Ref, "info", "Routes registered", map[string]string{"path": routePath})
-		control.LogProject(r.Context(), store, project.Ref, "info", "Project provisioned", map[string]string{"provisioner": cfgProvisionerName(provisioner)})
 		control.Audit(r.Context(), store, "project.create", "project:"+project.Ref, map[string]string{"org_id": project.OrgID, "host_id": project.Spec.HostID})
-		writeJSON(w, http.StatusCreated, sanitizeProjectForResponse(project))
+		writeJSON(w, http.StatusAccepted, sanitizeProjectForResponse(project))
 	}
+}
+
+// provisionNewProject brings up a freshly-created project's runtime and records
+// the terminal status. It runs off the request path (see createProjectHandler)
+// on a cancellation-detached context with a hard ceiling, so a dropped client
+// connection or control-plane request churn cannot abort an in-flight provision.
+func provisionNewProject(ctx context.Context, store control.Store, provisioner control.Provisioner, project control.Project, secrets []control.ProjectSecret, provisionerName string) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+
+	if err := provisioner.Create(ctx, control.ProjectSpecWithSecrets(project.Spec, secrets)); err != nil {
+		_, _ = store.UpdateProjectStatus(ctx, project.Ref, control.ProjectError, err.Error())
+		control.LogProject(ctx, store, project.Ref, "error", "Project provisioning failed", map[string]string{"error": err.Error()})
+		control.Audit(ctx, store, "project.provision_failed", "project:"+project.Ref, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if _, err := store.UpdateProjectStatus(ctx, project.Ref, control.ProjectHealthy, "project provisioned"); err != nil {
+		control.LogProject(ctx, store, project.Ref, "warning", "Status update after provisioning failed", map[string]string{"error": err.Error()})
+	}
+	routePath, err := reconcileProjectRoutesCtx(ctx, store, project.Ref)
+	if err != nil {
+		control.LogProject(ctx, store, project.Ref, "error", "Route registration failed", map[string]string{"error": err.Error()})
+		return
+	}
+	// Best-effort: enforce RLS on internal tables if the project opts in. The
+	// internal tables may not exist until Realtime finishes migrating, so this
+	// is also re-applied whenever the database config is saved.
+	if err := applyProjectSystemRLS(ctx, store, project); err != nil {
+		control.LogProject(ctx, store, project.Ref, "warning", "System-table RLS enforcement skipped", map[string]string{"error": err.Error()})
+	}
+	control.LogProject(ctx, store, project.Ref, "info", "Project secrets generated", map[string]string{"scope": "connect"})
+	control.LogProject(ctx, store, project.Ref, "info", "Routes registered", map[string]string{"path": routePath})
+	control.LogProject(ctx, store, project.Ref, "info", "Project provisioned", map[string]string{"provisioner": provisionerName})
 }
 
 func getProjectHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {

@@ -183,7 +183,9 @@ func syncProjectAuthHooks(r *http.Request, store control.Store, syncer control.A
 	if err != nil {
 		return err
 	}
-	return syncer.SyncAuthHooks(r.Context(), ref, runtimeHooks)
+	pctx, cancel := detachedProvisionContext(r)
+	defer cancel()
+	return syncer.SyncAuthHooks(pctx, ref, runtimeHooks)
 }
 
 func materializeProjectAuthHooksForRuntime(ctx context.Context, store control.Store, ref string, hooks []control.ProjectAuthHook) ([]control.ProjectAuthHook, error) {

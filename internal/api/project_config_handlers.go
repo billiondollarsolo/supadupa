@@ -57,7 +57,9 @@ func updateProjectServicesHandler(store control.Store, provisioner control.Provi
 		}
 		metadata := serviceAuditMetadata(project.Spec.Services)
 		if syncer, ok := provisioner.(control.ServiceSyncer); ok {
-			if err := syncer.SyncServices(r.Context(), ref, project.Spec); err != nil {
+			pctx, cancel := detachedProvisionContext(r)
+			defer cancel()
+			if err := syncer.SyncServices(pctx, ref, project.Spec); err != nil {
 				control.LogProject(r.Context(), store, ref, "error", "Project services sync failed", map[string]string{"error": err.Error()})
 				control.Audit(r.Context(), store, "project.services_sync_failed", "project:"+ref, map[string]string{"error": err.Error()})
 				writeError(w, http.StatusConflict, err.Error())
@@ -142,7 +144,9 @@ func updateProjectConfigHandler(store control.Store, provisioner control.Provisi
 				writeError(w, http.StatusConflict, err.Error())
 				return
 			}
-			if err := syncer.SyncConfig(r.Context(), ref, runtimeConfig); err != nil {
+			pctx, cancel := detachedProvisionContext(r)
+			defer cancel()
+			if err := syncer.SyncConfig(pctx, ref, runtimeConfig); err != nil {
 				rollbackProjectConfig(r.Context(), store, ref, previousConfig)
 				control.LogProject(r.Context(), store, ref, "error", "Project config sync failed", map[string]string{"area": config.Area, "error": err.Error()})
 				control.Audit(r.Context(), store, "project.config_sync_failed", "project:"+ref, map[string]string{"area": config.Area, "error": err.Error()})

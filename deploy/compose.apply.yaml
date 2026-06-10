@@ -19,8 +19,9 @@ services:
     user: "${SUPADUPA_CONTROL_PLANE_USER:-10001:10001}"
     cap_drop:
       - ALL
-    security_opt:
-      - no-new-privileges:true
+    # security_opt (no-new-privileges) is inherited from the base compose.yaml.
+    # Re-declaring it here would append a duplicate list item, which Compose
+    # rejects ("items at 0 and 1 are equal") when both files are layered.
     environment:
       SUPADUPA_DOCKER_PROXY_ADDR: ":2375"
       SUPADUPA_DOCKER_SOCKET: /var/run/docker.sock

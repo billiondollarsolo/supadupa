@@ -10,6 +10,7 @@ type routeRegistrationConfig struct {
 	store               control.Store
 	auth                *control.AuthService
 	provisioner         control.Provisioner
+	provisionDispatcher provisionDispatcher
 	authRequired        bool
 	authLimiter         *authAttemptLimiter
 	secretAccessLimiter *fixedWindowLimiter
@@ -136,7 +137,7 @@ func (routes routeRegistry) registerOrgRoutes() {
 	routes.mux.HandleFunc("POST /v1/orgs/{id}/teams/{slug}/members", upsertTeamMemberHandler(routes.store))
 	routes.mux.HandleFunc("DELETE /v1/orgs/{id}/teams/{slug}/members/{email}", deleteTeamMemberHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/orgs/{id}/projects", listOrgProjectsHandler(routes.store))
-	routes.mux.HandleFunc("POST /v1/orgs/{id}/projects", createProjectHandler(routes.store, routes.provisioner))
+	routes.mux.HandleFunc("POST /v1/orgs/{id}/projects", createProjectHandler(routes.store, routes.provisioner, routes.provisionDispatcher))
 }
 
 func (routes routeRegistry) registerProjectRoutes() {

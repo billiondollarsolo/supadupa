@@ -1105,8 +1105,8 @@ func TestPlatformDefaultsAPIUpdatesAndAppliesToProjectCreate(t *testing.T) {
 	}
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"defaults-api","name":"Defaults API"}`, token)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	if provisioner.spec.Domain != "apps.example.com" || provisioner.spec.StackVersion != "15.8.1.060" || provisioner.spec.Profile != control.StackProfileEssential || provisioner.spec.ResourceTier != control.ResourceTierMedium {
 		t.Fatalf("expected provisioner spec from defaults, got %#v", provisioner.spec)
@@ -1217,8 +1217,8 @@ func TestBackupStorageTargetsAPIAndProjectPolicy(t *testing.T) {
 	}
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"backup-target-api","name":"Backup Target API","domain":"apps.example.test"}`, token)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	policy := performWithToken(server, http.MethodPut, "/v1/projects/backup-target-api/backups/policy", `{"enabled":true,"schedule":"hourly","kind":"logical","storage_target_id":"`+targetID+`"}`, token)
 	if policy.Code != http.StatusOK || !strings.Contains(policy.Body.String(), `"storage_target_id":"`+targetID+`"`) {
@@ -1334,8 +1334,8 @@ func TestOrgProjectRBACEnforced(t *testing.T) {
 
 	projectBody := `{"ref":"rbac-proj","name":"RBAC","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody, ownerToken)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected owner project create 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected owner project create 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	viewProject := performWithToken(server, http.MethodGet, "/v1/projects/rbac-proj", "", viewerToken)
@@ -1424,8 +1424,8 @@ func TestOrgFeatureFlagsGateAdvancedMutations(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"feature-proj","name":"Feature Project","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	disabledDomain := perform(server, http.MethodPost, "/v1/projects/feature-proj/domains", `{"fqdn":"feature.example.com"}`)
@@ -1469,7 +1469,7 @@ func TestTeamProjectAccessAuthorizesProjectAdminRoute(t *testing.T) {
 	orgResponse := performWithToken(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`, token)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"team-api","name":"Team API"}`, token)
-	if projectResponse.Code != http.StatusCreated {
+	if projectResponse.Code != http.StatusAccepted {
 		t.Fatalf("expected project create: %d %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	createUser := performWithToken(server, http.MethodPost, "/v1/users", `{"email":"dev@example.com","password":"super-secure","role":"member"}`, token)
@@ -1526,7 +1526,7 @@ func TestProjectOwnerIsNotPlatformAdmin(t *testing.T) {
 	orgResponse := performWithToken(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`, adminToken)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"owner-api","name":"Owner API"}`, adminToken)
-	if projectResponse.Code != http.StatusCreated {
+	if projectResponse.Code != http.StatusAccepted {
 		t.Fatalf("expected project create: %d %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	createUser := performWithToken(server, http.MethodPost, "/v1/users", `{"email":"owner@example.com","password":"super-secure","role":"developer"}`, adminToken)
@@ -1580,7 +1580,7 @@ func TestFleetProjectListFiltersByMembership(t *testing.T) {
 	} {
 		body := `{"ref":"` + input.ref + `","name":"` + input.name + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 		response := performWithToken(server, http.MethodPost, "/v1/orgs/"+input.orgID+"/projects", body, adminToken)
-		if response.Code != http.StatusCreated {
+		if response.Code != http.StatusAccepted {
 			t.Fatalf("create %s: %d %s", input.ref, response.Code, response.Body.String())
 		}
 	}
@@ -1622,11 +1622,11 @@ func TestCreateOrgProjectAndConnect(t *testing.T) {
 
 	projectBody := `{"ref":"alpha-proj","name":"Alpha","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
-	if !strings.Contains(projectResponse.Body.String(), `"status":"healthy"`) {
-		t.Fatalf("expected healthy project: %s", projectResponse.Body.String())
+	if !strings.Contains(projectResponse.Body.String(), `"status":"provisioning"`) {
+		t.Fatalf("expected provisioning project on create: %s", projectResponse.Body.String())
 	}
 
 	poolerUpdateResponse := perform(server, http.MethodPut, "/v1/projects/alpha-proj/config/pooler", `{"config":{"dedicated_pooler_enabled":"true","dedicated_pooler_tier":"medium","pool_mode":"both"}}`)
@@ -1785,13 +1785,13 @@ func TestStudioForwardAuthUsesSupadupaSessionCookie(t *testing.T) {
 	}
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"studio-auth","name":"Studio Auth","domain":"apps.example.test"}`, token)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	otherProjectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"studio-other","name":"Studio Other","domain":"apps.example.test"}`, token)
-	if otherProjectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected other project status 201, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
+	if otherProjectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected other project status 202, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
 	}
 
 	unauthorizedRequest := httptest.NewRequest(http.MethodGet, "/v1/auth/studio/verify?project_ref=studio-auth", nil)
@@ -1925,8 +1925,8 @@ func TestCreateProjectWithOrioleDBProfile(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"oriole-proj","name":"Oriole","domain":"supadupa.test","profile":"orioledb","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected orioledb project create 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected orioledb project create 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	if !strings.Contains(projectResponse.Body.String(), `"profile":"orioledb"`) {
 		t.Fatalf("expected orioledb profile in project response: %s", projectResponse.Body.String())
@@ -1946,12 +1946,12 @@ func TestProjectBranchesCreateListRoutesAndCleanup(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "preview_branches", "custom_domains")
 	projectBody := `{"ref":"branch-source","name":"Branch Source","domain":"supadupa.test","profile":"full","resource_tier":"small","services":{"storage":true},"environment":{"CUSTOM":"value"}}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	otherProjectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"branch-other","name":"Branch Other","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if otherProjectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected other project status 201, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
+	if otherProjectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected other project status 202, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/branch-source/branches", `{"ref":"Bad Ref","name":"Bad"}`)
@@ -2049,8 +2049,8 @@ func TestProjectBranchCreatePassesGeneratedSecretsToProvisioner(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "preview_branches")
 	projectBody := `{"ref":"branch-source","name":"Branch Source","domain":"supadupa.test","profile":"full","resource_tier":"small","environment":{"CUSTOM":"source-value","POSTGRES_PASSWORD":"source-should-not-win"}}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/branch-source/branches", `{"ref":"branch-secret-preview","name":"Preview","ttl_hours":24,"with_data":true}`)
@@ -2116,12 +2116,12 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, otherOrgID, "custom_domains")
 	projectBody := `{"ref":"replica-proj","name":"Replica","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	otherProjectResponse := perform(server, http.MethodPost, "/v1/orgs/"+otherOrgID+"/projects", `{"ref":"replica-domain-other","name":"Replica Domain Other","host_id":"`+hostID+`","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if otherProjectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected other replica domain project status 201, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
+	if otherProjectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected other replica domain project status 202, got %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/replica-proj/replicas", `{"name":"bad name","tier":"small"}`)
@@ -2272,8 +2272,8 @@ func TestProjectScaleUpdatesTierCapacityAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"scale-proj","name":"Scale","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/scale-proj/scale", `{"resource_tier":"huge"}`)
@@ -2324,8 +2324,8 @@ func TestProjectCustomDomainsUpdateRoutes(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "custom_domains")
 	projectBody := `{"ref":"domain-proj","name":"Domain","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	addResponse := perform(server, http.MethodPost, "/v1/projects/domain-proj/domains", `{"fqdn":"API.Example.COM."}`)
@@ -2366,8 +2366,8 @@ func TestProjectCustomDomainsUpdateRoutes(t *testing.T) {
 
 	secondProjectBody := `{"ref":"domain-proj-two","name":"Domain Two","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	secondProjectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", secondProjectBody)
-	if secondProjectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected second project status 201, got %d: %s", secondProjectResponse.Code, secondProjectResponse.Body.String())
+	if secondProjectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected second project status 202, got %d: %s", secondProjectResponse.Code, secondProjectResponse.Body.String())
 	}
 	crossProjectDuplicateResponse := perform(server, http.MethodPost, "/v1/projects/domain-proj-two/domains", `{"fqdn":"api.example.com"}`)
 	if crossProjectDuplicateResponse.Code != http.StatusConflict {
@@ -2432,8 +2432,8 @@ func TestProjectDomainBYOCertificateLifecycle(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	enableOrgFeaturesForTest(t, store, orgID, "custom_domains")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"byo-domain","name":"BYO Domain","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	addResponse := perform(server, http.MethodPost, "/v1/projects/byo-domain/domains", `{"fqdn":"api.example.com"}`)
 	if addResponse.Code != http.StatusCreated {
@@ -2538,8 +2538,8 @@ func TestProjectCustomDomainsReserveAppsControlPlaneTopology(t *testing.T) {
 		t.Fatalf("expected generated platform host conflict, got %d: %s", collidingProjectResponse.Code, collidingProjectResponse.Body.String())
 	}
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"apps-proj","name":"Apps Project","domain":"apps.example.com"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	for _, reserved := range []string{
@@ -2572,8 +2572,8 @@ func TestProjectConfigDefaultsUpdateAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"config-proj","name":"Config","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	seedProjectSecrets(t, store, "config-proj", "captcha-secret", "google-oauth-secret", "discord-secret", "figma-secret", "snapchat-secret", "messagebird-key", "twilio-token", "sms-test-otp", "smtp-password")
 
@@ -2809,8 +2809,8 @@ func TestProjectConfigUpdateSyncsRuntimeProvisioner(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"runtime-config-proj","name":"Runtime Config","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	updateResponse := perform(server, http.MethodPut, "/v1/projects/runtime-config-proj/config/storage", `{"config":{"file_size_limit_mb":"100","image_transform_enabled":"false"}}`)
@@ -2840,8 +2840,8 @@ func TestProjectServicesUpdateSyncsRuntimeProvisioner(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"runtime-services-proj","name":"Runtime Services","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	routePath := filepath.Join(routesRoot, "runtime-services-proj.yaml")
 	if err := os.WriteFile(routePath, []byte("http:\n  routers: {}\n"), 0o600); err != nil {
@@ -2896,8 +2896,8 @@ func TestProjectServicesUpdateClearsStaleErrorAfterSuccessfulRuntimeSync(t *test
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"service-error-proj","name":"Service Error","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	if _, err := store.UpdateProjectStatus(context.Background(), "service-error-proj", control.ProjectError, "previous reconcile error"); err != nil {
 		t.Fatal(err)
@@ -2925,8 +2925,8 @@ func TestNetworkConfigReconcilesRoutePolicy(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"network-proj","name":"Network","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPut, "/v1/projects/network-proj/config/network", `{"config":{"http_allowlist":"bad-cidr"}}`)
@@ -2964,8 +2964,8 @@ func TestPlatformDatabaseIngressAllowlistReconcilesProjectTCPRoutes(t *testing.T
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"db-ingress-proj","name":"DB Ingress","domain":"apps.supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	// Master on + this project set to allowlisted with its own CIDRs.
@@ -3020,8 +3020,8 @@ func TestProjectFunctionsDeployListDeleteAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"fn-proj","name":"Functions","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"east","address":"10.0.0.12","capacity":{"cpu":4,"ram_mb":16384,"disk_gb":200,"projects":10}}`)
 	if hostResponse.Code != http.StatusCreated {
@@ -3220,8 +3220,8 @@ func TestProjectLogDrainsCreateListDeleteAndAudit(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "log_drains")
 	projectBody := `{"ref":"drain-proj","name":"Drain","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/drain-proj/log-drains", `{"target":"https","config":{"header":"x"}}`)
@@ -3334,8 +3334,8 @@ func TestOrgLifecycleAndDeleteProtection(t *testing.T) {
 
 	projectBody := `{"ref":"org-owned","name":"Org Owned","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	blockedDelete := perform(server, http.MethodDelete, "/v1/orgs/"+orgID, "")
 	if blockedDelete.Code != http.StatusConflict {
@@ -3379,8 +3379,8 @@ func TestCreateHostAndPlaceProject(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"hosted-proj","name":"Hosted","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	if !strings.Contains(projectResponse.Body.String(), `"host_id":"`+hostID+`"`) {
 		t.Fatalf("expected project host id in response: %s", projectResponse.Body.String())
@@ -3431,8 +3431,8 @@ func TestProjectPlacementRejectsInsufficientHostCapacity(t *testing.T) {
 
 	firstProject := `{"ref":"tiny-one","name":"Tiny One","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	firstResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", firstProject)
-	if firstResponse.Code != http.StatusCreated {
-		t.Fatalf("expected first project status 201, got %d: %s", firstResponse.Code, firstResponse.Body.String())
+	if firstResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected first project status 202, got %d: %s", firstResponse.Code, firstResponse.Body.String())
 	}
 
 	secondProject := `{"ref":"tiny-two","name":"Tiny Two","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
@@ -3474,8 +3474,8 @@ func TestOrgQuotasTrackUsageAndRejectProjectOverLimit(t *testing.T) {
 
 	firstProject := `{"ref":"quota-one","name":"Quota One","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	firstResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", firstProject)
-	if firstResponse.Code != http.StatusCreated {
-		t.Fatalf("expected first project status 201, got %d: %s", firstResponse.Code, firstResponse.Body.String())
+	if firstResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected first project status 202, got %d: %s", firstResponse.Code, firstResponse.Body.String())
 	}
 
 	quotaResponse := perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/quotas", "")
@@ -3515,13 +3515,13 @@ func TestOrgUsageMeteringTracksControlPlaneResources(t *testing.T) {
 
 	firstProject := `{"ref":"meter-one","name":"Meter One","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	firstResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", firstProject)
-	if firstResponse.Code != http.StatusCreated {
-		t.Fatalf("expected first project status 201, got %d: %s", firstResponse.Code, firstResponse.Body.String())
+	if firstResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected first project status 202, got %d: %s", firstResponse.Code, firstResponse.Body.String())
 	}
 	secondProject := `{"ref":"meter-two","name":"Meter Two","domain":"supadupa.test","profile":"full","resource_tier":"medium"}`
 	secondResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", secondProject)
-	if secondResponse.Code != http.StatusCreated {
-		t.Fatalf("expected second project status 201, got %d: %s", secondResponse.Code, secondResponse.Body.String())
+	if secondResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected second project status 202, got %d: %s", secondResponse.Code, secondResponse.Body.String())
 	}
 
 	if _, err := store.CreateBackup(context.Background(), control.BackupInput{ProjectRef: "meter-one", Kind: "logical", Location: "memory://meter-one", SizeBytes: 1048576, Status: "completed"}); err != nil {
@@ -3567,8 +3567,8 @@ func TestOrgUsageSnapshotsCaptureMeteringLedger(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "usage_metering")
 	project := `{"ref":"snap-one","name":"Snap One","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", project)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	firstResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/usage/snapshots", "")
@@ -3605,8 +3605,8 @@ func TestBillingInvoicesGenerateFromUsageSnapshots(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "usage_metering", "billing")
 	project := `{"ref":"bill-one","name":"Bill One","domain":"supadupa.test","profile":"full","resource_tier":"medium"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", project)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	snapshotResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/usage/snapshots", "")
 	if snapshotResponse.Code != http.StatusCreated {
@@ -3669,8 +3669,8 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"metrics-proj","name":"Metrics","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	if _, err := store.CreateBackup(context.Background(), control.BackupInput{ProjectRef: "metrics-proj", Kind: "logical", Location: "memory://metrics", SizeBytes: 2048, Status: "completed"}); err != nil {
 		t.Fatalf("create metrics backup: %v", err)
@@ -3817,8 +3817,8 @@ func TestFleetAdvisorFindingsEndpoint(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"advisor-proj","name":"Advisor","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	if _, err := store.UpdateProjectStatus(context.Background(), "advisor-proj", control.ProjectDegraded, "db health check failed"); err != nil {
 		t.Fatalf("update project status: %v", err)
@@ -3882,8 +3882,8 @@ func TestComplianceReportEndpoint(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "pitr", "log_drains")
 	projectBody := `{"ref":"compliance-proj","name":"Compliance","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	networkResponse := perform(server, http.MethodPut, "/v1/projects/compliance-proj/config/network", `{"config":{"db_allowlist":"10.0.0.0/8","ssl_enforced":"true"}}`)
 	if networkResponse.Code != http.StatusOK {
@@ -3947,8 +3947,8 @@ func TestProjectReplicasSyncRuntimeWhenProvisionerSupportsReplicaSyncer(t *testi
 	enableOrgFeaturesForTest(t, store, orgID, "read_replicas")
 	projectBody := `{"ref":"replica-sync","name":"Replica Sync","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/replica-sync/replicas", `{"name":"east","host_id":"`+hostID+`","region":"us-east","tier":"small","read_weight":75,"failover_priority":2}`)
@@ -3998,8 +3998,8 @@ func TestProjectReplicationPipelinesCreateListDeleteMetricsAndAudit(t *testing.T
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"repl-proj","name":"Replication","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/repl-proj/replication", `{"name":"bad","type":"etl","source_table":"orders","destination":"bigquery","config":{}}`)
@@ -4079,8 +4079,8 @@ func TestProjectVectorAIResourcesCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"ai-proj","name":"AI","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidEmbeddingResponse := perform(server, http.MethodPost, "/v1/projects/ai-proj/embeddings", `{"name":"bad","source_table":"documents","source_column":"body text"}`)
@@ -4168,8 +4168,8 @@ func TestProjectAnalyticsBucketsCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"analytics-proj","name":"Analytics","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/analytics-proj/analytics-buckets", `{"name":"events","storage_uri":"http://bucket/path"}`)
@@ -4239,8 +4239,8 @@ func TestProjectStorageBucketsCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"storage-proj","name":"Storage","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidResponse := perform(server, http.MethodPost, "/v1/projects/storage-proj/storage/buckets", `{"name":"assets","allowed_mime_types":["not-a-mime"]}`)
@@ -4334,8 +4334,8 @@ func TestProjectStorageBucketsApplyToStorageDataPlane(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"storage-live","name":"Storage Live","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/storage-live/storage/buckets", `{"name":"assets","public":true}`)
@@ -4367,8 +4367,8 @@ func TestProjectStorageBucketCreateRollsBackMetadataWhenDataPlaneFails(t *testin
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"storage-fail","name":"Storage Fail","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/storage-fail/storage/buckets", `{"name":"assets","public":true}`)
@@ -4403,8 +4403,8 @@ func TestProjectStorageBucketDeleteCleansMetadataWhenDataPlaneBucketAlreadyMissi
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"storage-missing","name":"Storage Missing","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/storage-missing/storage/buckets", `{"name":"assets","public":true}`)
@@ -4445,8 +4445,8 @@ func TestProjectDatabaseExtensionsListUpdateMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"ext-proj","name":"Extensions","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	listResponse := perform(server, http.MethodGet, "/v1/projects/ext-proj/database/extensions", "")
@@ -4523,8 +4523,8 @@ func TestProjectDatabaseExtensionUpdateAppliesLiveDDL(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"extension-live","name":"Extension Live","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	updateResponse := perform(server, http.MethodPut, "/v1/projects/extension-live/database/extensions/uuid-ossp", `{"enabled":true,"schema":"extensions"}`)
@@ -4566,8 +4566,8 @@ func TestProjectDatabaseExtensionUpdateRollsBackMetadataWhenApplyFails(t *testin
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"extension-fail","name":"Extension Fail","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	disableResponse := perform(server, http.MethodPut, "/v1/projects/extension-fail/database/extensions/pg_cron", `{"enabled":false,"schema":"extensions"}`)
 	if disableResponse.Code != http.StatusOK {
@@ -4605,8 +4605,8 @@ func TestProjectDatabaseCronJobsCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"cron-proj","name":"Cron","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidSchedule := perform(server, http.MethodPost, "/v1/projects/cron-proj/database/cron-jobs", `{"name":"bad-job","schedule":"* * *","command":"select 1","active":true}`)
@@ -4695,8 +4695,8 @@ func TestProjectDatabaseCronJobCreateDeleteAppliesLiveDDL(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"cron-live","name":"Cron Live","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/cron-live/database/cron-jobs", `{"name":"refresh-rollups","schedule":"*/15 * * * *","command":"select public.refresh_rollups();","database":"postgres","username":"postgres","active":true}`)
@@ -4744,8 +4744,8 @@ func TestProjectDatabaseCronJobCreateRollsBackMetadataWhenApplyFails(t *testing.
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"cron-fail","name":"Cron Fail","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/cron-fail/database/cron-jobs", `{"name":"refresh-rollups","schedule":"*/15 * * * *","command":"select 1;","active":true}`)
@@ -4766,8 +4766,8 @@ func TestProjectConfigRuntimeSecretResolutionAndRollback(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"runtime-secret-proj","name":"Runtime Secret","domain":"supadupa.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	missingResponse := perform(server, http.MethodPut, "/v1/projects/runtime-secret-proj/config/smtp", `{"config":{"enabled":"true","host":"smtp.example.com","password_handle":"secret://projects/runtime-secret-proj/smtp-password"}}`)
@@ -4815,8 +4815,8 @@ func TestProjectAuthClientsCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"authclient-proj","name":"Auth Clients","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidSecret := perform(server, http.MethodPost, "/v1/projects/authclient-proj/auth/clients", `{"name":"Bad Secret","client_secret_handle":"raw-secret","redirect_uris":["https://app.example.com/callback"],"confidential":true}`)
@@ -4898,8 +4898,8 @@ func TestProjectAuthHooksCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"authhook-proj","name":"Auth Hooks","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	seedProjectSecrets(t, store, "authhook-proj", "auth-hook-secret", "auth-hook-auth")
 
@@ -4999,8 +4999,8 @@ func TestProjectAuthHookCreateRollsBackWhenSecretResolutionFails(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"authhook-fail","name":"Auth Hooks","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createBody := `{"hook_type":"custom_access_token","enabled":true,"target_uri":"https://hooks.example.com/token","secret_handle":"secret://projects/authhook-fail/missing-hook-secret","timeout_ms":7000,"retry_attempts":2}`
@@ -5040,8 +5040,8 @@ func TestProjectDatabaseQueuesCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"queue-proj","name":"Queues","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidRetention := perform(server, http.MethodPost, "/v1/projects/queue-proj/database/queues", `{"name":"events","retention_minutes":0,"visibility_timeout_seconds":90000,"active":true}`)
@@ -5130,8 +5130,8 @@ func TestProjectDatabaseQueueCreateDeleteAppliesLiveDDL(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"queue-live","name":"Queue Live","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/queue-live/database/queues", `{"name":"events","schema":"pgmq","dead_letter_queue":"events-dlq","active":true}`)
@@ -5182,8 +5182,8 @@ func TestProjectDatabaseQueueCreateRollsBackMetadataWhenApplyFails(t *testing.T)
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"queue-fail","name":"Queue Fail","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/queue-fail/database/queues", `{"name":"events","schema":"pgmq","active":true}`)
@@ -5208,8 +5208,8 @@ func TestProjectDatabaseWebhooksCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"webhook-proj","name":"Webhooks","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidEndpoint := perform(server, http.MethodPost, "/v1/projects/webhook-proj/database/webhooks", `{"name":"orders-events","schema":"public","table":"orders","endpoint":"http://hooks.example.com/orders","active":true}`)
@@ -5298,8 +5298,8 @@ func TestProjectDatabaseWebhookCreateDeleteAppliesLiveDDL(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"webhook-live","name":"Webhook Live","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	seedProjectSecrets(t, store, "webhook-live", "orders-token")
 
@@ -5363,8 +5363,8 @@ func TestProjectDatabaseWebhookCreateRollsBackMetadataWhenApplyFails(t *testing.
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"webhook-fail","name":"Webhook Fail","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/webhook-fail/database/webhooks", `{"name":"orders-events","schema":"public","table":"orders","endpoint":"https://hooks.example.com/orders","active":true}`)
@@ -5399,8 +5399,8 @@ func TestProjectDatabaseWebhookCreateRequiresRevealableSecretHeadersWhenApplyEna
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"webhook-secret","name":"Webhook Secret","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/webhook-secret/database/webhooks", `{"name":"orders-events","schema":"public","table":"orders","endpoint":"https://hooks.example.com/orders","headers":{"Authorization":"secret://projects/webhook-secret/webhooks/orders-token"},"active":true}`)
@@ -5425,8 +5425,8 @@ func TestProjectDatabaseSchemasCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"schema-proj","name":"Schemas","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidSQL := perform(server, http.MethodPost, "/v1/projects/schema-proj/database/schemas", `{"name":"app-schema","version":"20260605_001","schema":"public","sql":"","active":true}`)
@@ -5520,8 +5520,8 @@ func TestProjectDatabaseSchemaCreateAppliesActiveSQLToProjectDatabase(t *testing
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"schema-live","name":"Schema Live","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	sql := "create table public.live_schema_probe(id uuid primary key);"
@@ -5570,8 +5570,8 @@ func TestProjectDatabaseSchemaCreateRollsBackMetadataWhenApplyFails(t *testing.T
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"schema-fail","name":"Schema Fail","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/schema-fail/database/schemas", `{"name":"bad-schema","version":"20260606_001","schema":"public","sql":"select bad_sql();","active":true}`)
@@ -5596,8 +5596,8 @@ func TestProjectDatabaseRolesCreateListDeleteMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"dbrole-proj","name":"Database Roles","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	reservedResponse := perform(server, http.MethodPost, "/v1/projects/dbrole-proj/database/roles", `{"name":"service_role","login":true,"password_secret_handle":"secret://projects/dbrole-proj/db/app-role"}`)
@@ -5680,8 +5680,8 @@ func TestProjectDatabaseRoleCreateDeleteAppliesLiveDDL(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"role-live","name":"Role Live","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/role-live/database/roles", `{"name":"app_reader","login":false,"bypass_rls":false,"connection_limit":25,"member_of":["authenticated"],"schema_grants":{"public":"usage,select"}}`)
@@ -5735,8 +5735,8 @@ func TestProjectDatabaseRoleCreateRollsBackMetadataWhenApplyFails(t *testing.T) 
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"role-fail","name":"Role Fail","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	createResponse := perform(server, http.MethodPost, "/v1/projects/role-fail/database/roles", `{"name":"app_reader","login":false,"schema_grants":{"public":"usage"}}`)
@@ -5771,8 +5771,8 @@ func TestProjectDatabaseRoleLoginCreateRequiresRevealableProjectSecret(t *testin
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"role-secret","name":"Role Secret","domain":"apps.example.test"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	unrevealableResponse := perform(server, http.MethodPost, "/v1/projects/role-secret/database/roles", `{"name":"app_login","login":true,"password_secret_handle":"secret://projects/role-secret/db/app-login"}`)
@@ -5802,8 +5802,8 @@ func TestProjectCDNPolicyInvalidationsRoutesMetricsAndAudit(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"cdn-proj","name":"CDN","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	defaultResponse := perform(server, http.MethodGet, "/v1/projects/cdn-proj/cdn/policy", "")
@@ -5897,8 +5897,8 @@ func TestProjectNetworkConnectionsCreateListDeleteMetricsAndAudit(t *testing.T) 
 	enableOrgFeaturesForTest(t, store, orgID, "network_restrictions")
 	projectBody := `{"ref":"net-proj","name":"Network","host_id":"` + hostID + `","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	invalidCIDRResponse := perform(server, http.MethodPost, "/v1/projects/net-proj/network-connections", `{"name":"bad-cidr","cidrs":["not-a-cidr"]}`)
@@ -6036,12 +6036,12 @@ func TestProjectActivityFiltersAuditEvents(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	alphaResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"activity-alpha","name":"Alpha","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if alphaResponse.Code != http.StatusCreated {
-		t.Fatalf("expected alpha create 201, got %d: %s", alphaResponse.Code, alphaResponse.Body.String())
+	if alphaResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected alpha create 202, got %d: %s", alphaResponse.Code, alphaResponse.Body.String())
 	}
 	betaResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"activity-beta","name":"Beta","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if betaResponse.Code != http.StatusCreated {
-		t.Fatalf("expected beta create 201, got %d: %s", betaResponse.Code, betaResponse.Body.String())
+	if betaResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected beta create 202, got %d: %s", betaResponse.Code, betaResponse.Body.String())
 	}
 	pauseResponse := perform(server, http.MethodPost, "/v1/projects/activity-alpha/pause", "")
 	if pauseResponse.Code != http.StatusOK {
@@ -6070,8 +6070,8 @@ func TestProjectBackupsAndLogs(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"backup-proj","name":"Backup","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	backupResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/backups", "")
@@ -6189,8 +6189,8 @@ func TestProjectPhysicalBackupPolicyAndTrigger(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"physical-api","name":"Physical","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	policyResponse := perform(server, http.MethodPut, "/v1/projects/physical-api/backups/policy", `{"enabled":true,"schedule":"daily","kind":"physical"}`)
 	if policyResponse.Code != http.StatusOK || !strings.Contains(policyResponse.Body.String(), `"kind":"physical"`) {
@@ -6223,8 +6223,8 @@ func TestProjectPITRPolicyAndWALArchives(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "pitr")
 	projectBody := `{"ref":"pitr-proj","name":"PITR","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	policyResponse := perform(server, http.MethodGet, "/v1/projects/pitr-proj/pitr/policy", "")
@@ -6349,8 +6349,8 @@ func TestProjectPITRRestoreAPI(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"pitr-restore","name":"PITR Restore","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	target, err := store.CreateBackupStorageTarget(context.Background(), control.BackupStorageTargetInput{
 		Name:            "Archive",
@@ -6441,8 +6441,8 @@ func TestProjectSecretsMaskedAndRevealAudited(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"secret-proj","name":"Secret","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	secretsResponse := perform(server, http.MethodGet, "/v1/projects/secret-proj/secrets", "")
@@ -6536,8 +6536,8 @@ func TestProjectSecretRevealIsThrottled(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"secret-throttle","name":"Secret Throttle","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	for i := 0; i < maxSecretAccessAttempts; i++ {
@@ -6568,8 +6568,8 @@ func TestProjectSecretRevealThrottleFollowsAccountAcrossIPs(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"secret-account-throttle","name":"Secret Account Throttle","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody, ownerToken)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	for i := 0; i < maxSecretAccessAttempts; i++ {
@@ -6601,8 +6601,8 @@ func TestProjectSecretCopyThrottleFollowsIPAcrossAccounts(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectBody := `{"ref":"secret-ip-throttle","name":"Secret IP Throttle","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody, ownerToken)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	createUserResponse := performWithToken(server, http.MethodPost, "/v1/users", `{"email":"admin@example.com","password":"super-secure","role":"admin"}`, ownerToken)
 	if createUserResponse.Code != http.StatusCreated {
@@ -6639,8 +6639,8 @@ func TestProjectCreatePassesGeneratedSecretsToProvisioner(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"render-secret-proj","name":"Render Secret","domain":"supadupa.test","profile":"full","resource_tier":"small","environment":{"POSTGRES_PASSWORD":"caller-should-not-win"}}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	if strings.Contains(projectResponse.Body.String(), "caller-should-not-win") || strings.Contains(projectResponse.Body.String(), `"JWT_SECRET"`) {
 		t.Fatalf("project response leaked provisioner-only secret environment: %s", projectResponse.Body.String())
@@ -6686,8 +6686,8 @@ func TestProjectSecretRotateSyncsProvisionerSecrets(t *testing.T) {
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"rotate-sync-proj","name":"Rotate Sync","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	createdServiceKey := provisioner.spec.Environment["SERVICE_ROLE_KEY"]
 	if createdServiceKey == "" {
@@ -6729,8 +6729,8 @@ func TestProjectLifecycleActions(t *testing.T) {
 	enableOrgFeaturesForTest(t, store, orgID, "custom_domains")
 	projectBody := `{"ref":"life-proj","name":"Life","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	routePath := filepath.Join(routesRoot, "life-proj.yaml")
 	if _, err := os.Stat(routePath); err != nil {
@@ -6803,8 +6803,8 @@ func TestProjectUpgradeCreatesPreUpgradeBackupAndReturnsRollbackMetadata(t *test
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-safe","name":"Upgrade Safe","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-safe/upgrade", `{"version":"15.8.1.085"}`)
@@ -6852,8 +6852,8 @@ func TestProjectUpgradeRejectsUnsupportedStackVersionBeforeBackup(t *testing.T) 
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-reject","name":"Upgrade Reject","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-reject","name":"Upgrade Reject","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-reject/upgrade", `{"version":"nightly"}`)
@@ -6883,8 +6883,8 @@ func TestProjectUpgradeUsesVerifiedBackupID(t *testing.T) {
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-with-backup","name":"Upgrade With Backup","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-with-backup","name":"Upgrade With Backup","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	artifact := filepath.Join(backupRoot, "verified.sql")
@@ -6935,8 +6935,8 @@ func TestProjectUpgradeRequiresDurableBackupWhenConfigured(t *testing.T) {
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-durable-required","name":"Upgrade Durable Required","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-durable-required","name":"Upgrade Durable Required","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-durable-required/upgrade", `{"version":"15.8.1.085"}`)
@@ -6971,8 +6971,8 @@ func TestProjectUpgradeRejectsUntestedRemoteBackupWhenDurableRequired(t *testing
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-untested-target","name":"Upgrade Untested Target","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-untested-target","name":"Upgrade Untested Target","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 	target, err := store.CreateBackupStorageTarget(context.Background(), control.BackupStorageTargetInput{
 		Name:            "Off-host",
@@ -7008,8 +7008,8 @@ func TestProjectUpgradeAllowsTestedRemoteBackupWhenDurableRequired(t *testing.T)
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-durable-ok","name":"Upgrade Durable OK","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-durable-ok","name":"Upgrade Durable OK","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 	target, err := store.CreateBackupStorageTarget(context.Background(), control.BackupStorageTargetInput{
 		Name:            "Off-host",
@@ -7047,8 +7047,8 @@ func TestProjectUpgradeRejectsInvalidBackupIDArtifact(t *testing.T) {
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-bad-backup","name":"Upgrade Bad Backup","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-bad-backup","name":"Upgrade Bad Backup","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	artifact := filepath.Join(backupRoot, "corrupt.sql")
@@ -7115,8 +7115,8 @@ func TestProjectUpgradeFailureAttemptsRollbackToPreviousVersion(t *testing.T) {
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-fail","name":"Upgrade Fail","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-fail","name":"Upgrade Fail","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-fail/upgrade", `{"version":"15.8.1.085"}`)
@@ -7169,8 +7169,8 @@ func TestProjectUpgradeFailureAutoRestoresPreUpgradeBackupWhenEnabled(t *testing
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-autorestore","name":"Upgrade Auto Restore","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-autorestore","name":"Upgrade Auto Restore","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-autorestore/upgrade", `{"version":"15.8.1.085"}`)
@@ -7205,8 +7205,8 @@ func TestProjectUpgradeFailureAutoRestoreReportsDryRunAsRestoreError(t *testing.
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-autorestore-dry","name":"Upgrade Auto Restore Dry","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-autorestore-dry","name":"Upgrade Auto Restore Dry","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-autorestore-dry/upgrade", `{"version":"15.8.1.085"}`)
@@ -7240,8 +7240,8 @@ func TestProjectUpgradeFailureReportsRollbackAttemptEvenWhenRollbackFails(t *tes
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-rollback-fail","name":"Upgrade Rollback Fail","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-rollback-fail","name":"Upgrade Rollback Fail","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-rollback-fail/upgrade", `{"version":"15.8.1.085"}`)
@@ -7278,8 +7278,8 @@ func TestProjectUpgradeCompatFailureInjectionRequiresHeader(t *testing.T) {
 	server := NewServer(Config{Store: store, Provisioner: provisioner})
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
-	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-inject","name":"Upgrade Inject","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusCreated {
-		t.Fatalf("expected project create 201, got %d: %s", response.Code, response.Body.String())
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-inject","name":"Upgrade Inject","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
 	}
 
 	normalResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-inject/upgrade", `{"version":"15.8.1.085"}`)
@@ -7323,8 +7323,8 @@ func TestProjectDestroySurfacesRouteCleanupFailure(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"route-cleanup-proj","name":"Routes","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 	badRouteRoot := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(badRouteRoot, []byte("blocks cleanup"), 0o600); err != nil {
@@ -7357,8 +7357,8 @@ func TestProjectDestroyPassesRetainVolumesOption(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"retain-proj","name":"Retain","domain":"supadupa.test","profile":"full","resource_tier":"small"}`)
-	if projectResponse.Code != http.StatusCreated {
-		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
 	deleteResponse := perform(server, http.MethodDelete, "/v1/projects/retain-proj?retain_volumes=true", "")

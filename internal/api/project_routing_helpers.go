@@ -1,11 +1,24 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"supadupa2026/internal/control"
 )
+
+// detachedProvisionContext returns a context for a provisioner operation invoked
+// from an HTTP handler. It is detached from the request's cancellation — so a
+// dropped client connection (which is reset within ~200ms once provisioning
+// reconfigures the shared edge-router) cannot SIGKILL in-flight `docker`
+// commands and leave a project half-mutated — while keeping a hard time ceiling.
+// Request-scoped values (e.g. the actor identity used for audit) are preserved.
+// The background reconciler converges project status afterward regardless.
+func detachedProvisionContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Minute)
+}
 
 func cfgProvisionerName(provisioner control.Provisioner) string {
 	if provisioner == nil {
@@ -24,31 +37,37 @@ func serviceAuditMetadata(services map[string]control.ServiceSpec) map[string]st
 }
 
 func reconcileProjectRoutes(r *http.Request, store control.Store, ref string) (string, error) {
-	project, err := store.GetProject(r.Context(), ref)
+	return reconcileProjectRoutesCtx(r.Context(), store, ref)
+}
+
+// reconcileProjectRoutesCtx is the context-driven core of reconcileProjectRoutes,
+// usable off the request path (e.g. background provisioning).
+func reconcileProjectRoutesCtx(ctx context.Context, store control.Store, ref string) (string, error) {
+	project, err := store.GetProject(ctx, ref)
 	if err != nil {
 		return "", err
 	}
-	domains, err := store.ListProjectDomains(r.Context(), ref)
+	domains, err := store.ListProjectDomains(ctx, ref)
 	if err != nil {
 		return "", err
 	}
-	networkConfig, err := store.GetProjectConfig(r.Context(), ref, "network")
+	networkConfig, err := store.GetProjectConfig(ctx, ref, "network")
 	if err != nil {
 		return "", err
 	}
-	cdnPolicy, err := store.GetProjectCDNPolicy(r.Context(), ref)
+	cdnPolicy, err := store.GetProjectCDNPolicy(ctx, ref)
 	if err != nil {
 		return "", err
 	}
-	replicas, err := store.ListProjectReplicas(r.Context(), ref)
+	replicas, err := store.ListProjectReplicas(ctx, ref)
 	if err != nil {
 		return "", err
 	}
-	platformDefaults, err := store.GetPlatformDefaults(r.Context())
+	platformDefaults, err := store.GetPlatformDefaults(ctx)
 	if err != nil {
 		return "", err
 	}
-	routes, err := store.UpsertProjectRoutes(r.Context(), ref, control.RoutesForProjectDomainsWithNetworkAndCDN(project, domains, networkConfig, cdnPolicy))
+	routes, err := store.UpsertProjectRoutes(ctx, ref, control.RoutesForProjectDomainsWithNetworkAndCDN(project, domains, networkConfig, cdnPolicy))
 	if err != nil {
 		return "", err
 	}

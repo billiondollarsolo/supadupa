@@ -57,7 +57,9 @@ func createProjectBranchHandler(store control.Store, provisioner control.Provisi
 			writeStoreError(w, err)
 			return
 		}
-		if err := provisioner.Create(r.Context(), control.ProjectSpecWithSecrets(project.Spec, secrets)); err != nil {
+		pctx, cancel := detachedProvisionContext(r)
+		defer cancel()
+		if err := provisioner.Create(pctx, control.ProjectSpecWithSecrets(project.Spec, secrets)); err != nil {
 			project.Status = control.ProjectError
 			project.Message = err.Error()
 			branch.Status = string(control.ProjectError)
@@ -88,7 +90,7 @@ func createProjectBranchHandler(store control.Store, provisioner control.Provisi
 				writeJSON(w, http.StatusAccepted, createBranchResponse{Branch: branch, Project: sanitizeProjectForResponse(project)})
 				return
 			}
-			clone, err := cloner.CloneBranch(r.Context(), control.BranchCloneOptions{
+			clone, err := cloner.CloneBranch(pctx, control.BranchCloneOptions{
 				SourceRef: sourceRef,
 				BranchRef: branch.ProjectRef,
 				BranchID:  branch.ID,
@@ -159,7 +161,9 @@ func deleteProjectBranchHandler(store control.Store, provisioner control.Provisi
 			writeError(w, http.StatusNotFound, fmt.Sprintf("branch %s not found", branchRef))
 			return
 		}
-		if err := provisioner.Destroy(r.Context(), branchRef); err != nil {
+		pctx, cancel := detachedProvisionContext(r)
+		defer cancel()
+		if err := provisioner.Destroy(pctx, branchRef); err != nil {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -276,7 +280,9 @@ func deleteProjectReplicaHandler(store control.Store, provisioner control.Provis
 				writeStoreError(w, fmt.Errorf("%w: replica %s for project %s", control.ErrNotFound, replicaID, ref))
 				return
 			}
-			if err := syncer.SyncReplicas(r.Context(), ref, remaining); err != nil {
+			pctx, cancel := detachedProvisionContext(r)
+			defer cancel()
+			if err := syncer.SyncReplicas(pctx, ref, remaining); err != nil {
 				control.LogProject(r.Context(), store, ref, "error", "Read replica sync failed", map[string]string{"replica_id": replicaID, "error": err.Error()})
 				control.Audit(r.Context(), store, "project.replica_sync_failed", "project:"+ref, map[string]string{"replica_id": replicaID, "error": err.Error()})
 				writeError(w, http.StatusConflict, err.Error())
@@ -380,12 +386,14 @@ func createProjectReplicaHandler(store control.Store, provisioner control.Provis
 }
 
 func syncCreatedProjectReplica(r *http.Request, store control.Store, provisioner control.Provisioner, ref string, replica control.ProjectReplica) error {
+	pctx, cancel := detachedProvisionContext(r)
+	defer cancel()
 	if syncer, ok := provisioner.(control.ReplicaSyncer); ok {
 		replicas, err := store.ListProjectReplicas(r.Context(), ref)
 		if err != nil {
 			return err
 		}
-		return syncer.SyncReplicas(r.Context(), ref, replicas)
+		return syncer.SyncReplicas(pctx, ref, replicas)
 	}
 	opts := control.ReplicaOpts{
 		ID:               replica.ID,
@@ -396,7 +404,7 @@ func syncCreatedProjectReplica(r *http.Request, store control.Store, provisioner
 		ReadWeight:       replica.ReadWeight,
 		FailoverPriority: replica.FailoverPriority,
 	}
-	return provisioner.AddReplica(r.Context(), ref, opts)
+	return provisioner.AddReplica(pctx, ref, opts)
 }
 
 func syncProjectReplicas(r *http.Request, store control.Store, provisioner control.Provisioner, ref string) error {
@@ -408,5 +416,7 @@ func syncProjectReplicas(r *http.Request, store control.Store, provisioner contr
 	if err != nil {
 		return err
 	}
-	return syncer.SyncReplicas(r.Context(), ref, replicas)
+	pctx, cancel := detachedProvisionContext(r)
+	defer cancel()
+	return syncer.SyncReplicas(pctx, ref, replicas)
 }

@@ -16,7 +16,26 @@ type Config struct {
 	Auth         *control.AuthService
 	AuthRequired bool
 	CORSOrigins  []string
+
+	// provisionDispatcher runs long-running provisioning work off the request
+	// path. It defaults to launching a goroutine (asynchronous provisioning);
+	// tests inject a synchronous runner for deterministic behavior.
+	provisionDispatcher provisionDispatcher
 }
+
+// provisionDispatcher decouples slow infrastructure provisioning from the HTTP
+// request that triggers it. Project creation persists the project in the
+// "provisioning" phase, returns 202 immediately, and runs the actual compose-up
+// / edge-router wiring through this dispatcher; the background reconciler then
+// converges the project to healthy or error.
+type provisionDispatcher func(func())
+
+func asyncProvisionDispatcher(f func()) { go f() }
+
+// defaultProvisionDispatcher is the dispatcher used when a Config does not set
+// one. Production keeps it asynchronous; the test package overrides it with a
+// synchronous runner in TestMain so provisioning completes deterministically.
+var defaultProvisionDispatcher provisionDispatcher = asyncProvisionDispatcher
 
 func NewServer(cfg Config) *http.Server {
 	logger := cfg.Logger
@@ -37,12 +56,17 @@ func NewServer(cfg Config) *http.Server {
 	if auth == nil {
 		auth = control.NewAuthService(control.AuthSecretFromEnv(os.Getenv))
 	}
+	dispatch := cfg.provisionDispatcher
+	if dispatch == nil {
+		dispatch = defaultProvisionDispatcher
+	}
 
 	mux := http.NewServeMux()
 	registerAPIRoutes(mux, routeRegistrationConfig{
 		store:               store,
 		auth:                auth,
 		provisioner:         cfg.Provisioner,
+		provisionDispatcher: dispatch,
 		authRequired:        cfg.AuthRequired,
 		authLimiter:         authLimiter,
 		secretAccessLimiter: secretAccessLimiter,

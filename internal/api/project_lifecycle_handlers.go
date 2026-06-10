@@ -53,12 +53,14 @@ func lifecycleHandler(store control.Store, provisioner control.Provisioner, next
 			return
 		}
 
+		pctx, cancel := detachedProvisionContext(r)
+		defer cancel()
 		var err error
 		switch nextStatus {
 		case control.ProjectPaused:
-			err = provisioner.Pause(r.Context(), ref)
+			err = provisioner.Pause(pctx, ref)
 		case control.ProjectHealthy:
-			err = provisioner.Resume(r.Context(), ref)
+			err = provisioner.Resume(pctx, ref)
 		default:
 			err = errors.New("unsupported lifecycle transition")
 		}
@@ -87,11 +89,13 @@ func restartHandler(store control.Store, provisioner control.Provisioner) http.H
 			writeError(w, http.StatusServiceUnavailable, "provisioner is not configured")
 			return
 		}
-		if err := provisioner.Pause(r.Context(), ref); err != nil {
+		pctx, cancel := detachedProvisionContext(r)
+		defer cancel()
+		if err := provisioner.Pause(pctx, ref); err != nil {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
-		if err := provisioner.Resume(r.Context(), ref); err != nil {
+		if err := provisioner.Resume(pctx, ref); err != nil {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -151,12 +155,14 @@ func upgradeProjectHandler(store control.Store, provisioner control.Provisioner)
 		control.LogProject(r.Context(), store, ref, "info", "Pre-upgrade backup completed", metadata)
 		control.Audit(r.Context(), store, "project.upgrade_backup", "project:"+ref, metadata)
 
+		pctx, cancel := detachedProvisionContext(r)
+		defer cancel()
 		err = injectedUpgradeFailure(r, targetVersion)
 		if err == nil {
-			err = provisioner.Upgrade(r.Context(), ref, targetVersion)
+			err = provisioner.Upgrade(pctx, ref, targetVersion)
 		}
 		if err != nil {
-			rollbackErr := provisioner.Upgrade(r.Context(), ref, project.Spec.StackVersion)
+			rollbackErr := provisioner.Upgrade(pctx, ref, project.Spec.StackVersion)
 			failedMetadata := make(map[string]string, len(metadata)+3)
 			for key, value := range metadata {
 				failedMetadata[key] = value
@@ -336,7 +342,9 @@ func scaleProjectHandler(store control.Store, provisioner control.Provisioner) h
 			writeStoreError(w, err)
 			return
 		}
-		if err := provisioner.Scale(r.Context(), ref, payload.ResourceTier); err != nil {
+		pctx, cancel := detachedProvisionContext(r)
+		defer cancel()
+		if err := provisioner.Scale(pctx, ref, payload.ResourceTier); err != nil {
 			project, _ = store.UpdateProjectStatus(r.Context(), ref, control.ProjectError, err.Error())
 			control.LogProject(r.Context(), store, ref, "error", "Resource tier scale failed", map[string]string{"resource_tier": string(payload.ResourceTier), "error": err.Error()})
 			control.Audit(r.Context(), store, "project.scale_failed", "project:"+ref, map[string]string{"resource_tier": string(payload.ResourceTier), "error": err.Error()})
@@ -360,11 +368,13 @@ func destroyProjectHandler(store control.Store, provisioner control.Provisioner)
 			return
 		}
 		retainVolumes := parseBoolQuery(r, "retain_volumes")
+		pctx, cancel := detachedProvisionContext(r)
+		defer cancel()
 		var err error
 		if destroyer, ok := provisioner.(control.OptionedDestroyer); ok {
-			err = destroyer.DestroyWithOptions(r.Context(), ref, control.DestroyOptions{RetainVolumes: retainVolumes})
+			err = destroyer.DestroyWithOptions(pctx, ref, control.DestroyOptions{RetainVolumes: retainVolumes})
 		} else {
-			err = provisioner.Destroy(r.Context(), ref)
+			err = provisioner.Destroy(pctx, ref)
 		}
 		if err != nil {
 			writeError(w, http.StatusConflict, err.Error())

@@ -137,7 +137,9 @@ func rotateProjectSecretHandler(store control.Store, provisioner control.Provisi
 				return
 			}
 			spec := control.ProjectSpecWithSecrets(project.Spec, secrets)
-			if err := provisioner.SyncSecrets(r.Context(), ref, spec); err != nil {
+			pctx, cancel := detachedProvisionContext(r)
+			defer cancel()
+			if err := provisioner.SyncSecrets(pctx, ref, spec); err != nil {
 				_, _ = store.UpdateProjectStatus(r.Context(), ref, control.ProjectDegraded, err.Error())
 				control.LogProject(r.Context(), store, ref, "error", "Secret sync failed", map[string]string{"kind": secret.Kind, "error": err.Error()})
 				control.Audit(r.Context(), store, "project.secret_sync_failed", "project:"+ref, map[string]string{"kind": secret.Kind, "error": err.Error()})

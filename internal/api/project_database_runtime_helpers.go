@@ -47,6 +47,46 @@ func applyProjectSystemRLS(ctx context.Context, store control.Store, project con
 	return execProjectDatabaseSQL(ctx, project, projectSystemRLSSQL)
 }
 
+// queryProjectDatabaseSQL runs a read-only query against the project's database
+// (through `docker compose exec db psql`, the same privileged path as
+// execProjectDatabaseSQL) and returns psql's raw stdout in unaligned,
+// tuples-only form with `|` field separators. Used for lightweight stats probes.
+func queryProjectDatabaseSQL(ctx context.Context, project control.Project, sql string) (string, error) {
+	if strings.TrimSpace(sql) == "" {
+		return "", fmt.Errorf("query sql is required")
+	}
+	timeout := databaseApplyTimeout()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	projectDir := filepath.Join(env.OrDefault("SUPADUPA_PROJECT_ROOT", "./runtime/projects"), project.Ref)
+	composeFile := filepath.Join(projectDir, "compose.yaml")
+	commandParts := strings.Fields(env.OrDefault("SUPADUPA_COMPOSE_COMMAND", "docker compose"))
+	if len(commandParts) == 0 {
+		return "", fmt.Errorf("SUPADUPA_COMPOSE_COMMAND is empty")
+	}
+	args := append(commandParts[1:], "-p", project.Ref, "-f", composeFile, "exec", "-T", "db", "sh", "-c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -v ON_ERROR_STOP=1 -tA -F'|' -U supabase_admin -d postgres`)
+	cmd := exec.CommandContext(ctx, commandParts[0], args...)
+	cmd.Dir = projectDir
+	cmd.Stdin = strings.NewReader(sql)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		if len(detail) > 1024 {
+			detail = detail[:1024]
+		}
+		return "", fmt.Errorf("database query failed: %s", detail)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func execProjectDatabaseSQL(ctx context.Context, project control.Project, sql string) error {
 	if strings.TrimSpace(sql) == "" {
 		return fmt.Errorf("database schema sql is required")

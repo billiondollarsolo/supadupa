@@ -156,6 +156,7 @@ func (routes routeRegistry) registerProjectRoutes() {
 func (routes routeRegistry) registerProjectOverviewRoutes() {
 	routes.mux.HandleFunc("GET /v1/projects/{ref}", getProjectHandler(routes.store, routes.provisioner))
 	routes.mux.HandleFunc("GET /v1/projects/{ref}/metrics", getProjectMetricsHandler(routes.store))
+	routes.mux.HandleFunc("GET /v1/projects/{ref}/stats", getProjectStatsHandler(routes.store))
 	routes.mux.HandleFunc("POST /v1/projects/{ref}/telemetry", recordProjectTelemetryHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/projects/{ref}/connect", getConnectHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/projects/{ref}/connect/cli", getCLIProfileHandler(routes.store))

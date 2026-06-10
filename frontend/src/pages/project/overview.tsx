@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Activity, Database, Globe2, KeyRound, Network, Play, RotateCcw, Shield } from "lucide-react";
 import { AppPanel } from "../../components/app/app-panel";
+import { MetricCard } from "../../components/app/metric-card";
 import { ResourceMeter } from "../../components/app/resource-meter";
 import { TelemetryLineChart } from "../../components/charts/telemetry-line-chart";
 import { Badge } from "../../components/ui/badge";
@@ -10,7 +12,7 @@ import { CardButton } from "../../components/ui/card-button";
 import { RevealField } from "../../components/ui/reveal-field";
 import { RuntimeLink } from "../../components/runtime-link";
 import { StatusPill } from "../../components/ui/status-pill";
-import { auditProjectSecretCopy } from "../../api";
+import { auditProjectSecretCopy, getProjectStats } from "../../api";
 import { useDashboardContext } from "../../lib/dashboard-context";
 import { formatBytes, formatTime } from "../../lib/format";
 import type { ProjectTab } from "../../lib/project-config";
@@ -52,6 +54,7 @@ export function ProjectOverviewPage() {
       <NextStepsStrip project={activeProject} metrics={projectMetrics.data} onOpenTab={openTab} />
       <ObservedMetricsPanel history={telemetryHistory} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
       <OperationalSurfacePanel metrics={projectMetrics.data} loading={projectMetrics.isLoading} onOpenTab={openTab} />
+      <UsageStatsPanel projectRef={activeProject?.ref} status={activeProject?.status} />
       <ConnectionBasicsPanel payload={connect.data} loading={connect.isLoading} onOpenConnect={() => openTab("connect")} project={activeProject} />
       <RuntimeStatusPanel project={activeProject} />
     </ProjectPage>
@@ -169,6 +172,30 @@ function ConnectionBasicsPanel({ loading, onOpenConnect, payload, project }: { p
           </>
         ) : null}
       </div>
+    </AppPanel>
+  );
+}
+
+function UsageStatsPanel({ projectRef, status }: { projectRef?: string; status?: string }) {
+  const stats = useQuery({
+    queryKey: ["project-stats", projectRef],
+    queryFn: () => getProjectStats(projectRef as string),
+    enabled: Boolean(projectRef) && status !== "paused",
+    refetchInterval: 30_000,
+  });
+  const d = stats.data;
+  const ready = Boolean(d?.available);
+  const num = (n?: number) => (ready && n !== undefined ? n.toLocaleString() : "—");
+  const size = (n?: number) => (ready && n !== undefined ? formatBytes(n) : "—");
+  return (
+    <AppPanel eyebrow="Usage" title="Database & storage" description="Live usage queried from this project's database and storage service.">
+      <div className="mt-4 grid grid-cols-3 gap-2 max-sm:grid-cols-1">
+        <MetricCard label="Database size" value={size(d?.db_size_bytes)} detail={`${num(d?.table_count)} public tables`} />
+        <MetricCard label="DB connections" value={num(d?.connections)} detail="active sessions" />
+        <MetricCard label="Storage used" value={size(d?.storage_bytes)} detail={`${num(d?.buckets)} buckets · ${num(d?.objects)} files`} />
+      </div>
+      {stats.isLoading ? <p className="mt-3 text-xs text-muted">Probing project database…</p> : null}
+      {d && !d.available ? <p className="mt-3 text-xs text-faint">Live stats unavailable — the project may be paused or its database unreachable.</p> : null}
     </AppPanel>
   );
 }

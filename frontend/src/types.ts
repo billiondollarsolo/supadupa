@@ -476,6 +476,16 @@ export type Project = {
   updated_at: string;
 };
 
+export type ProjectStats = {
+  available: boolean;
+  db_size_bytes: number;
+  table_count: number;
+  connections: number;
+  buckets: number;
+  objects: number;
+  storage_bytes: number;
+};
+
 export type ProjectServices = {
   project_ref: string;
   services: Record<string, boolean>;

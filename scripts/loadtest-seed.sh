@@ -6,7 +6,7 @@ set -uo pipefail
 API=https://api.supadupa.brotechlabs.com
 APPS=apps.supadupa.brotechlabs.com
 EMAIL=admin@supadupa.brotechlabs.com
-PASS='IQ8uKZdhWwOsqDpnBfjYo0cxcIcVJb9L'
+PASS="${SUPADUPA_BOOTSTRAP_PASSWORD:?set SUPADUPA_BOOTSTRAP_PASSWORD in the environment (do not hardcode credentials)}"
 HOST_ID=88eeeaeffd71ac8c4e624d63b36f792e
 
 login() { curl -s -X POST "$API/v1/auth/login" -H 'content-type: application/json' \

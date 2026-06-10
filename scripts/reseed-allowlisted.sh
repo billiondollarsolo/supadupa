@@ -6,7 +6,7 @@ set -uo pipefail
 API=https://api.supadupa.brotechlabs.com
 APPS=apps.supadupa.brotechlabs.com
 EMAIL=admin@supadupa.brotechlabs.com
-PASS='IQ8uKZdhWwOsqDpnBfjYo0cxcIcVJb9L'
+PASS="${SUPADUPA_BOOTSTRAP_PASSWORD:?set SUPADUPA_BOOTSTRAP_PASSWORD in the environment (do not hardcode credentials)}"
 login(){ curl -s -X POST "$API/v1/auth/login" -H 'content-type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))'; }
 TOK=$(login); A(){ curl -s -H "authorization: Bearer $TOK" "$@"; }
 

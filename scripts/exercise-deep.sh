@@ -5,7 +5,9 @@ API=https://api.supadupa.brotechlabs.com
 APPS=apps.supadupa.brotechlabs.com
 ref="$1"
 PH="$ref.$APPS"
-login(){ curl -s -X POST $API/v1/auth/login -H 'content-type: application/json' -d '{"email":"admin@supadupa.brotechlabs.com","password":"IQ8uKZdhWwOsqDpnBfjYo0cxcIcVJb9L"}' | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))'; }
+EMAIL=admin@supadupa.brotechlabs.com
+PASS="${SUPADUPA_BOOTSTRAP_PASSWORD:?set SUPADUPA_BOOTSTRAP_PASSWORD in the environment (do not hardcode credentials)}"
+login(){ curl -s -X POST $API/v1/auth/login -H 'content-type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))'; }
 TOK=$(login); A(){ curl -s -H "authorization: Bearer $TOK" "$@"; }
 C(){ curl -s -k --resolve "$PH:443:127.0.0.1" "$@"; }   # hit project edge locally, ignore fresh-cert TLS
 reveal(){ A "$API/v1/projects/$ref/secrets/$1/reveal" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))'; }

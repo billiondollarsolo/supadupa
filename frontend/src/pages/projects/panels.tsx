@@ -13,7 +13,7 @@ import { Field } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { NativeSelect } from "../../components/ui/native-select";
 import { StatusPill } from "../../components/ui/status-pill";
-import { DbExposureBadge } from "../../components/db-exposure-badge";
+import { DbExposureBadge, dbExposureMeta } from "../../components/db-exposure-badge";
 import { formatBytes, formatDateTime } from "../../lib/format";
 import type { Host, HostCapacity, Org, PlatformDefaults, Project, StackReleaseManifest } from "../../types";
 
@@ -100,12 +100,15 @@ export function ProjectsListPanel({
     {
       accessorKey: "name",
       header: "Name",
-      cell: (info) => (
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate font-medium">{info.row.original.name}</span>
-          <DbExposureBadge mode={info.row.original.db_ingress_mode} />
-        </span>
-      ),
+      cell: (info) => {
+        const exposure = dbExposureMeta(info.row.original.db_ingress_mode);
+        return (
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="truncate font-medium">{info.row.original.name}</span>
+            {exposure ? <DbExposureBadge className="self-start" mode={info.row.original.db_ingress_mode} /> : null}
+          </span>
+        );
+      },
     },
     {
       accessorKey: "ref",

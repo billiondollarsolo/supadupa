@@ -4,6 +4,7 @@ import { AppPanel } from "../../components/app/app-panel";
 import { ResourceMeter } from "../../components/app/resource-meter";
 import { TelemetryLineChart } from "../../components/charts/telemetry-line-chart";
 import { Badge } from "../../components/ui/badge";
+import { DbExposureBadge } from "../../components/db-exposure-badge";
 import { Button, buttonVariants } from "../../components/ui/button";
 import { CardButton } from "../../components/ui/card-button";
 import { RevealField } from "../../components/ui/reveal-field";
@@ -70,6 +71,7 @@ function ProjectStatusStrip({ loading, metrics, project, studioUrl }: { project?
         </div>
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-xs text-muted">
           <StatusPill label={metrics?.status ?? project?.status ?? (loading ? "loading" : "-")} status={metrics?.status ?? project?.status} />
+          <DbExposureBadge mode={project?.db_ingress_mode} />
           {project ? <Badge variant="muted">{project.spec.resource_tier}</Badge> : null}
           {project ? <Badge variant="muted">{project.spec.profile}</Badge> : null}
           {metrics ? <span className="font-mono text-faint">{metrics.resources.cpu} vCPU · {formatBytes(metrics.resources.ram_mb * 1024 * 1024)} RAM · {formatBytes(metrics.db_allocated_bytes)} disk</span> : null}

@@ -511,7 +511,30 @@ func listProjectsHandler(store control.Store, provisioner control.Provisioner) h
 			return
 		}
 		hydrateRuntimeStatus(r.Context(), provisioner, projects)
+		hydrateDBIngressMode(r.Context(), store, projects)
 		writeJSON(w, http.StatusOK, sanitizeProjectsForResponse(projects))
+	}
+}
+
+// dbIngressModeFor returns a project's configured database exposure mode
+// ("private" when unset), read from its network config.
+func dbIngressModeFor(ctx context.Context, store control.Store, ref string) string {
+	cfg, err := store.GetProjectConfig(ctx, ref, "network")
+	if err != nil {
+		return "private"
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.Config["db_ingress_mode"]))
+	if mode == "" {
+		return "private"
+	}
+	return mode
+}
+
+// hydrateDBIngressMode fills each project's configured DB exposure mode so list
+// views can flag publicly-reachable databases. Reads are in-memory map lookups.
+func hydrateDBIngressMode(ctx context.Context, store control.Store, projects []control.Project) {
+	for i := range projects {
+		projects[i].DBIngressMode = dbIngressModeFor(ctx, store, projects[i].Ref)
 	}
 }
 

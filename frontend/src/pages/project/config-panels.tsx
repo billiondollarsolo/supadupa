@@ -2,7 +2,8 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import type { ColumnDef } from "@tanstack/react-table";
-import { ArrowLeft, ExternalLink, Globe2, Plus, RadioTower, Save, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { ArrowLeft, ExternalLink, Globe2, Lock, Plus, RadioTower, Save, Search, ShieldAlert, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { cn } from "../../lib/cn";
 import {
   addProjectDomain,
   createProjectNetworkConnection,
@@ -520,9 +521,9 @@ export function ServicesPanel({ project, services, loading }: { project?: Projec
 }
 
 const DB_INGRESS_MODES = [
-  { id: "private", label: "Private", help: "Not reachable through the edge router. Only this project's own services connect to its database." },
-  { id: "allowlisted", label: "Allowlisted", help: "Reachable only from the IP ranges listed below." },
-  { id: "public", label: "Public", help: "Reachable from any IP address. Use only with strong, rotated database credentials." },
+  { id: "private", label: "Private", icon: Lock, help: "Not reachable through the edge router. Only this project's own services connect to its database." },
+  { id: "allowlisted", label: "Allowlisted", icon: ShieldAlert, help: "Reachable only from the IP ranges listed below." },
+  { id: "public", label: "Public", icon: Globe2, help: "Reachable from any IP address. Use only with strong, rotated database credentials." },
 ] as const;
 type DBIngressMode = (typeof DB_INGRESS_MODES)[number]["id"];
 
@@ -582,17 +583,33 @@ export function DatabaseExposurePanel({ project, hostPublished, masterEnabled }:
     >
       <div className="mt-4 grid gap-3">
         <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
-          {DB_INGRESS_MODES.map((option) => (
-            <button
-              className={mode === option.id ? "segmented active h-auto flex-col items-start gap-1 p-3 text-left" : "segmented h-auto flex-col items-start gap-1 p-3 text-left"}
-              key={option.id}
-              onClick={() => setMode(option.id)}
-              type="button"
-            >
-              <span className="text-sm font-medium">{option.label}</span>
-              <span className="text-xs text-muted">{option.help}</span>
-            </button>
-          ))}
+          {DB_INGRESS_MODES.map((option) => {
+            const selected = mode === option.id;
+            const danger = option.id === "public";
+            const Icon = option.icon;
+            return (
+              <button
+                aria-pressed={selected}
+                className={cn(
+                  "flex flex-col items-start gap-1.5 rounded-lg border p-3 text-left transition",
+                  selected
+                    ? danger
+                      ? "border-danger bg-danger/10"
+                      : "border-accent bg-surface-2"
+                    : "border-border bg-bg hover:border-border-strong",
+                )}
+                key={option.id}
+                onClick={() => setMode(option.id)}
+                type="button"
+              >
+                <span className={cn("flex items-center gap-2 text-sm font-medium", selected && danger && "text-danger")}>
+                  <Icon className={selected ? (danger ? "text-danger" : "text-accent") : "text-faint"} size={14} />
+                  {option.label}
+                </span>
+                <span className="text-xs leading-5 text-muted">{option.help}</span>
+              </button>
+            );
+          })}
         </div>
         {mode === "allowlisted" ? (
           <Field label="Trusted client CIDRs" hint="One CIDR or IP per line. Only these ranges may reach this project's database.">

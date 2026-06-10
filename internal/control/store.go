@@ -1094,8 +1094,12 @@ type Project struct {
 	Message       string         `json:"message,omitempty"`
 	Spec          ProjectSpec    `json:"spec"`
 	RuntimeStatus *ProjectStatus `json:"runtime_status,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	// DBIngressMode is the project's configured database exposure
+	// ("private"/"allowlisted"/"public"). Transient: hydrated from the project's
+	// network config when building API responses, not persisted on the row.
+	DBIngressMode string    `json:"db_ingress_mode,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type CreateProjectRequest struct {

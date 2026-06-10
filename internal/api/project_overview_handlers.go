@@ -113,6 +113,7 @@ func getProjectHandler(store control.Store, provisioner control.Provisioner) htt
 				project.RuntimeStatus = &status
 			}
 		}
+		project.DBIngressMode = dbIngressModeFor(r.Context(), store, project.Ref)
 		writeJSON(w, http.StatusOK, sanitizeProjectForResponse(project))
 	}
 }

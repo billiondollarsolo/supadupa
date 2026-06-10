@@ -471,6 +471,7 @@ export type Project = {
     resource_tier: string;
   };
   runtime_status?: ProjectRuntimeStatus;
+  db_ingress_mode?: string;
   created_at: string;
   updated_at: string;
 };

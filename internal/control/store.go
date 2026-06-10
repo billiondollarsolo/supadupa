@@ -10273,7 +10273,7 @@ func validateStackProfile(profile StackProfile) error {
 
 func validateResourceTier(tier ResourceTier) error {
 	switch tier {
-	case ResourceTierSmall, ResourceTierMedium, ResourceTierLarge:
+	case ResourceTierSmall, ResourceTierMedium, ResourceTierLarge, ResourceTierCustom:
 		return nil
 	default:
 		return fmt.Errorf("unsupported resource tier %q", tier)

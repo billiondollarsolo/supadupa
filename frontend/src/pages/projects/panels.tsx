@@ -26,8 +26,9 @@ type CreateProjectForm = {
   domain: string;
   stack_version: string;
   profile: StackProfile;
-  resource_tier: "small" | "medium" | "large";
-  // Exact-size overrides. 0 means "use the tier preset" for that dimension.
+  resource_tier: "small" | "medium" | "large" | "custom";
+  // Exact-size overrides. 0 means "use the tier preset" for that dimension
+  // (presets send 0; only "custom" carries concrete numbers).
   cpu: number;
   ram_mb: number;
   disk_gb: number;
@@ -371,7 +372,6 @@ export function CreateProjectPanel({
 }) {
   const wizardSteps = ["Identity", "Org & placement", "Stack"];
   const [step, setStep] = useState(0);
-  const smallPreset = reservationForTier("small");
   const [form, setForm] = useState<CreateProjectForm>({
     ref: "",
     name: "",
@@ -380,18 +380,16 @@ export function CreateProjectPanel({
     stack_version: "latest",
     profile: "full",
     resource_tier: "small",
-    // Exact size always carries concrete numbers (prefilled from the tier
-    // preset); the user can edit any field to override that dimension.
-    cpu: smallPreset.cpu,
-    ram_mb: smallPreset.ram_mb,
-    disk_gb: smallPreset.disk_gb,
+    // Presets carry 0 (use the tier preset); only "custom" sets concrete numbers.
+    cpu: 0,
+    ram_mb: 0,
+    disk_gb: 0,
     enforce_limits: false,
     services: servicesForProfile("full"),
   });
   useEffect(() => {
     if (!defaults) return;
     const tier = defaults.resource_tier === "medium" || defaults.resource_tier === "large" ? defaults.resource_tier : "small";
-    const preset = reservationForTier(tier);
     const profile: StackProfile = defaults.profile === "essential" || defaults.profile === "orioledb" ? defaults.profile : "full";
     setForm((current) => ({
       ...current,
@@ -399,9 +397,9 @@ export function CreateProjectPanel({
       stack_version: defaults.stack_version || current.stack_version,
       profile,
       resource_tier: tier,
-      cpu: preset.cpu,
-      ram_mb: preset.ram_mb,
-      disk_gb: preset.disk_gb,
+      cpu: 0,
+      ram_mb: 0,
+      disk_gb: 0,
       services: servicesForProfile(profile),
     }));
   }, [defaults]);
@@ -426,17 +424,17 @@ export function CreateProjectPanel({
     });
   }
 
-  // Picking a tier preset snaps the exact-size inputs to that preset, so the
-  // numbers always reflect the chosen preset until the user edits them.
+  // Presets clear the exact-size overrides (0 = use the preset). Switching to
+  // "custom" reveals the editor, prefilled with the size you were on so it
+  // starts from a sensible point.
   function chooseTier(tier: CreateProjectForm["resource_tier"]) {
-    const preset = reservationForTier(tier);
-    setForm((current) => ({
-      ...current,
-      resource_tier: tier,
-      cpu: preset.cpu,
-      ram_mb: preset.ram_mb,
-      disk_gb: preset.disk_gb,
-    }));
+    setForm((current) => {
+      if (tier === "custom") {
+        const base = effectiveReservation(current);
+        return { ...current, resource_tier: "custom", cpu: base.cpu, ram_mb: base.ram_mb, disk_gb: base.disk_gb };
+      }
+      return { ...current, resource_tier: tier, cpu: 0, ram_mb: 0, disk_gb: 0 };
+    });
   }
 
   function submit(event: FormEvent) {
@@ -461,9 +459,10 @@ export function CreateProjectPanel({
   const identityValid = form.name.trim().length > 0 && form.ref.trim().length > 0 && form.domain.trim().length > 0;
   const placementValid = orgId.length > 0 && !hostCapacityProblem;
   const sizingValid =
-    form.cpu >= 1 && form.cpu <= SIZING_BOUNDS.maxCpu &&
-    form.ram_mb >= SIZING_BOUNDS.minRamMB && form.ram_mb <= SIZING_BOUNDS.maxRamMB &&
-    form.disk_gb >= 1 && form.disk_gb <= SIZING_BOUNDS.maxDiskGB;
+    form.resource_tier !== "custom" ||
+    (form.cpu >= 1 && form.cpu <= SIZING_BOUNDS.maxCpu &&
+      form.ram_mb >= SIZING_BOUNDS.minRamMB && form.ram_mb <= SIZING_BOUNDS.maxRamMB &&
+      form.disk_gb >= 1 && form.disk_gb <= SIZING_BOUNDS.maxDiskGB);
   // Every step now validates before Next, so users can't skip past required input.
   const currentValid =
     step === 0 ? identityValid :
@@ -600,36 +599,42 @@ export function CreateProjectPanel({
                 ) : null}
               </div>
               <div>
-                <p className="label">Resource tier preset</p>
-                <p className="mt-1 text-xs text-faint">Pick a preset to set sensible numbers, then fine-tune the exact size below.</p>
-                <div className="mt-2 grid grid-cols-3 gap-2 max-lg:grid-cols-1">
+                <p className="label">Size</p>
+                <p className="mt-1 text-xs text-faint">Pick a preset, or choose Custom to set an exact CPU / RAM / disk size.</p>
+                <div className="mt-2 grid grid-cols-4 gap-2 max-lg:grid-cols-2">
                   {(["small", "medium", "large"] as const).map((resourceTier) => {
                     const tierReservation = reservationForTier(resourceTier);
                     return (
                       <button className={form.resource_tier === resourceTier ? "choice active" : "choice"} key={resourceTier} onClick={() => chooseTier(resourceTier)} type="button">
                         <span className="text-sm font-medium capitalize">{resourceTier}</span>
-                        <span className="text-xs text-faint">{tierReservation.cpu} vCPU · {formatBytes(tierReservation.ram_mb * 1024 * 1024)} · {tierReservation.disk_gb} GB disk</span>
+                        <span className="text-xs text-faint">{tierReservation.cpu} vCPU · {formatBytes(tierReservation.ram_mb * 1024 * 1024)} · {tierReservation.disk_gb} GB</span>
                       </button>
                     );
                   })}
+                  <button className={form.resource_tier === "custom" ? "choice active" : "choice"} onClick={() => chooseTier("custom")} type="button">
+                    <span className="text-sm font-medium">Custom</span>
+                    <span className="text-xs text-faint">set CPU / RAM / disk</span>
+                  </button>
                 </div>
               </div>
-              <div className="rounded-md border border-border bg-bg p-3">
-                <p className="label">Exact size</p>
-                <p className="mt-1 text-xs leading-5 text-muted">Prefilled from the {form.resource_tier} preset — edit any field to set an exact CPU / RAM / disk size for this project.</p>
-                <div className="mt-3 grid grid-cols-3 gap-2 max-md:grid-cols-1">
-                  <Field label="CPU (cores)" hint={`1 – ${SIZING_BOUNDS.maxCpu}`}>
-                    <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxCpu} aria-label="CPU cores" value={form.cpu} onChange={(event) => setForm({ ...form, cpu: Number(event.target.value) })} />
-                  </Field>
-                  <Field label="RAM (MB)" hint={`${SIZING_BOUNDS.minRamMB} – ${SIZING_BOUNDS.maxRamMB}`}>
-                    <Input className="font-mono" type="number" min={SIZING_BOUNDS.minRamMB} max={SIZING_BOUNDS.maxRamMB} step={256} aria-label="RAM in MB" value={form.ram_mb} onChange={(event) => setForm({ ...form, ram_mb: Number(event.target.value) })} />
-                  </Field>
-                  <Field label="Disk (GB)" hint={`1 – ${SIZING_BOUNDS.maxDiskGB}`}>
-                    <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxDiskGB} aria-label="Disk in GB" value={form.disk_gb} onChange={(event) => setForm({ ...form, disk_gb: Number(event.target.value) })} />
-                  </Field>
+              {form.resource_tier === "custom" ? (
+                <div className="rounded-md border border-border bg-bg p-3">
+                  <p className="label">Custom size</p>
+                  <p className="mt-1 text-xs leading-5 text-muted">Exact CPU / RAM / disk reserved for this project.</p>
+                  <div className="mt-3 grid grid-cols-3 gap-2 max-md:grid-cols-1">
+                    <Field label="CPU (cores)" hint={`1 – ${SIZING_BOUNDS.maxCpu}`}>
+                      <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxCpu} aria-label="CPU cores" value={form.cpu} onChange={(event) => setForm({ ...form, cpu: Number(event.target.value) })} />
+                    </Field>
+                    <Field label="RAM (MB)" hint={`${SIZING_BOUNDS.minRamMB} – ${SIZING_BOUNDS.maxRamMB}`}>
+                      <Input className="font-mono" type="number" min={SIZING_BOUNDS.minRamMB} max={SIZING_BOUNDS.maxRamMB} step={256} aria-label="RAM in MB" value={form.ram_mb} onChange={(event) => setForm({ ...form, ram_mb: Number(event.target.value) })} />
+                    </Field>
+                    <Field label="Disk (GB)" hint={`1 – ${SIZING_BOUNDS.maxDiskGB}`}>
+                      <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxDiskGB} aria-label="Disk in GB" value={form.disk_gb} onChange={(event) => setForm({ ...form, disk_gb: Number(event.target.value) })} />
+                    </Field>
+                  </div>
+                  {!sizingValid ? <p className="mt-2 text-xs text-danger">Sizing is out of range. CPU 1–{SIZING_BOUNDS.maxCpu} cores, RAM {SIZING_BOUNDS.minRamMB}–{SIZING_BOUNDS.maxRamMB} MB, disk 1–{SIZING_BOUNDS.maxDiskGB} GB.</p> : null}
                 </div>
-                {!sizingValid ? <p className="mt-2 text-xs text-danger">Sizing is out of range. CPU 1–{SIZING_BOUNDS.maxCpu} cores, RAM {SIZING_BOUNDS.minRamMB}–{SIZING_BOUNDS.maxRamMB} MB, disk 1–{SIZING_BOUNDS.maxDiskGB} GB.</p> : null}
-              </div>
+              ) : null}
               <div className="rounded-md border border-border bg-bg p-3">
                 <label className="flex cursor-pointer items-start gap-3">
                   <input type="checkbox" className="mt-1" checked={form.enforce_limits} onChange={(event) => setForm({ ...form, enforce_limits: event.target.checked })} aria-label="Enforce runtime limits" />

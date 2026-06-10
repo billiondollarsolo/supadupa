@@ -66,6 +66,10 @@ const (
 	ResourceTierSmall  ResourceTier = "small"
 	ResourceTierMedium ResourceTier = "medium"
 	ResourceTierLarge  ResourceTier = "large"
+	// ResourceTierCustom denotes a project sized by explicit CPU/RAM/disk
+	// overrides rather than a preset. Its reservation comes entirely from the
+	// spec's exact values (falling back to the small preset if any are unset).
+	ResourceTierCustom ResourceTier = "custom"
 )
 
 type ServiceSpec struct {

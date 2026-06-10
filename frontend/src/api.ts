@@ -486,7 +486,7 @@ export type CreateProjectInput = {
   domain: string;
   stack_version: string;
   profile: "essential" | "full" | "orioledb";
-  resource_tier: "small" | "medium" | "large";
+  resource_tier: "small" | "medium" | "large" | "custom";
   // Optional exact-size overrides. 0/undefined means "use the tier preset".
   cpu?: number;
   ram_mb?: number;

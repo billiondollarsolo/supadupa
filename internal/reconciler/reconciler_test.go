@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"supadupa2026/internal/control"
 )
@@ -23,6 +24,11 @@ func TestReconcileUpdatesProjectStatus(t *testing.T) {
 		Domain: "supadupa.test",
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Hand the project off out of "provisioning" — the reconciler only acts on
+	// projects the create goroutine has already released.
+	if _, err := store.UpdateProjectStatus(ctx, project.Ref, control.ProjectStarting, "starting"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -173,6 +179,9 @@ func TestReconcileLogsProvisionerErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.UpdateProjectStatus(ctx, project.Ref, control.ProjectStarting, "starting"); err != nil {
+		t.Fatal(err)
+	}
 
 	err = New(store, fakeProvisioner{err: errors.New("compose file missing")}, nil).Reconcile(ctx)
 	if err != nil {
@@ -211,6 +220,9 @@ func TestReconcileReturnsStatusUpdateErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := base.UpdateProjectStatus(ctx, project.Ref, control.ProjectStarting, "starting"); err != nil {
+		t.Fatal(err)
+	}
 	store := failingStatusStore{Store: base, err: errors.New("checkpoint failed")}
 
 	err = New(store, fakeProvisioner{status: control.ProjectStatus{
@@ -230,13 +242,16 @@ func TestReconcileReturnsStatusUpdateErrorsAfterProvisionerError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = base.CreateProject(ctx, control.CreateProjectRequest{
+	project, err := base.CreateProject(ctx, control.CreateProjectRequest{
 		OrgID:  org.ID,
 		Ref:    "alpha",
 		Name:   "Alpha",
 		Domain: "supadupa.test",
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.UpdateProjectStatus(ctx, project.Ref, control.ProjectStarting, "starting"); err != nil {
 		t.Fatal(err)
 	}
 	store := failingStatusStore{Store: base, err: errors.New("checkpoint failed")}
@@ -290,6 +305,85 @@ func TestReconcilePreservesPausedProject(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("expected no reconcile audit event for unchanged paused state, got %#v", events)
+	}
+}
+
+func TestReconcileSkipsActiveProvisioning(t *testing.T) {
+	ctx := context.Background()
+	store := control.NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A freshly created project sits in "provisioning", owned by the create
+	// goroutine. The provisioner here reports an error (the runtime is only
+	// half-up), but the reconciler must not clobber the provisioning status.
+	project, err := store.CreateProject(ctx, control.CreateProjectRequest{
+		OrgID:  org.ID,
+		Ref:    "alpha",
+		Name:   "Alpha",
+		Domain: "supadupa.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = New(store, fakeProvisioner{err: errors.New("compose not up yet")}, nil).Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := store.GetProject(ctx, project.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != control.ProjectProvisioning {
+		t.Fatalf("expected project to remain provisioning, got %s", updated.Status)
+	}
+	events, err := store.ListAuditEvents(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no reconcile events for active provisioning, got %#v", events)
+	}
+}
+
+func TestReconcileTakesOverStaleProvisioning(t *testing.T) {
+	ctx := context.Background()
+	store := control.NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, control.CreateProjectRequest{
+		OrgID:  org.ID,
+		Ref:    "alpha",
+		Name:   "Alpha",
+		Domain: "supadupa.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pretend the create goroutine died and the project has been stuck in
+	// provisioning past the grace window; the reconciler should now converge it.
+	future := func() time.Time { return project.UpdatedAt.Add(provisionGracePeriod + time.Minute) }
+	err = New(store, fakeProvisioner{status: control.ProjectStatus{
+		Ref:     project.Ref,
+		Phase:   control.ProjectError,
+		Message: "compose project not found",
+	}}, nil).WithNow(future).Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := store.GetProject(ctx, project.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != control.ProjectError {
+		t.Fatalf("expected stale provisioning project to be recovered to error, got %s", updated.Status)
 	}
 }
 

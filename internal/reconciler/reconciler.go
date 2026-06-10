@@ -11,12 +11,24 @@ import (
 	"supadupa2026/internal/scheduler"
 )
 
+// provisionGracePeriod is how long the reconciler leaves a project in the
+// "provisioning" phase untouched. While a project is provisioning it is owned by
+// the in-flight create goroutine (api.provisionNewProject), which runs compose up
+// plus the edge-router attach and writes the terminal healthy/error status itself
+// under a 20-minute ceiling. This grace is that ceiling plus margin: once it
+// elapses and the project is still provisioning, the goroutine is gone (e.g. the
+// control plane restarted mid-provision) and the reconciler takes over to recover
+// it. See the skip in Reconcile.
+const provisionGracePeriod = 25 * time.Minute
+
 type Reconciler struct {
-	store       control.Store
-	provisioner control.Provisioner
-	interval    time.Duration
-	logger      *slog.Logger
-	runner      *scheduler.PeriodicRunner
+	store          control.Store
+	provisioner    control.Provisioner
+	interval       time.Duration
+	logger         *slog.Logger
+	runner         *scheduler.PeriodicRunner
+	now            func() time.Time
+	provisionGrace time.Duration
 }
 
 func New(store control.Store, provisioner control.Provisioner, logger *slog.Logger) *Reconciler {
@@ -24,12 +36,23 @@ func New(store control.Store, provisioner control.Provisioner, logger *slog.Logg
 		logger = slog.Default()
 	}
 	return &Reconciler{
-		store:       store,
-		provisioner: provisioner,
-		interval:    30 * time.Second,
-		logger:      logger,
-		runner:      scheduler.NewPeriodicRunner("reconciler", logger),
+		store:          store,
+		provisioner:    provisioner,
+		interval:       30 * time.Second,
+		logger:         logger,
+		runner:         scheduler.NewPeriodicRunner("reconciler", logger),
+		now:            time.Now,
+		provisionGrace: provisionGracePeriod,
 	}
+}
+
+// WithNow overrides the reconciler's clock. Used by tests to age a project's
+// provisioning window deterministically.
+func (r *Reconciler) WithNow(now func() time.Time) *Reconciler {
+	if now != nil {
+		r.now = now
+	}
+	return r
 }
 
 func (r *Reconciler) WithInterval(interval time.Duration) *Reconciler {
@@ -58,9 +81,27 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	now := r.now
+	if now == nil {
+		now = time.Now
+	}
+	grace := r.provisionGrace
+	if grace <= 0 {
+		grace = provisionGracePeriod
+	}
 	var reconcileErr error
 	for _, project := range projects {
 		if project.Status == control.ProjectDestroying {
+			continue
+		}
+		// A freshly-created project in the "provisioning" phase is owned by the
+		// in-flight create goroutine, which writes its terminal status itself. If
+		// we polled the half-up runtime here we would see missing containers and
+		// overwrite "provisioning" with a spurious "error" that then flaps back to
+		// healthy once the goroutine finishes. Leave it alone until the goroutine's
+		// ceiling has well and truly elapsed (provisionGracePeriod), after which a
+		// still-provisioning project means the goroutine died and we take over.
+		if project.Status == control.ProjectProvisioning && now().Sub(project.UpdatedAt) < grace {
 			continue
 		}
 		status, err := r.provisioner.Status(ctx, project.Ref)

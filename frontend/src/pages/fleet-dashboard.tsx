@@ -241,16 +241,23 @@ function FleetTrafficPanel() {
   const pct = (n?: number) => (n !== undefined ? `${(n * 100).toFixed(1)}%` : "—");
   const conns = d?.entrypoint_connections ?? {};
   const dbConns = (conns.postgres ?? 0) + (conns.pooler ?? 0);
+  const certDays = d?.cert_expires_at ? Math.round((new Date(d.cert_expires_at).getTime() - Date.now()) / 86_400_000) : undefined;
   return (
-    <AppPanel eyebrow="Traffic" title="Edge traffic" description="Live request flow across all projects, measured at the Traefik edge. DB/pooler shown as open TCP connections.">
+    <AppPanel
+      eyebrow="Traffic"
+      title="Edge traffic"
+      description="Live request flow across all projects, measured at the Traefik edge. DB/pooler shown as open TCP connections."
+      actions={certDays !== undefined ? <StatusPill tone={certDays < 14 ? "danger" : certDays < 30 ? "warning" : "neutral"} label={`TLS ${certDays}d`} /> : undefined}
+    >
       {d && !d.enabled ? (
         <p className="mt-3 text-sm text-muted">Edge traffic metrics are not enabled on this deployment.</p>
       ) : (
         <>
-          <div className="mt-4 grid grid-cols-4 gap-2 max-sm:grid-cols-2">
+          <div className="mt-4 grid grid-cols-5 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
             <MetricCard label="Requests/sec" value={rps(t?.requests_per_sec)} detail="all HTTP routes" />
             <MetricCard label="Error rate" value={pct(t?.error_rate)} tone={t && t.error_rate > 0.05 ? "danger" : t && t.error_rate > 0.01 ? "warning" : "default"} detail="4xx + 5xx" />
-            <MetricCard label="Avg latency" value={t ? `${t.avg_latency_ms.toFixed(0)} ms` : "—"} detail="this window" />
+            <MetricCard label="Latency p95" value={t ? `${t.p95_ms.toFixed(0)} ms` : "—"} detail={`avg ${t ? t.avg_latency_ms.toFixed(0) : "—"} ms`} />
+            <MetricCard label="Throughput" value={t ? `${formatBytes(t.bytes_out_per_sec)}/s` : "—"} detail={`out · ${t ? formatBytes(t.bytes_in_per_sec) : "—"}/s in`} />
             <MetricCard label="DB connections" value={String(Math.round(dbConns))} detail="postgres + pooler (open)" />
           </div>
           {d?.projects?.length ? (

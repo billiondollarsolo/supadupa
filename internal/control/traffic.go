@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,16 +25,20 @@ type TrafficCollector struct {
 }
 
 type routerStat struct {
-	byCode   map[string]float64
-	durSum   float64
-	durCount float64
+	byCode    map[string]float64
+	durSum    float64
+	durCount  float64
+	buckets   map[string]float64 // le label -> cumulative count (for percentiles)
+	reqBytes  float64
+	respBytes float64
 }
 
 type trafficSnapshot struct {
-	at      time.Time
-	routers map[string]*routerStat
-	epConns map[string]float64
-	epReqs  map[string]float64
+	at          time.Time
+	routers     map[string]*routerStat
+	epConns     map[string]float64
+	epReqs      map[string]float64
+	certNotAfter float64 // soonest cert expiry (unix seconds), 0 if none
 }
 
 func NewTrafficCollector(url string) *TrafficCollector {
@@ -84,10 +90,26 @@ func (c *TrafficCollector) Scrape(ctx context.Context, now time.Time) error {
 			if r := snap.router(labels["router"]); r != nil {
 				r.durCount += value
 			}
+		case "traefik_router_request_duration_seconds_bucket":
+			if r := snap.router(labels["router"]); r != nil {
+				r.buckets[labels["le"]] += value
+			}
+		case "traefik_router_requests_bytes_total":
+			if r := snap.router(labels["router"]); r != nil {
+				r.reqBytes += value
+			}
+		case "traefik_router_responses_bytes_total":
+			if r := snap.router(labels["router"]); r != nil {
+				r.respBytes += value
+			}
 		case "traefik_open_connections":
 			snap.epConns[labels["entrypoint"]] += value
 		case "traefik_entrypoint_requests_total":
 			snap.epReqs[labels["entrypoint"]] += value
+		case "traefik_tls_certs_not_after":
+			if value > 0 && (snap.certNotAfter == 0 || value < snap.certNotAfter) {
+				snap.certNotAfter = value
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -140,7 +162,7 @@ func (s *trafficSnapshot) router(label string) *routerStat {
 	}
 	r := s.routers[name]
 	if r == nil {
-		r = &routerStat{byCode: map[string]float64{}}
+		r = &routerStat{byCode: map[string]float64{}, buckets: map[string]float64{}}
 		s.routers[name] = r
 	}
 	return r
@@ -148,20 +170,73 @@ func (s *trafficSnapshot) router(label string) *routerStat {
 
 // RouterTraffic is the derived, window-rate view of one Traefik router.
 type RouterTraffic struct {
-	Router         string  `json:"router"`
-	RequestsTotal  float64 `json:"requests_total"`
-	RequestsPerSec float64 `json:"requests_per_sec"`
-	ErrorRate      float64 `json:"error_rate"`
-	AvgLatencyMs   float64 `json:"avg_latency_ms"`
+	Router          string  `json:"router"`
+	RequestsTotal   float64 `json:"requests_total"`
+	RequestsPerSec  float64 `json:"requests_per_sec"`
+	ErrorRate       float64 `json:"error_rate"`
+	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+	P50Ms           float64 `json:"p50_ms"`
+	P95Ms           float64 `json:"p95_ms"`
+	P99Ms           float64 `json:"p99_ms"`
+	BytesInPerSec   float64 `json:"bytes_in_per_sec"`
+	BytesOutPerSec  float64 `json:"bytes_out_per_sec"`
+	Status2xx       float64 `json:"status_2xx"`
+	Status3xx       float64 `json:"status_3xx"`
+	Status4xx       float64 `json:"status_4xx"`
+	Status5xx       float64 `json:"status_5xx"`
 }
 
 // TrafficReport is the collector's current computed state.
 type TrafficReport struct {
-	Enabled            bool                  `json:"enabled"`
-	LastScrape         *time.Time            `json:"last_scrape,omitempty"`
-	WindowSeconds      float64               `json:"window_seconds"`
-	Routers            []RouterTraffic       `json:"routers"`
-	EntrypointConns    map[string]float64    `json:"entrypoint_connections"`
+	Enabled         bool               `json:"enabled"`
+	LastScrape      *time.Time         `json:"last_scrape,omitempty"`
+	WindowSeconds   float64            `json:"window_seconds"`
+	Routers         []RouterTraffic    `json:"routers"`
+	EntrypointConns map[string]float64 `json:"entrypoint_connections"`
+	CertExpiresAt   *time.Time         `json:"cert_expires_at,omitempty"`
+}
+
+// percentileFromBuckets estimates a latency quantile (ms) from the per-window
+// delta of cumulative Prometheus histogram buckets (le -> count).
+func percentileFromBuckets(cur, prev map[string]float64, p float64) float64 {
+	type b struct {
+		le    float64
+		count float64
+	}
+	bs := make([]b, 0, len(cur))
+	for le, c := range cur {
+		f := math.Inf(1)
+		if le != "+Inf" {
+			if v, err := strconv.ParseFloat(le, 64); err == nil {
+				f = v
+			}
+		}
+		bs = append(bs, b{le: f, count: c - prev[le]})
+	}
+	if len(bs) == 0 {
+		return 0
+	}
+	sort.Slice(bs, func(i, j int) bool { return bs[i].le < bs[j].le })
+	total := bs[len(bs)-1].count // cumulative +Inf bucket = all observations
+	if total <= 0 {
+		return 0
+	}
+	target := p * total
+	for _, e := range bs {
+		if e.count >= target {
+			if math.IsInf(e.le, 1) {
+				// Fell into the overflow bucket; use the largest finite boundary.
+				for i := len(bs) - 1; i >= 0; i-- {
+					if !math.IsInf(bs[i].le, 1) {
+						return bs[i].le * 1000
+					}
+				}
+				return 0
+			}
+			return e.le * 1000
+		}
+	}
+	return 0
 }
 
 func sumCodes(byCode map[string]float64) (total, errors float64) {
@@ -189,6 +264,10 @@ func (c *TrafficCollector) Report() TrafficReport {
 	}
 	at := cur.at
 	rep.LastScrape = &at
+	if cur.certNotAfter > 0 {
+		exp := time.Unix(int64(cur.certNotAfter), 0).UTC()
+		rep.CertExpiresAt = &exp
+	}
 	for ep, v := range cur.epConns {
 		rep.EntrypointConns[ep] = v
 	}
@@ -200,12 +279,16 @@ func (c *TrafficCollector) Report() TrafficReport {
 	for name, r := range cur.routers {
 		total, _ := sumCodes(r.byCode)
 		rt := RouterTraffic{Router: name, RequestsTotal: total}
+		rt.Status2xx, rt.Status3xx, rt.Status4xx, rt.Status5xx = classifyCodes(r.byCode)
 		if prev != nil && dt > 0 {
 			p := prev.routers[name]
-			var pTotal, pErr, pSum, pCount float64
+			var pTotal, pErr, pSum, pCount, pReqBytes, pRespBytes float64
+			var pBuckets map[string]float64
 			if p != nil {
 				pTotal, pErr = sumCodes(p.byCode)
 				pSum, pCount = p.durSum, p.durCount
+				pReqBytes, pRespBytes = p.reqBytes, p.respBytes
+				pBuckets = p.buckets
 			}
 			cTotal, cErr := sumCodes(r.byCode)
 			dReq := cTotal - pTotal
@@ -215,9 +298,33 @@ func (c *TrafficCollector) Report() TrafficReport {
 				if dCount := r.durCount - pCount; dCount > 0 {
 					rt.AvgLatencyMs = (r.durSum - pSum) / dCount * 1000
 				}
+				rt.P50Ms = percentileFromBuckets(r.buckets, pBuckets, 0.50)
+				rt.P95Ms = percentileFromBuckets(r.buckets, pBuckets, 0.95)
+				rt.P99Ms = percentileFromBuckets(r.buckets, pBuckets, 0.99)
 			}
+			rt.BytesInPerSec = (r.reqBytes - pReqBytes) / dt
+			rt.BytesOutPerSec = (r.respBytes - pRespBytes) / dt
 		}
 		rep.Routers = append(rep.Routers, rt)
 	}
 	return rep
+}
+
+func classifyCodes(byCode map[string]float64) (s2, s3, s4, s5 float64) {
+	for code, v := range byCode {
+		if code == "" {
+			continue
+		}
+		switch code[0] {
+		case '2':
+			s2 += v
+		case '3':
+			s3 += v
+		case '4':
+			s4 += v
+		case '5':
+			s5 += v
+		}
+	}
+	return
 }

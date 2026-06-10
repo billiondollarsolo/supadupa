@@ -476,14 +476,24 @@ export type Project = {
   updated_at: string;
 };
 
+export type TopTable = { name: string; size_bytes: number; rows: number };
+export type BucketStat = { name: string; public: boolean; objects: number; bytes: number };
+
 export type ProjectStats = {
   available: boolean;
   db_size_bytes: number;
   table_count: number;
-  connections: number;
+  connections: { total: number; active: number; idle: number; idle_in_txn: number; max: number };
+  cache_hit_ratio: number;
+  txns_per_sec: number;
+  tuples_written_per_sec: number;
+  deadlocks: number;
+  temp_bytes: number;
+  top_tables: TopTable[];
   buckets: number;
   objects: number;
   storage_bytes: number;
+  bucket_breakdown: BucketStat[];
 };
 
 export type TrafficTotals = {
@@ -491,9 +501,16 @@ export type TrafficTotals = {
   requests_per_sec: number;
   error_rate: number;
   avg_latency_ms: number;
+  p95_ms: number;
+  bytes_in_per_sec: number;
+  bytes_out_per_sec: number;
+  status_2xx: number;
+  status_3xx: number;
+  status_4xx: number;
+  status_5xx: number;
 };
 
-export type RouteTraffic = TrafficTotals & { route: string; router: string };
+export type RouteTraffic = TrafficTotals & { route: string; router: string; p50_ms: number; p99_ms: number };
 
 export type ProjectTraffic = {
   enabled: boolean;
@@ -501,6 +518,7 @@ export type ProjectTraffic = {
   window_seconds: number;
   routes: RouteTraffic[];
   totals: TrafficTotals;
+  cert_expires_at?: string;
 };
 
 export type FleetTraffic = {
@@ -510,6 +528,7 @@ export type FleetTraffic = {
   projects: (TrafficTotals & { ref: string })[];
   entrypoint_connections: Record<string, number>;
   totals: TrafficTotals;
+  cert_expires_at?: string;
 };
 
 export type ProjectServices = {

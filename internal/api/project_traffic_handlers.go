@@ -21,6 +21,13 @@ type trafficTotals struct {
 	RequestsPerSec float64 `json:"requests_per_sec"`
 	ErrorRate      float64 `json:"error_rate"`
 	AvgLatencyMs   float64 `json:"avg_latency_ms"`
+	P95Ms          float64 `json:"p95_ms"`
+	BytesInPerSec  float64 `json:"bytes_in_per_sec"`
+	BytesOutPerSec float64 `json:"bytes_out_per_sec"`
+	Status2xx      float64 `json:"status_2xx"`
+	Status3xx      float64 `json:"status_3xx"`
+	Status4xx      float64 `json:"status_4xx"`
+	Status5xx      float64 `json:"status_5xx"`
 }
 
 type projectTrafficResponse struct {
@@ -29,6 +36,7 @@ type projectTrafficResponse struct {
 	WindowSeconds float64        `json:"window_seconds"`
 	Routes        []routeTraffic `json:"routes"`
 	Totals        trafficTotals  `json:"totals"`
+	CertExpiresAt *time.Time     `json:"cert_expires_at,omitempty"`
 }
 
 type projectTrafficSummary struct {
@@ -43,6 +51,7 @@ type fleetTrafficResponse struct {
 	Projects        []projectTrafficSummary `json:"projects"`
 	EntrypointConns map[string]float64      `json:"entrypoint_connections"`
 	Totals          trafficTotals           `json:"totals"`
+	CertExpiresAt   *time.Time              `json:"cert_expires_at,omitempty"`
 }
 
 // splitRouterRef maps a Traefik router name ("<ref>-<route>" or "<ref>") to its
@@ -75,9 +84,19 @@ func accumulate(t *trafficTotals, rt control.RouterTraffic) {
 	prevRate := t.RequestsPerSec
 	t.RequestsTotal += rt.RequestsTotal
 	t.RequestsPerSec += rt.RequestsPerSec
+	t.BytesInPerSec += rt.BytesInPerSec
+	t.BytesOutPerSec += rt.BytesOutPerSec
+	t.Status2xx += rt.Status2xx
+	t.Status3xx += rt.Status3xx
+	t.Status4xx += rt.Status4xx
+	t.Status5xx += rt.Status5xx
 	if t.RequestsPerSec > 0 {
 		t.ErrorRate = (t.ErrorRate*prevRate + rt.ErrorRate*rt.RequestsPerSec) / t.RequestsPerSec
 		t.AvgLatencyMs = (t.AvgLatencyMs*prevRate + rt.AvgLatencyMs*rt.RequestsPerSec) / t.RequestsPerSec
+		// p95 isn't additive; surface the worst route's p95 as the project's.
+		if rt.P95Ms > t.P95Ms {
+			t.P95Ms = rt.P95Ms
+		}
 	}
 }
 
@@ -92,6 +111,7 @@ func getProjectTrafficHandler(store control.Store, traffic *control.TrafficColle
 			rep := traffic.Report()
 			resp.LastScrape = rep.LastScrape
 			resp.WindowSeconds = rep.WindowSeconds
+			resp.CertExpiresAt = rep.CertExpiresAt
 			refs := []string{project.Ref}
 			for _, rt := range rep.Routers {
 				if ref, route, ok := splitRouterRef(rt.Router, refs); ok && ref == project.Ref {
@@ -118,6 +138,7 @@ func getFleetTrafficHandler(store control.Store, traffic *control.TrafficCollect
 			resp.LastScrape = rep.LastScrape
 			resp.WindowSeconds = rep.WindowSeconds
 			resp.EntrypointConns = rep.EntrypointConns
+			resp.CertExpiresAt = rep.CertExpiresAt
 			refs := refsByLengthDesc(projects)
 			perProject := map[string]*trafficTotals{}
 			for _, rt := range rep.Routers {

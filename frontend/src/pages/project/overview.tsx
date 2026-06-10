@@ -54,7 +54,8 @@ export function ProjectOverviewPage() {
       <NextStepsStrip project={activeProject} metrics={projectMetrics.data} onOpenTab={openTab} />
       <ObservedMetricsPanel history={telemetryHistory} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
       <OperationalSurfacePanel metrics={projectMetrics.data} loading={projectMetrics.isLoading} onOpenTab={openTab} />
-      <UsageStatsPanel projectRef={activeProject?.ref} status={activeProject?.status} />
+      <DatabasePanel projectRef={activeProject?.ref} status={activeProject?.status} />
+      <StoragePanel projectRef={activeProject?.ref} status={activeProject?.status} />
       <TrafficPanel projectRef={activeProject?.ref} />
       <ConnectionBasicsPanel payload={connect.data} loading={connect.isLoading} onOpenConnect={() => openTab("connect")} project={activeProject} />
       <RuntimeStatusPanel project={activeProject} />
@@ -177,26 +178,74 @@ function ConnectionBasicsPanel({ loading, onOpenConnect, payload, project }: { p
   );
 }
 
-function UsageStatsPanel({ projectRef, status }: { projectRef?: string; status?: string }) {
-  const stats = useQuery({
+function useProjectStats(projectRef?: string, status?: string) {
+  return useQuery({
     queryKey: ["project-stats", projectRef],
     queryFn: () => getProjectStats(projectRef as string),
     enabled: Boolean(projectRef) && status !== "paused",
     refetchInterval: 30_000,
   });
+}
+
+const num = (n?: number, ready = true) => (ready && n !== undefined ? Math.round(n).toLocaleString() : "—");
+const size = (n?: number, ready = true) => (ready && n !== undefined ? formatBytes(n) : "—");
+const rate = (n?: number, ready = true) => (ready && n !== undefined ? `${n.toFixed(n < 10 ? 1 : 0)}/s` : "—");
+
+function DatabasePanel({ projectRef, status }: { projectRef?: string; status?: string }) {
+  const stats = useProjectStats(projectRef, status);
   const d = stats.data;
   const ready = Boolean(d?.available);
-  const num = (n?: number) => (ready && n !== undefined ? n.toLocaleString() : "—");
-  const size = (n?: number) => (ready && n !== undefined ? formatBytes(n) : "—");
+  const c = d?.connections;
+  const connPct = c && c.max > 0 ? c.total / c.max : 0;
   return (
-    <AppPanel eyebrow="Usage" title="Database & storage" description="Live usage queried from this project's database and storage service.">
-      <div className="mt-4 grid grid-cols-3 gap-2 max-sm:grid-cols-1">
-        <MetricCard label="Database size" value={size(d?.db_size_bytes)} detail={`${num(d?.table_count)} public tables`} />
-        <MetricCard label="DB connections" value={num(d?.connections)} detail="active sessions" />
-        <MetricCard label="Storage used" value={size(d?.storage_bytes)} detail={`${num(d?.buckets)} buckets · ${num(d?.objects)} files`} />
+    <AppPanel eyebrow="Database" title="Postgres" description="Live size, connections, throughput, and the largest tables, queried from the project database.">
+      <div className="mt-4 grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
+        <MetricCard label="Database size" value={size(d?.db_size_bytes, ready)} detail={`${num(d?.table_count, ready)} public tables`} />
+        <MetricCard label="Connections" value={c ? `${c.total} / ${c.max}` : "—"} tone={connPct > 0.85 ? "danger" : connPct > 0.6 ? "warning" : "default"} detail={c ? `${c.active} active · ${c.idle} idle${c.idle_in_txn ? ` · ${c.idle_in_txn} idle-txn` : ""}` : "active / max"} />
+        <MetricCard label="Cache hit" value={ready && d ? `${(d.cache_hit_ratio * 100).toFixed(1)}%` : "—"} tone={ready && d && d.cache_hit_ratio < 0.9 ? "warning" : "default"} detail="lifetime buffer hits" />
+        <MetricCard label="Transactions" value={rate(d?.txns_per_sec, ready)} detail={`${rate(d?.tuples_written_per_sec, ready)} rows written`} />
       </div>
-      {stats.isLoading ? <p className="mt-3 text-xs text-muted">Probing project database…</p> : null}
+      {d?.top_tables?.length ? (
+        <div className="mt-4 grid gap-1">
+          <div className="flex items-center justify-between"><p className="label">Largest tables</p>{d.deadlocks > 0 ? <span className="text-xs text-warning">{d.deadlocks} deadlocks</span> : null}</div>
+          {d.top_tables.map((t) => (
+            <div className="usage-row" key={t.name}>
+              <p className="truncate font-mono text-sm">{t.name}</p>
+              <p className="text-right text-xs text-muted">{size(t.size_bytes)} · {num(t.rows)} rows</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {stats.isLoading && !d ? <p className="mt-3 text-xs text-muted">Probing project database…</p> : null}
       {d && !d.available ? <p className="mt-3 text-xs text-faint">Live stats unavailable — the project may be paused or its database unreachable.</p> : null}
+    </AppPanel>
+  );
+}
+
+function StoragePanel({ projectRef, status }: { projectRef?: string; status?: string }) {
+  const stats = useProjectStats(projectRef, status);
+  const d = stats.data;
+  const ready = Boolean(d?.available);
+  return (
+    <AppPanel eyebrow="Storage" title="Object storage" description="S3-compatible storage usage, broken down per bucket.">
+      <div className="mt-4 grid grid-cols-3 gap-2 max-sm:grid-cols-1">
+        <MetricCard label="Storage used" value={size(d?.storage_bytes, ready)} detail="across all buckets" />
+        <MetricCard label="Files" value={num(d?.objects, ready)} detail="objects stored" />
+        <MetricCard label="Buckets" value={num(d?.buckets, ready)} detail="storage buckets" />
+      </div>
+      {d?.bucket_breakdown?.length ? (
+        <div className="mt-4 grid gap-1">
+          <p className="label">Per bucket</p>
+          {d.bucket_breakdown.map((b) => (
+            <div className="usage-row" key={b.name}>
+              <p className="flex min-w-0 items-center gap-2 truncate text-sm font-medium">{b.name}<Badge variant="muted">{b.public ? "public" : "private"}</Badge></p>
+              <p className="text-right text-xs text-muted">{size(b.bytes)} · {num(b.objects)} files</p>
+            </div>
+          ))}
+        </div>
+      ) : ready ? (
+        <p className="mt-3 text-xs text-faint">No buckets created yet.</p>
+      ) : null}
     </AppPanel>
   );
 }
@@ -213,25 +262,40 @@ function TrafficPanel({ projectRef }: { projectRef?: string }) {
   const rps = (n?: number) => (n !== undefined ? `${n.toFixed(n < 10 ? 2 : 0)}/s` : "—");
   const pct = (n?: number) => (n !== undefined ? `${(n * 100).toFixed(1)}%` : "—");
   const ms = (n?: number) => (n !== undefined ? `${n.toFixed(0)} ms` : "—");
+  const bps = (n?: number) => (n !== undefined ? `${formatBytes(n)}/s` : "—");
+  const certDays = d?.cert_expires_at ? Math.round((new Date(d.cert_expires_at).getTime() - Date.now()) / 86_400_000) : undefined;
   return (
-    <AppPanel eyebrow="Traffic" title="Edge traffic (Traefik)" description="Live request rate, error rate, and latency across this project's public routes.">
+    <AppPanel
+      eyebrow="Traffic"
+      title="Edge traffic (Traefik)"
+      description="Live request rate, latency percentiles, throughput, and status mix across this project's public routes."
+      actions={certDays !== undefined ? <StatusPill tone={certDays < 14 ? "danger" : certDays < 30 ? "warning" : "neutral"} label={`TLS ${certDays}d`} /> : undefined}
+    >
       {d && !d.enabled ? (
         <p className="mt-3 text-sm text-muted">Edge traffic metrics are not enabled on this deployment.</p>
       ) : (
         <>
-          <div className="mt-4 grid grid-cols-4 gap-2 max-sm:grid-cols-2">
-            <MetricCard label="Requests/sec" value={rps(t?.requests_per_sec)} detail="across all routes" />
+          <div className="mt-4 grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
+            <MetricCard label="Requests/sec" value={rps(t?.requests_per_sec)} detail={`${t ? Math.round(t.requests_total).toLocaleString() : "—"} total`} />
             <MetricCard label="Error rate" value={pct(t?.error_rate)} tone={t && t.error_rate > 0.05 ? "danger" : t && t.error_rate > 0.01 ? "warning" : "default"} detail="4xx + 5xx" />
-            <MetricCard label="Avg latency" value={ms(t?.avg_latency_ms)} detail="this window" />
-            <MetricCard label="Requests total" value={t ? Math.round(t.requests_total).toLocaleString() : "—"} detail="since edge start" />
+            <MetricCard label="Latency p95 / p99" value={t ? `${ms(t.p95_ms)}` : "—"} detail={`avg ${ms(t?.avg_latency_ms)}`} />
+            <MetricCard label="Throughput" value={bps(t ? t.bytes_out_per_sec : undefined)} detail={`out · ${bps(t?.bytes_in_per_sec)} in`} />
           </div>
+          {t ? (
+            <div className="mt-3 flex flex-wrap gap-2 text-xs">
+              <span className="rounded-md border border-border px-2 py-1">2xx <span className="font-mono text-success">{Math.round(t.status_2xx).toLocaleString()}</span></span>
+              <span className="rounded-md border border-border px-2 py-1">3xx <span className="font-mono text-muted">{Math.round(t.status_3xx).toLocaleString()}</span></span>
+              <span className="rounded-md border border-border px-2 py-1">4xx <span className="font-mono text-warning">{Math.round(t.status_4xx).toLocaleString()}</span></span>
+              <span className="rounded-md border border-border px-2 py-1">5xx <span className="font-mono text-danger">{Math.round(t.status_5xx).toLocaleString()}</span></span>
+            </div>
+          ) : null}
           {d?.routes?.length ? (
             <div className="mt-4 grid gap-1">
-              <p className="label">Per route</p>
+              <p className="label">Per route (host)</p>
               {d.routes.map((rt) => (
                 <div className="usage-row" key={rt.route}>
                   <p className="truncate text-sm font-medium">{rt.route}</p>
-                  <p className="text-right text-xs text-muted">{rps(rt.requests_per_sec)} · {pct(rt.error_rate)} err · {ms(rt.avg_latency_ms)}</p>
+                  <p className="text-right text-xs text-muted">{rps(rt.requests_per_sec)} · {pct(rt.error_rate)} err · p95 {ms(rt.p95_ms)} · {bps(rt.bytes_out_per_sec)}</p>
                 </div>
               ))}
             </div>

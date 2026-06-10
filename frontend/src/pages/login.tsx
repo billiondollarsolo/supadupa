@@ -10,6 +10,7 @@ import {
 } from "../api";
 import { BrandLogo } from "../components/brand-logo";
 import { BrandWordmark } from "../components/brand-wordmark";
+import { BuiltByFooter } from "../components/built-by-footer";
 import { AppPanel } from "../components/app/app-panel";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -121,18 +122,15 @@ export function LoginPage() {
 
   return (
     <main className="grid min-h-screen place-items-center bg-bg p-6 text-text">
-      <AppPanel className="w-full max-w-[420px]">
-        <div className="section-head">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-border-strong bg-surface-2">
-              <BrandLogo className="h-5 w-5 text-accent" />
-            </div>
-            <div className="min-w-0">
-              <BrandWordmark />
-              <h1 className="text-[20px] font-medium">{mode === "bootstrap" ? "Create first admin" : "Admin login"}</h1>
-            </div>
-          </div>
+      <div className="flex w-full max-w-[420px] flex-col items-center">
+        <div className="mb-8 flex flex-col items-center gap-4 text-center">
+          <BrandLogo className="h-20 w-20" />
+          <BrandWordmark className="text-[34px]!" />
         </div>
+        <AppPanel className="w-full">
+          <div className="section-head">
+            <h1 className="text-[20px] font-medium">{mode === "bootstrap" ? "Create first admin" : "Login"}</h1>
+          </div>
         {connectivityMessage ? (
           <div className="mt-4 rounded-md border border-danger/40 px-3 py-2 text-sm text-danger">
             {connectivityMessage}
@@ -179,7 +177,9 @@ export function LoginPage() {
           {authError ? <p className="text-sm text-danger">{authError}</p> : null}
           {ssoError ? <p className="text-sm text-danger">{ssoError}</p> : null}
         </form>
-      </AppPanel>
+        </AppPanel>
+        <BuiltByFooter className="mt-8 text-center" />
+      </div>
     </main>
   );
 }

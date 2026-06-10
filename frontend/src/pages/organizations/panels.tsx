@@ -31,7 +31,7 @@ import { Input } from "../../components/ui/input";
 import { NativeSelect } from "../../components/ui/native-select";
 import { StatusPill } from "../../components/ui/status-pill";
 import { featureFlagGroups } from "../../lib/feature-flags";
-import { formatBytes, formatMoney, formatTime } from "../../lib/format";
+import { formatBytes, formatDateTime, formatMoney, formatTime } from "../../lib/format";
 import type { BillingInvoice, Membership, OrgFeatureFlags, OrgQuota, OrgUsage, Team, TeamMember, UsageSnapshot, User } from "../../types";
 
 // Single org-scope switcher reused on the overview and every subsection, so the
@@ -105,13 +105,16 @@ export function CreateOrgPanel({ onCreated }: { onCreated: (id: string) => void 
   );
 }
 
-export function MembersPanel({ orgId, members, users, loading }: { orgId: string; members: Membership[]; users: User[]; loading: boolean }) {
+export function MembersPanel({ orgId, members, users, loading, orgsEnabled }: { orgId: string; members: Membership[]; users: User[]; loading: boolean; orgsEnabled: boolean }) {
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("developer");
   const usersByEmail = useMemo(() => new Map(users.map((user) => [user.email.toLowerCase(), user])), [users]);
+  // Map each login to its role in the currently-selected org, so the platform-users
+  // list can show that the same person also holds an org grant (single-org mode).
+  const orgRoleByEmail = useMemo(() => new Map(members.map((member) => [member.email.toLowerCase(), member.role])), [members]);
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["org-members", orgId] });
     void queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -179,7 +182,7 @@ export function MembersPanel({ orgId, members, users, loading }: { orgId: string
         cell: ({ row }) => (
           <>
             <p className="cell-main">{row.original.email}</p>
-            <p className="cell-sub font-mono">{row.original.user_id}</p>
+            <p className="cell-sub">Joined {formatDateTime(row.original.created_at)}</p>
           </>
         ),
       },
@@ -187,13 +190,17 @@ export function MembersPanel({ orgId, members, users, loading }: { orgId: string
       {
         header: "Login",
         id: "login",
-        size: 130,
+        size: 150,
         cell: ({ row }) => {
           const backingUser = usersByEmail.get(row.original.email.toLowerCase());
-          return backingUser ? (
-            <StatusPill tone={backingUser.mfa_enabled ? "success" : "neutral"} label={backingUser.mfa_enabled ? "MFA on" : "No MFA"} />
-          ) : (
-            <StatusPill tone="warning" label="No login" />
+          if (!backingUser) {
+            return <StatusPill tone="warning" label="No login" />;
+          }
+          return (
+            <>
+              <StatusPill tone={backingUser.mfa_enabled ? "success" : "neutral"} label={backingUser.mfa_enabled ? "MFA on" : "No MFA"} />
+              <p className="cell-sub mt-1">{backingUser.last_login_at ? `Seen ${formatDateTime(backingUser.last_login_at)}` : "Never signed in"}</p>
+            </>
           );
         },
       },
@@ -216,12 +223,18 @@ export function MembersPanel({ orgId, members, users, loading }: { orgId: string
       {
         header: "User",
         accessorKey: "email",
-        cell: ({ row }) => (
-          <>
-            <p className="cell-main">{row.original.email}</p>
-            <p className="cell-sub font-mono">{row.original.id}</p>
-          </>
-        ),
+        cell: ({ row }) => {
+          const orgRole = orgRoleByEmail.get(row.original.email.toLowerCase());
+          return (
+            <>
+              <p className="cell-main flex items-center gap-2">
+                <span className="truncate">{row.original.email}</span>
+                {!orgsEnabled && orgRole ? <Badge variant="muted">org {orgRole}</Badge> : null}
+              </p>
+              <p className="cell-sub">Joined {formatDateTime(row.original.created_at)}</p>
+            </>
+          );
+        },
       },
       {
         header: "Role",
@@ -230,6 +243,17 @@ export function MembersPanel({ orgId, members, users, loading }: { orgId: string
         cell: ({ row }) => <StatusPill tone={row.original.role === "admin" ? "success" : "info"} label={row.original.role === "admin" ? "global admin" : row.original.role} />,
       },
       { header: "MFA", id: "mfa", size: 110, cell: ({ row }) => <StatusPill tone={row.original.mfa_enabled ? "success" : "neutral"} label={row.original.mfa_enabled ? "MFA on" : "No MFA"} /> },
+      {
+        header: "Last login",
+        id: "last_login",
+        accessorKey: "last_login_at",
+        size: 150,
+        cell: ({ row }) => (
+          <span className={row.original.last_login_at ? "text-sm text-text" : "text-sm text-faint"}>
+            {row.original.last_login_at ? formatDateTime(row.original.last_login_at) : "Never"}
+          </span>
+        ),
+      },
       {
         header: "",
         id: "actions",
@@ -246,13 +270,14 @@ export function MembersPanel({ orgId, members, users, loading }: { orgId: string
         ),
       },
     ],
-    [],
+    [orgRoleByEmail, orgsEnabled],
   );
 
   return (
     <AppPanel
       eyebrow="Members"
       title="Users & access"
+      description="Platform users are login accounts for the whole platform. Organization access is who holds a role in this org — the same person can appear in both."
       actions={
         <Button size="sm" disabled={!orgId} onClick={() => setAddOpen(true)} type="button">
           <Plus size={14} />
@@ -263,14 +288,20 @@ export function MembersPanel({ orgId, members, users, loading }: { orgId: string
       <div className="mt-4 grid gap-5">
         <section className="grid gap-2">
           <div className="flex items-center justify-between gap-3">
-            <p className="label">Organization access</p>
+            <div className="min-w-0">
+              <p className="label">Organization access</p>
+              <p className="text-xs text-faint">Who has a role in this org</p>
+            </div>
             <Badge variant="muted">{members.length}</Badge>
           </div>
           <DataTable columns={memberColumns} data={members} emptyText={loading ? "Loading members..." : "No members assigned yet. Use “Add user” to grant access."} minWidth={560} sortable />
         </section>
         <section className="grid gap-2">
           <div className="flex items-center justify-between gap-3">
-            <p className="label">Platform users</p>
+            <div className="min-w-0">
+              <p className="label">Platform users</p>
+              <p className="text-xs text-faint">Login accounts for the whole platform</p>
+            </div>
             <Badge variant="muted">{users.length}</Badge>
           </div>
           <DataTable columns={userColumns} data={users} emptyText={loading ? "Loading users..." : "No platform users created yet."} minWidth={560} sortable />

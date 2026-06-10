@@ -835,7 +835,10 @@ function ProviderDetailFields({
   );
 }
 
-export function ProjectAccessPanel({ project, teams, grants, loading }: { project?: Project; teams: Team[]; grants: ProjectAccessGrant[]; loading: boolean }) {
+export function ProjectAccessPanel({ project, teams, grants, loading, orgsEnabled }: { project?: Project; teams: Team[]; grants: ProjectAccessGrant[]; loading: boolean; orgsEnabled: boolean }) {
+  // Teams are org-scoped and managed in the platform workspace, which is framed
+  // as "Organizations" in multi-org mode and "Access" in single-org mode.
+  const teamsWorkspace = orgsEnabled ? "Organizations" : "Access";
   const queryClient = useQueryClient();
   const [subjectType, setSubjectType] = useState("team");
   const [subjectId, setSubjectId] = useState("");
@@ -886,7 +889,7 @@ export function ProjectAccessPanel({ project, teams, grants, loading }: { projec
         </NativeSelect>
         {subjectType === "team" ? (
           <NativeSelect value={subjectId} onChange={(event) => setSubjectId(event.target.value)}>
-            {teams.length === 0 ? <option value="">No teams</option> : null}
+            {teams.length === 0 ? <option value="">No teams yet</option> : null}
             {teams.map((team) => (
               <option key={team.id} value={team.slug}>{team.name}</option>
             ))}
@@ -904,6 +907,10 @@ export function ProjectAccessPanel({ project, teams, grants, loading }: { projec
           Grant
         </Button>
       </form>
+      <p className="mt-3 text-xs leading-5 text-muted">
+        Teams are managed in <span className="font-medium text-text">{teamsWorkspace} → Teams</span>; granting one here gives all its members the selected role on this project.
+        {teams.length === 0 ? ` Create a team in ${teamsWorkspace} first, or grant an individual user by email.` : ""}
+      </p>
       <div className="mt-4 grid gap-2">
         {loading ? <p className="text-sm text-muted">Loading grants...</p> : null}
         {!loading && grants.length === 0 ? <p className="text-sm text-muted">No project-specific grants.</p> : null}

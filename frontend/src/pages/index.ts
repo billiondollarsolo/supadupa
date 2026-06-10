@@ -1,3 +1,4 @@
+export { AboutPage } from "./about";
 export { AuditLogPage } from "./audit-log";
 export { FleetDashboardPage } from "./fleet-dashboard";
 export { HostsPage } from "./hosts";

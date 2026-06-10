@@ -10,6 +10,7 @@ export type QueryState<T> = {
 export type DashboardContextValue = {
   orgsEnabled: boolean;
   ssoScimEnabled: boolean;
+  quotasEnabled: boolean;
   activeOrgId: string;
   activeTeamSlug: string;
   activeRef: string;

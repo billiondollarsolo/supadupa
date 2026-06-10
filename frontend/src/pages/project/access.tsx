@@ -11,7 +11,7 @@ import { ProjectPage } from "./layout";
 // (the project's own users/providers), while this governs who in the platform
 // can operate the project.
 export function ProjectAccessPage() {
-  const { activeProject, projectAccess, teams } = useDashboardContext();
+  const { activeProject, projectAccess, teams, orgsEnabled } = useDashboardContext();
   const stats = useMemo(
     () => ({ grants: projectAccess.data?.length ?? 0, teams: teams.data?.length ?? 0 }),
     [projectAccess.data, teams.data],
@@ -36,7 +36,7 @@ export function ProjectAccessPage() {
       </AppPanel>
 
       <AccessScopePanel project={activeProject} teams={teams.data ?? []} grants={projectAccess.data ?? []} />
-      <ProjectAccessPanel project={activeProject} teams={teams.data ?? []} grants={projectAccess.data ?? []} loading={projectAccess.isLoading} />
+      <ProjectAccessPanel project={activeProject} teams={teams.data ?? []} grants={projectAccess.data ?? []} loading={projectAccess.isLoading} orgsEnabled={orgsEnabled} />
     </ProjectPage>
   );
 }

@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./app";
 import {
+  AboutPage,
   AuditLogPage,
   CreateProjectPage,
   FleetDashboardPage,
@@ -213,6 +214,12 @@ const settingsSectionItemRoute = createRoute({
   component: SettingsRoutePage,
 });
 
+const aboutRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "about",
+  component: AboutPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
@@ -243,6 +250,7 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   settingsSectionRoute,
   settingsSectionItemRoute,
+  aboutRoute,
 ]);
 
 const router = createRouter({ routeTree });

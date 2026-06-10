@@ -331,15 +331,15 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 		return snapshot, fmt.Errorf("iterate normalized orgs: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, COALESCE(mfa_last_accepted_counter, 0), created_at FROM users`)
+	rows, err = s.db.QueryContext(ctx, `SELECT id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, COALESCE(mfa_last_accepted_counter, 0), created_at, last_login_at FROM users`)
 	if err != nil {
 		return snapshot, fmt.Errorf("load normalized users: %w", err)
 	}
 	for rows.Next() {
 		var user User
 		var mfaSecret, pendingSecret sql.NullString
-		var confirmedAt, updatedAt sql.NullTime
-		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Role, &user.MFAEnabled, &mfaSecret, &pendingSecret, &confirmedAt, &updatedAt, &user.MFALastCounter, &user.CreatedAt); err != nil {
+		var confirmedAt, updatedAt, lastLoginAt sql.NullTime
+		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Role, &user.MFAEnabled, &mfaSecret, &pendingSecret, &confirmedAt, &updatedAt, &user.MFALastCounter, &user.CreatedAt, &lastLoginAt); err != nil {
 			rows.Close()
 			return snapshot, fmt.Errorf("scan normalized user: %w", err)
 		}
@@ -351,6 +351,7 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 		if updatedAt.Valid {
 			user.MFAUpdatedAt = updatedAt.Time
 		}
+		user.LastLoginAt = timePtr(lastLoginAt)
 		snapshot.Users[user.Email] = user
 	}
 	if err := rows.Close(); err != nil {
@@ -1987,9 +1988,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 	}
 	for _, user := range snapshot.Users {
 		if _, err := tx.ExecContext(ctx, `
-	INSERT INTO users (id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, mfa_last_accepted_counter, created_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-			user.ID, user.Email, user.PasswordHash, user.Role, user.MFAEnabled, nullString(user.MFASecret), nullString(user.MFAPendingSecret), nullTime(user.MFAConfirmedAt), nullTime(user.MFAUpdatedAt), user.MFALastCounter, user.CreatedAt); err != nil {
+	INSERT INTO users (id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, mfa_last_accepted_counter, created_at, last_login_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			user.ID, user.Email, user.PasswordHash, user.Role, user.MFAEnabled, nullString(user.MFASecret), nullString(user.MFAPendingSecret), nullTime(user.MFAConfirmedAt), nullTime(user.MFAUpdatedAt), user.MFALastCounter, user.CreatedAt, nullTimePtr(user.LastLoginAt)); err != nil {
 			return fmt.Errorf("sync user %s: %w", user.ID, err)
 		}
 	}
@@ -2697,6 +2698,11 @@ func (s *PersistentStore) UpdateUser(ctx context.Context, id string, req UpdateU
 func (s *PersistentStore) AuthenticateUser(ctx context.Context, email string, password string) (User, error) {
 	user, err := s.MemoryStore.AuthenticateUser(ctx, email, password)
 	return user, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) RecordUserLogin(ctx context.Context, userID string) (time.Time, error) {
+	at, err := s.MemoryStore.RecordUserLogin(ctx, userID)
+	return at, s.checkpoint(ctx, err)
 }
 
 func (s *PersistentStore) VerifyUserMFA(ctx context.Context, userID string, code string) (User, error) {

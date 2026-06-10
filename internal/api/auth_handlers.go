@@ -140,6 +140,9 @@ func bootstrapHandler(store control.Store, auth *control.AuthService) http.Handl
 			return
 		}
 		setAuthCookie(w, r, token, 24*time.Hour)
+		if at, err := store.RecordUserLogin(r.Context(), user.ID); err == nil {
+			user.LastLoginAt = &at
+		}
 		control.Audit(r.Context(), store, "user.bootstrap", "user:"+user.ID, map[string]string{"email": user.Email})
 		writeJSON(w, http.StatusCreated, authResponseForRequest(r, token, user))
 	}
@@ -183,6 +186,11 @@ func loginHandler(store control.Store, auth *control.AuthService, limiter *authA
 			return
 		}
 		setAuthCookie(w, r, token, 24*time.Hour)
+		// Stamp the successful login (post-MFA). Best-effort: a recording failure
+		// must not block an otherwise-valid login.
+		if at, err := store.RecordUserLogin(r.Context(), user.ID); err == nil {
+			user.LastLoginAt = &at
+		}
 		control.Audit(r.Context(), store, "user.login", "user:"+user.ID, map[string]string{"email": user.Email})
 		writeJSON(w, http.StatusOK, authResponseForRequest(r, token, user))
 	}
@@ -300,6 +308,9 @@ func platformSSOCallbackHandler(store control.Store, auth *control.AuthService, 
 			return
 		}
 		setAuthCookie(w, r, token, 24*time.Hour)
+		if at, err := store.RecordUserLogin(r.Context(), user.ID); err == nil {
+			user.LastLoginAt = &at
+		}
 		control.Audit(r.Context(), store, "user.sso_login", "user:"+user.ID, map[string]string{
 			"email":   user.Email,
 			"issuer":  assertion.Issuer,

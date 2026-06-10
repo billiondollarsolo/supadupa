@@ -1,7 +1,7 @@
 import { KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Activity, AlertTriangle, ArrowLeft, CheckCircle2, Command, Database, KeyRound, LogOut, Moon, Pause, Play, Plus, RotateCcw, Search, Server, Shield, SlidersHorizontal, Sun, UserCircle, UserPlus, XCircle, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, CheckCircle2, Command, Database, Info, KeyRound, LogOut, Moon, Pause, Play, Plus, RotateCcw, Search, Server, Shield, SlidersHorizontal, Sun, UserCircle, UserPlus, XCircle, type LucideIcon } from "lucide-react";
 import {
   createPlatformUser,
   getAuditIntegrity,
@@ -67,6 +67,8 @@ import {
 import { formatBytes, formatDateTime, formatMoney } from "./lib/format";
 import { BrandLogo } from "./components/brand-logo";
 import { BrandWordmark } from "./components/brand-wordmark";
+import { BuiltByFooter } from "./components/built-by-footer";
+import { Breadcrumbs, buildBreadcrumbs } from "./components/breadcrumbs";
 import { useAuthSession } from "./lib/auth-session";
 import { DashboardContext, useDashboardContext, type DashboardContextValue } from "./lib/dashboard-context";
 import { focusableElements, makeBackgroundInert } from "./lib/focus";
@@ -105,6 +107,7 @@ function panelIdForPathname(pathname: string) {
   if (pathname === "/hosts") return "hosts";
   if (pathname === "/settings" || pathname.startsWith("/settings/")) return "settings";
   if (pathname === "/audit") return "audit-log";
+  if (pathname === "/about") return "about";
   return "fleet-dashboard";
 }
 
@@ -120,6 +123,7 @@ function pageTitleForPathname(pathname: string, activeProject: Project | undefin
   if (pathname === "/hosts") return "Hosts";
   if (pathname === "/settings" || pathname.startsWith("/settings/")) return "Settings";
   if (pathname === "/audit") return "Audit log";
+  if (pathname === "/about") return "About";
   return "Dashboard";
 }
 
@@ -239,6 +243,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const platformFlags = platformDefaults.data?.feature_flags ?? {};
   const orgsEnabled = Boolean(platformFlags.multi_org);
   const ssoScimEnabled = Boolean(platformFlags.platform_sso_scim);
+  // Resource quotas are an enterprise/scale concern (cap a tenant, or guard a
+  // node from overcommit). Off by default — hidden entirely in single-node mode.
+  const quotasEnabled = Boolean(platformFlags.resource_quotas);
   const platformSSO = useQuery({ queryKey: ["platform-sso"], queryFn: getPlatformSSOConfig, enabled: needsPlatformSettings });
   const backupStorageTargets = useQuery({ queryKey: ["backup-storage-targets"], queryFn: listBackupStorageTargets, enabled: needsPlatformSettings || needsProjectBackups });
   const platformBackups = useQuery({ queryKey: ["platform-backups"], queryFn: listPlatformBackups, enabled: needsPlatformSettings });
@@ -665,12 +672,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   };
   const pageTitle = pageTitleForPathname(pathname, activeProject, activeProjectTab, orgsEnabled);
   const pageScopeLabel = routeRef ? "Project workspace" : "Control plane";
+  const breadcrumbs = useMemo(() => buildBreadcrumbs(pathname, { activeProject, orgsEnabled }), [pathname, activeProject, orgsEnabled]);
   const account = useMemo(() => accountSummaryFromUser(user), [user]);
   const apiStatusLabel = apiHealth.isError ? "API offline" : apiHealth.isLoading ? "API checking" : "API online";
   const apiStatusClass = apiHealth.isError ? "bg-danger" : apiHealth.isLoading ? "bg-warning" : "bg-success";
   const contextValue: DashboardContextValue = {
     orgsEnabled,
     ssoScimEnabled,
+    quotasEnabled,
     activeOrgId,
     activeTeamSlug,
     activeRef,
@@ -765,7 +774,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
 
   return (
     <DashboardContext.Provider value={contextValue}>
-      <main className="min-h-screen bg-bg text-text">
+      <main className="min-h-screen bg-bg text-text lg:h-screen lg:overflow-hidden">
         <CommandPalette actions={paletteActions} />
         <ToastHost />
         <Modal
@@ -793,13 +802,19 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             </div>
           </div>
         </Modal>
-        <div aria-hidden={paletteOpen ? true : undefined} className="grid min-h-screen grid-cols-[248px_1fr] max-lg:grid-cols-1">
+        <div aria-hidden={paletteOpen ? true : undefined} className="grid min-h-screen grid-cols-[248px_1fr] max-lg:grid-cols-1 lg:h-full lg:min-h-0">
           <Sidebar projectMode={Boolean(routeRef)} />
-          <section className="min-w-0 border-l border-border max-lg:border-l-0">
-            <header className="flex h-14 items-center justify-between border-b border-border px-6">
-              <div>
-                <p className="label">{pageScopeLabel}</p>
-                <h1 className="text-[18px] font-medium">{pageTitle}</h1>
+          <section className="flex min-w-0 flex-col border-l border-border max-lg:border-l-0 lg:h-full lg:min-h-0 lg:overflow-hidden">
+            <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
+              <div className="min-w-0">
+                {breadcrumbs.length > 1 ? (
+                  <Breadcrumbs crumbs={breadcrumbs} key={pathname} />
+                ) : (
+                  <>
+                    <p className="label">{pageScopeLabel}</p>
+                    <h1 className="text-[18px] font-medium">{pageTitle}</h1>
+                  </>
+                )}
               </div>
               <div className="flex items-center gap-2 text-sm text-muted">
                 <span className={`status-dot ${apiStatusClass}`} />
@@ -814,7 +829,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                 descendant (charts, long mono strings, dense panels) can ever
                 push a page-wide horizontal scrollbar. Tables scroll internally
                 via their own wrapper. */}
-            <div className="grid min-w-0 gap-6 overflow-x-clip p-6" id={panelIdForPathname(pathname)}>
+            <div className="grid min-w-0 gap-6 overflow-x-clip p-6 lg:min-h-0 lg:flex-1 lg:overflow-y-auto" id={panelIdForPathname(pathname)}>
               <Outlet />
             </div>
           </section>
@@ -987,6 +1002,10 @@ function AccountMenu({
             <button className="nav-item h-9 justify-start" onClick={() => navigate("/settings", "settings")} role="menuitem" type="button">
               <SlidersHorizontal size={14} />
               Platform settings
+            </button>
+            <button className="nav-item h-9 justify-start" onClick={() => navigate("/about", "about")} role="menuitem" type="button">
+              <Info size={14} />
+              About
             </button>
             <button className="nav-item h-9 justify-start text-danger hover:text-danger" onClick={() => {
               setOpen(false);
@@ -1290,15 +1309,36 @@ function CommandPalette({ actions }: { actions: PaletteAction[] }) {
   );
 }
 
+function SidebarFooter() {
+  const health = useQuery({ queryKey: ["api-health"], queryFn: getApiHealth, refetchInterval: 30_000 });
+  const version = health.data?.version;
+  return (
+    <div className="mt-auto px-1 pt-6">
+      <Link
+        activeProps={{ className: "flex items-center justify-between text-xs text-text" }}
+        className="flex items-center justify-between text-xs text-faint hover:text-text"
+        to="/about"
+      >
+        <span className="inline-flex items-center gap-1.5">
+          <Info size={12} />
+          About
+        </span>
+        {version ? <span className="font-mono text-faint">v{version}</span> : null}
+      </Link>
+      <BuiltByFooter className="mt-2" />
+    </div>
+  );
+}
+
 function Sidebar({ projectMode }: { projectMode: boolean }) {
-  const { activeProject, activeProjectTab, activeRef, orgsEnabled, ssoScimEnabled } = useDashboardContext();
+  const { activeProject, activeProjectTab, activeRef, orgsEnabled, ssoScimEnabled, quotasEnabled } = useDashboardContext();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const projectSections = useUIStore((state) => state.projectSections);
   if (projectMode) {
     const ref = activeProject?.ref ?? activeRef;
 
     return (
-      <aside className="flex min-h-screen flex-col bg-bg px-4 py-4 max-lg:min-h-0">
+      <aside className="flex min-h-screen flex-col bg-bg px-4 py-4 max-lg:min-h-0 lg:h-full lg:min-h-0 lg:overflow-y-auto">
         <div className="flex h-10 items-center gap-2.5 px-1">
           <BrandLogo className="h-9 w-9" />
           <BrandWordmark />
@@ -1354,6 +1394,7 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
             );
           })}
         </nav>
+        <SidebarFooter />
       </aside>
     );
   }
@@ -1371,6 +1412,8 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
   ];
   // Hide the SSO/SCIM settings sub-sections unless platform SSO/SCIM is enabled.
   const visibleSettingsSections = platformSettingsSections.filter((item) => ssoScimEnabled || (item.id !== "sso" && item.id !== "scim"));
+  // Hide the Quotas sub-section unless resource quotas are enabled for the platform.
+  const visibleOrganizationSections = organizationSections.filter((item) => quotasEnabled || item.id !== "quotas");
 
   return (
     <aside className="flex min-h-screen flex-col bg-bg px-4 py-4 max-lg:min-h-0">
@@ -1392,7 +1435,7 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
               </Link>
               {label === "Organizations" && active ? (
                 <div className="project-subnav">
-                  {organizationSections.map((item) => {
+                  {visibleOrganizationSections.map((item) => {
                     const activeSection = pathname.match(/^\/organizations\/([^/]+)/)?.[1] ?? "overview";
                     return (
                       item.id === "overview" ? (
@@ -1448,6 +1491,7 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
           );
         })}
       </nav>
+      <SidebarFooter />
     </aside>
   );
 }

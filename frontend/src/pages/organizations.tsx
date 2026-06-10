@@ -26,6 +26,7 @@ export function OrganizationsPage() {
     usageSnapshots,
     users,
     orgsEnabled,
+    quotasEnabled,
   } = useDashboardContext();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -60,7 +61,7 @@ export function OrganizationsPage() {
             <OrgSummaryCard icon={Users} label="Members" value={`${members.data?.length ?? 0} org grants`} detail={`${users.data?.length ?? 0} platform users`} onClick={() => openSection("members")} />
             <OrgSummaryCard icon={Shield} label="Teams" value={`${teams.data?.length ?? 0} teams`} onClick={() => openSection("teams")} />
             <OrgSummaryCard icon={Shield} label="Features" value={`${Object.values(orgFeatures.data?.effective ?? {}).filter(Boolean).length} enabled`} detail={`${Object.keys(orgFeatures.data?.overrides ?? {}).length} org overrides`} onClick={() => openSection("features")} />
-            <OrgSummaryCard icon={Gauge} label="Quotas" value={`${quotaData?.used.projects ?? 0}/${quotaData?.max_projects || "—"} projects`} tone={projectsOverQuota ? "danger" : projectsNearQuota ? "warning" : "neutral"} detail={quotaData ? `${quotaData.used.cpu}/${quotaData.max_cpu || "—"} vCPU · ${formatBytes(quotaData.used.ram_mb * 1024 * 1024)} RAM` : "Quota sample pending"} onClick={() => openSection("quotas")} />
+            {quotasEnabled ? <OrgSummaryCard icon={Gauge} label="Quotas" value={`${quotaData?.used.projects ?? 0}/${quotaData?.max_projects || "—"} projects`} tone={projectsOverQuota ? "danger" : projectsNearQuota ? "warning" : "neutral"} detail={quotaData ? `${quotaData.used.cpu}/${quotaData.max_cpu || "—"} vCPU · ${formatBytes(quotaData.used.ram_mb * 1024 * 1024)} RAM` : "Quota sample pending"} onClick={() => openSection("quotas")} /> : null}
             {orgsEnabled ? <OrgSummaryCard icon={Gauge} label="Usage" value={`${usage.data?.resources.projects ?? 0} projects`} detail={usage.data ? `${formatBytes(usage.data.db_allocated_bytes)} DB allocation` : "Metering sample pending"} badge={usageMeteringEnabled ? undefined : "metering off"} onClick={() => openSection("usage")} /> : null}
             {orgsEnabled ? <OrgSummaryCard icon={CreditCard} label="Billing" value={billingEnabled ? `${billingInvoices.data?.length ?? 0} invoices` : "—"} detail={billingEnabled ? undefined : "metering snapshots required"} badge={billingEnabled ? undefined : "disabled"} onClick={() => openSection("billing")} /> : null}
           </div>
@@ -72,7 +73,7 @@ export function OrganizationsPage() {
   return (
     <div className="grid gap-6">
       {orgsEnabled ? <OrgSwitcher orgs={orgs.data ?? []} selectedOrgId={activeOrgId} onSelectOrg={setSelectedOrgId} /> : null}
-      {section === "members" ? <MembersPanel orgId={activeOrgId} members={members.data ?? []} users={users.data ?? []} loading={members.isLoading || users.isLoading} /> : null}
+      {section === "members" ? <MembersPanel orgId={activeOrgId} members={members.data ?? []} users={users.data ?? []} loading={members.isLoading || users.isLoading} orgsEnabled={orgsEnabled} /> : null}
       {section === "teams" ? (
         <TeamsPanel
           orgId={activeOrgId}
@@ -84,7 +85,7 @@ export function OrganizationsPage() {
         />
       ) : null}
       {section === "features" ? <OrgFeaturesPanel orgId={activeOrgId} features={orgFeatures.data} loading={orgFeatures.isLoading} /> : null}
-      {section === "quotas" ? <QuotaPanel orgId={activeOrgId} quota={quota.data} loading={quota.isLoading} /> : null}
+      {section === "quotas" && quotasEnabled ? <QuotaPanel orgId={activeOrgId} quota={quota.data} loading={quota.isLoading} /> : null}
       {section === "usage" ? <UsagePanel orgId={activeOrgId} usage={usage.data} snapshots={usageSnapshots.data ?? []} loading={usage.isLoading} snapshotsLoading={usageSnapshots.isLoading} snapshotEnabled={usageMeteringEnabled} /> : null}
       {section === "billing" && orgsEnabled ? <BillingPanel orgId={activeOrgId} invoices={billingInvoices.data ?? []} loading={billingInvoices.isLoading} enabled={billingEnabled} /> : null}
     </div>

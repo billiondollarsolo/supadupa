@@ -445,6 +445,7 @@ var allowedMembershipRoles = map[string]struct{}{
 var defaultPlatformFeatureFlags = map[string]bool{
 	"single_org_mode":       true,
 	"multi_org":             false,
+	"resource_quotas":       false,
 	"team_rbac":             true,
 	"project_access_grants": true,
 	"project_self_service":  true,
@@ -494,6 +495,7 @@ type Store interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	GetUserByID(ctx context.Context, id string) (User, error)
 	AuthenticateUser(ctx context.Context, email string, password string) (User, error)
+	RecordUserLogin(ctx context.Context, userID string) (time.Time, error)
 	VerifyUserMFA(ctx context.Context, userID string, code string) (User, error)
 	GetUserMFAStatus(ctx context.Context, userID string) (MFAStatus, error)
 	BeginUserMFAEnrollment(ctx context.Context, userID string) (MFAEnrollment, error)
@@ -677,6 +679,10 @@ type User struct {
 	MFAUpdatedAt     time.Time `json:"-"`
 	MFALastCounter   int64     `json:"-"`
 	CreatedAt        time.Time `json:"created_at"`
+	// LastLoginAt is the most recent successful login (post-MFA). Nil until the
+	// user has logged in at least once, so the API omits it rather than emitting
+	// a zero date.
+	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
 }
 
 type CreateUserRequest struct {
@@ -2489,6 +2495,19 @@ func (s *MemoryStore) AuthenticateUser(ctx context.Context, email string, passwo
 		s.mu.Unlock()
 	}
 	return user, nil
+}
+
+func (s *MemoryStore) RecordUserLogin(ctx context.Context, userID string) (time.Time, error) {
+	at := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.userByIDLocked(userID)
+	if !ok {
+		return time.Time{}, fmt.Errorf("%w: user %s", ErrNotFound, userID)
+	}
+	user.LastLoginAt = &at
+	s.users[user.Email] = user
+	return at, nil
 }
 
 func (s *MemoryStore) VerifyUserMFA(ctx context.Context, userID string, code string) (User, error) {

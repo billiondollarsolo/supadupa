@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Database, Globe2, KeyRound, Network, Play, RotateCcw, Shield } from "lucide-react";
+import { Activity, Database, Globe2, KeyRound, Play, RotateCcw } from "lucide-react";
 import { AppPanel } from "../../components/app/app-panel";
 import { MetricCard } from "../../components/app/metric-card";
 import { ResourceMeter } from "../../components/app/resource-meter";
@@ -329,13 +329,10 @@ function OperationalSurfacePanel({ loading, metrics, onOpenTab }: { metrics?: Pr
     <AppPanel actions={metrics ? <time className="text-xs text-faint">{formatTime(metrics.sampled_at)}</time> : null} eyebrow="Surface area" title="Project capabilities">
       {loading ? <p className="mt-4 text-sm text-muted">Loading counters...</p> : null}
       {metrics ? (
-        <div className="mt-4 grid grid-cols-4 gap-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
-          <SurfaceTile icon={Database} label="Replicas" value={`${metrics.read_replicas}`} detail="read scaling" onClick={() => onOpenTab("database")} />
-          <SurfaceTile icon={Globe2} label="Routes" value={`${metrics.routes}`} detail={`${metrics.custom_domains} domains`} onClick={() => onOpenTab("config")} />
-          <SurfaceTile icon={Network} label="Networks" value={`${metrics.network_connections}`} detail="private" onClick={() => onOpenTab("config")} />
-          <SurfaceTile icon={Shield} label="Secrets" value={`${metrics.secrets}`} detail="handles" onClick={() => onOpenTab("connect")} />
-          <SurfaceTile icon={Activity} label="Logs" value={`${metrics.project_log_events}`} detail="events" onClick={() => onOpenTab("logs")} />
+        <div className="mt-4 grid grid-cols-3 gap-2 max-sm:grid-cols-1">
           <SurfaceTile icon={RotateCcw} label="Backups" value={`${metrics.backups}`} detail="recovery points" onClick={() => onOpenTab("backups")} />
+          <SurfaceTile icon={Database} label="Read replicas" value={`${metrics.read_replicas}`} detail="read scaling" onClick={() => onOpenTab("database")} />
+          <SurfaceTile icon={Globe2} label="Custom domains" value={`${metrics.custom_domains}`} detail="mapped hostnames" onClick={() => onOpenTab("config")} />
         </div>
       ) : null}
     </AppPanel>

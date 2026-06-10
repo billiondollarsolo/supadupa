@@ -68,31 +68,29 @@ export SUPADUPA_API_HOST=api.example.test
 export SUPADUPA_ACME_EMAIL=ops@example.test
 export SUPADUPA_RUNTIME_HOST_DIR="$PWD/runtime"
 export SUPADUPA_RUNTIME_CONTAINER_DIR="$PWD/runtime"
-export SUPADUPA_COMPOSE_APPLY=true
+export SUPADUPA_PROJECT_HOST_ROOT="$PWD/runtime/projects"
+export SUPADUPA_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
 
 docker network create supadupa-ingress
 mkdir -p runtime/{projects,routes,certs,backups}
-docker compose -f deploy/compose.yaml --profile edge up -d --build
+# The apply overlay sets SUPADUPA_COMPOSE_APPLY=true and runs the docker-socket-proxy
+# unprivileged with the host Docker group.
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 The edge proxy uses Traefik's Docker provider for the platform admin/API services and the file provider for per-project routes rendered by the control plane. `SUPADUPA_ADMIN_HOST` and `SUPADUPA_API_HOST` control the platform hostnames; Compose uses them to set Traefik labels, the admin UI's built-in API base URL, and the default CORS origin. `SUPADUPA_ACME_EMAIL` controls the Let's Encrypt account contact for automatic TLS. Set `VITE_API_BASE_URL` or `SUPADUPA_CORS_ORIGINS` only when those need to differ. The project domain is managed from platform defaults in the admin UI/API.
 
 In Settings, set the default project domain to your wildcard project domain, for example `projects.example.test`. New project Connect payloads will use canonical DNS-backed URLs such as `https://<ref>.projects.example.test` and `https://studio-<ref>.projects.example.test`.
 
-For local development, set `SUPADUPA_BOOTSTRAP_EMAIL` and `SUPADUPA_BOOTSTRAP_PASSWORD` to seed the first admin if no users exist in the meta DB:
+For local development, set `SUPADUPA_BOOTSTRAP_EMAIL` and `SUPADUPA_BOOTSTRAP_PASSWORD` in the environment to seed the first admin if no users exist in the meta DB. Choose your own values — there is no baked-in default login, and these credentials must never be committed. The bootstrap is skipped once any user exists, so first-run bootstrap is manual unless those env vars are explicitly set.
 
-- Email: `admin@supadupa.local`
-- Password: `supadupa2026`
-
-Override those with `SUPADUPA_BOOTSTRAP_EMAIL` and `SUPADUPA_BOOTSTRAP_PASSWORD`. The bootstrap is skipped once any user exists. Normal deployments do not have a baked-in default login; first-run bootstrap is manual unless those env vars are explicitly set.
-
-By default the containerized Compose provisioner renders project stacks but does not apply them (`SUPADUPA_COMPOSE_APPLY=false`). To let supadupavisor run `docker compose` against the host Docker daemon, set an absolute runtime path and mount it at the same path inside the container so host-side bind mounts resolve correctly:
+By default the containerized Compose provisioner renders project stacks but does not apply them (`SUPADUPA_COMPOSE_APPLY=false`). The control-plane container never touches the host Docker socket directly; it reaches Docker only through the isolated `docker-socket-proxy` service (over `DOCKER_HOST=tcp://docker-socket-proxy:2375`). To enable apply mode, layer the apply overlay, which sets `SUPADUPA_COMPOSE_APPLY=true` and translates host-side bind paths through `SUPADUPA_PROJECT_HOST_ROOT`:
 
 ```bash
 export SUPADUPA_RUNTIME_HOST_DIR="$PWD/runtime"
-export SUPADUPA_RUNTIME_CONTAINER_DIR="$PWD/runtime"
-export SUPADUPA_COMPOSE_APPLY=true
-docker compose -f deploy/compose.yaml --profile edge up -d --build
+export SUPADUPA_PROJECT_HOST_ROOT="$PWD/runtime/projects"
+export SUPADUPA_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
+docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 The PRD calls for a dedicated control-plane meta Postgres. For local development:

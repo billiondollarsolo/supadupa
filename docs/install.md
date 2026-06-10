@@ -14,7 +14,7 @@ Local loopback:
 
 - Linux or macOS with Docker.
 - Docker Compose v2.
-- Go 1.26.4+ if running binaries natively.
+- Go 1.25+ if running binaries natively.
 - Node `^20.19.0` or `>=22.12.0` if running the admin UI natively.
 
 VPS:
@@ -177,14 +177,14 @@ The helper writes `.env` with:
 - `SUPADUPA_RUNTIME_CONTAINER_DIR`: container-side runtime mount path where the control plane writes project files, routes, certs, and backups.
 - `SUPADUPA_PROJECT_HOST_ROOT`: host-side project directory used in generated per-project Compose bind mounts because those sources are resolved by the host Docker daemon.
 - `SUPADUPA_CONTROL_PLANE_USER`: numeric `uid:gid` used by the supadupavisor container; generated from the user running `setup-compose.sh` so runtime bind mounts stay writable without running the process as root.
-- `SUPADUPA_DOCKER_GID`: host Docker socket group ID, added as a supplemental container group only to the `docker-socket-proxy` service in `deploy/compose.apply.yaml`.
+- `SUPADUPA_DOCKER_GID`: host Docker socket group ID. The `docker-socket-proxy` service ships in the base compose and runs as root there; the apply overlay (`deploy/compose.apply.yaml`) overrides it to run unprivileged with this group ID added so it can reach the socket without root.
 - `SUPADUPA_COMPOSE_APPLY=true`: allows the control plane to apply project Compose stacks through the internal Docker API proxy when started with `deploy/compose.apply.yaml`.
 - `SUPADUPA_PROJECT_DOCKER_LOGS=false`: keeps generated project Vector services from mounting the host Docker socket; set true only for legacy Docker-log drain compatibility.
 - `CLOUDFLARE_API_TOKEN`: used by Traefik DNS-01 when the provider is Cloudflare.
 - `AWS_*`: used by Traefik DNS-01 when the provider is Route53.
 
 The helper writes `.env` with mode `0600` and rejects newline/control-character input before writing secret-bearing files. Host and email options are validated before runtime directories or Docker networks are created.
-For manual `.env` files, set `SUPADUPA_CONTROL_PLANE_USER` to a numeric user/group that can write `SUPADUPA_RUNTIME_HOST_DIR`; if `SUPADUPA_COMPOSE_APPLY=true`, use an absolute `SUPADUPA_RUNTIME_HOST_DIR`, keep `SUPADUPA_RUNTIME_CONTAINER_DIR` as a writable container path such as `/app/runtime`, set `SUPADUPA_PROJECT_HOST_ROOT` to the host-side projects directory, start with `-f deploy/compose.apply.yaml`, and set `SUPADUPA_DOCKER_GID` to `stat -c '%g' /var/run/docker.sock`. The base compose file intentionally does not mount the Docker socket, and the apply overlay mounts it only into the internal `docker-socket-proxy` service.
+For manual `.env` files, set `SUPADUPA_CONTROL_PLANE_USER` to a numeric user/group that can write `SUPADUPA_RUNTIME_HOST_DIR`; if `SUPADUPA_COMPOSE_APPLY=true`, use an absolute `SUPADUPA_RUNTIME_HOST_DIR`, keep `SUPADUPA_RUNTIME_CONTAINER_DIR` as a writable container path such as `/app/runtime`, set `SUPADUPA_PROJECT_HOST_ROOT` to the host-side projects directory, start with `-f deploy/compose.apply.yaml`, and set `SUPADUPA_DOCKER_GID` to `stat -c '%g' /var/run/docker.sock`. The control-plane container never mounts the Docker socket; only the isolated `docker-socket-proxy` service does (in the base compose file), and the control plane reaches it over `DOCKER_HOST=tcp://docker-socket-proxy:2375`.
 
 On first startup, `SUPADUPA_APPS_DOMAIN` seeds the project default domain if the stored default is still `supadupa.test`. Set `SUPADUPA_PROJECT_DOMAIN` when the environment file should explicitly override the Admin UI default on restart.
 

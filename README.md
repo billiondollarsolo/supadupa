@@ -188,7 +188,7 @@ From the UI (`Projects` -> add project), the wizard has three steps:
 2. **Org & placement** — organization and host (or the default local runtime).
 3. **Stack** — stack version, profile (database engine + starting service set), size (a small/medium/large preset or exact CPU/RAM/disk), per-service toggles, and optional database container resource-limit enforcement.
 
-Then wait for the runtime status to become healthy.
+Project creation is asynchronous: the request returns immediately (HTTP `202 Accepted`, status `provisioning`) and the runtime is brought up in the background, transitioning `provisioning -> starting -> healthy`. Poll `GET /v1/projects/{ref}` (or watch the UI) until the status is `healthy`.
 
 From the CLI:
 

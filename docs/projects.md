@@ -13,6 +13,8 @@ A Supadupa project is an isolated Supabase-style runtime rendered and applied th
 7. Create the project.
 8. Wait for runtime status to become healthy.
 
+Provisioning is asynchronous: the project is created in the `provisioning` phase and converges through `starting` to `healthy` in the background, so the status badge updates on its own without blocking the create action.
+
 The project ref becomes part of generated hostnames. Use lowercase letters, numbers, and hyphens.
 
 ## Create A Project With The CLI
@@ -33,6 +35,8 @@ go run ./cmd/supadupa-cli --api https://api.example.com projects create \
   --ref smoke \
   --name "Smoke"
 ```
+
+`projects create` (`POST /v1/orgs/{org-id}/projects`) returns `202 Accepted` with status `provisioning` and provisions in the background. Poll `GET /v1/projects/{ref}` until the status reaches `healthy` before exercising the project.
 
 ## Project Routes
 

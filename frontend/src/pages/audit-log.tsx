@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { listAuditEvents } from "../api";
 import { useDashboardContext } from "../lib/dashboard-context";
@@ -7,7 +7,8 @@ import { AuditPanel } from "./audit/audit-panel";
 const PAGE_SIZE = 100;
 
 export function AuditLogPage() {
-  const { auditIntegrity } = useDashboardContext();
+  const { auditIntegrity, users } = useDashboardContext();
+  const usersById = useMemo(() => new Map((users.data ?? []).map((user) => [user.id, user.email])), [users.data]);
   const [action, setAction] = useState("");
   const [since, setSince] = useState("");
   const [until, setUntil] = useState("");
@@ -32,6 +33,7 @@ export function AuditLogPage() {
       events={page?.events ?? []}
       integrity={auditIntegrity.data}
       loading={audit.isLoading}
+      usersById={usersById}
       server={{
         total: page?.total ?? 0,
         limit: page?.limit ?? PAGE_SIZE,

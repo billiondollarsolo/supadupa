@@ -255,7 +255,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   // The full audit page (AuditLogPage) owns its own server-paginated query; the
   // dashboard context only needs the integrity badge.
   const auditIntegrity = useQuery({ queryKey: ["audit-integrity"], queryFn: getAuditIntegrity, enabled: needsAuditTrail, refetchInterval: needsAuditTrail ? 10_000 : false });
-  const users = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: needsPlatformSettings || isSecurityRoute || isOrganizationsRoute });
+  const users = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: needsPlatformSettings || isSecurityRoute || isOrganizationsRoute || isAuditRoute });
   const mfaStatus = useQuery({ queryKey: ["account-mfa"], queryFn: getAccountMFA, enabled: isSecurityRoute });
   const activeOrgId = selectedOrgId || orgs.data?.[0]?.id || "";
   const members = useQuery({

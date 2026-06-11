@@ -74,7 +74,9 @@ type AuditServer = {
   setOffset: (value: number) => void;
 };
 
-export function AuditPanel({ events, integrity, loading, maxEvents, server }: { events: AuditEvent[]; integrity?: AuditIntegrity; loading: boolean; maxEvents?: number; server?: AuditServer }) {
+export function AuditPanel({ events, integrity, loading, maxEvents, server, usersById }: { events: AuditEvent[]; integrity?: AuditIntegrity; loading: boolean; maxEvents?: number; server?: AuditServer; usersById?: Map<string, string> }) {
+  // Resolve an actor UUID to a human email when the users map is available.
+  const actorLabel = (actorID?: string) => (actorID ? usersById?.get(actorID) ?? actorID : "system");
   const compact = typeof maxEvents === "number";
   // Server mode: the parent fetches a server-filtered, paginated page. Action /
   // date filtering and paging are driven server-side; text search and sort stay
@@ -184,7 +186,7 @@ export function AuditPanel({ events, integrity, loading, maxEvents, server }: { 
           size: 200,
           cell: ({ row }) => (
             <div className="min-w-0">
-              <p className="truncate font-mono text-xs text-muted" title={row.original.actor_id ?? ""}>{row.original.actor_id || "system"}</p>
+              <p className="truncate text-xs text-muted" title={row.original.actor_id ?? "system"}>{actorLabel(row.original.actor_id)}</p>
               {row.original.metadata?.client_ip ? <p className="truncate font-mono text-xs text-faint">{row.original.metadata.client_ip}</p> : null}
             </div>
           ),
@@ -207,7 +209,7 @@ export function AuditPanel({ events, integrity, loading, maxEvents, server }: { 
       );
       return cols;
     },
-    [compact, expanded],
+    [compact, expanded, usersById],
   );
 
   // Render with manual table when we need expandable detail rows; DataTable

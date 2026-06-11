@@ -298,6 +298,18 @@ func secretAccessKeys(r *http.Request, action string, ref string, kind string) [
 }
 
 func clientIP(r *http.Request) string {
+	// The control plane is only reachable through the edge proxy (Traefik), so
+	// RemoteAddr is the proxy's address; the real client is in X-Forwarded-For
+	// (leftmost hop) or X-Real-IP. Honoring these makes both audit records and
+	// per-IP rate limiting reflect the actual client rather than the proxy.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
+			return first
+		}
+	}
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+		return xr
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil && host != "" {
 		return host

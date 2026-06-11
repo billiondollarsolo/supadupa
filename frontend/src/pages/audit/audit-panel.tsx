@@ -179,11 +179,14 @@ export function AuditPanel({ events, integrity, loading, maxEvents, server }: { 
       );
       if (!compact) {
         cols.push({
-          header: "Actor",
+          header: "Actor / IP",
           accessorKey: "actor_id",
           size: 200,
           cell: ({ row }) => (
-            <p className="truncate font-mono text-xs text-muted" title={row.original.actor_id ?? ""}>{row.original.actor_id || "system"}</p>
+            <div className="min-w-0">
+              <p className="truncate font-mono text-xs text-muted" title={row.original.actor_id ?? ""}>{row.original.actor_id || "system"}</p>
+              {row.original.metadata?.client_ip ? <p className="truncate font-mono text-xs text-faint">{row.original.metadata.client_ip}</p> : null}
+            </div>
           ),
         });
       }

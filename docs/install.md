@@ -35,6 +35,17 @@ Each project runs its **own** full Supabase stack (Postgres, Auth, REST, GraphQL
 | Project on the `full` profile | ~3–4 GB | Includes Logflare (analytics) — an Elixir/BEAM service that is the single heaviest container. |
 | Project with analytics disabled | ~1.5–2 GB | Dropping analytics roughly halves the per-project footprint. |
 
+The size **tiers** are sized to those realities — `small` starts at 4 GB because that is the floor for a full-profile project, not a 2 GB number that can't run the full stack:
+
+| Tier | CPU | RAM | Disk |
+|------|-----|-----|------|
+| small | 2 vCPU | 4 GB | 40 GB |
+| medium | 4 vCPU | 8 GB | 80 GB |
+| large | 8 vCPU | 16 GB | 160 GB |
+| custom | — | exact | exact |
+
+Tier sizes are **reservations** for placement + quota; they are not hard container caps unless you enable limit enforcement (today: database container only). Host RAM should cover the control plane (~0.5 GB) **plus** the reserved size of every project you run concurrently.
+
 Guidance:
 
 - **Minimum for the `full` profile with one project is ~4 GB RAM.** On a 2 GB host the Logflare/analytics container is OOM-killed during startup (exit code 137), and the project reports `degraded` with `analytics: expected service is missing from Docker Compose state`. That is a host-memory limit, not a bug — give the host more RAM, or disable analytics.

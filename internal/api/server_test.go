@@ -2200,7 +2200,7 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 		t.Fatalf("expected automatic failover to west replica: %d %s", failoverResponse.Code, failoverResponse.Body.String())
 	}
 	usageResponse := perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/usage", "")
-	for _, expected := range []string{`"read_replicas":2`, `"cpu":3`, `"ram_mb":6144`, `"disk_gb":60`, `"projects":1`} {
+	for _, expected := range []string{`"read_replicas":2`, `"cpu":6`, `"ram_mb":12288`, `"disk_gb":120`, `"projects":1`} {
 		if !strings.Contains(usageResponse.Body.String(), expected) {
 			t.Fatalf("expected usage value %s: %s", expected, usageResponse.Body.String())
 		}
@@ -2248,7 +2248,7 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 		t.Fatalf("expected only promoted west replica after delete: %d %s", listResponse.Code, listResponse.Body.String())
 	}
 	usageResponse = perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/usage", "")
-	if !strings.Contains(usageResponse.Body.String(), `"read_replicas":1`) || !strings.Contains(usageResponse.Body.String(), `"cpu":2`) {
+	if !strings.Contains(usageResponse.Body.String(), `"read_replicas":1`) || !strings.Contains(usageResponse.Body.String(), `"cpu":4`) {
 		t.Fatalf("expected usage to reflect deleted read replica: %s", usageResponse.Body.String())
 	}
 	auditResponse = perform(server, http.MethodGet, "/v1/audit-events", "")
@@ -2290,13 +2290,13 @@ func TestProjectScaleUpdatesTierCapacityAndAudit(t *testing.T) {
 	}
 
 	usageResponse := perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/usage", "")
-	for _, expected := range []string{`"cpu":4`, `"ram_mb":8192`, `"disk_gb":100`, `"projects":1`} {
+	for _, expected := range []string{`"cpu":8`, `"ram_mb":16384`, `"disk_gb":160`, `"projects":1`} {
 		if !strings.Contains(usageResponse.Body.String(), expected) {
 			t.Fatalf("expected scaled usage %s: %s", expected, usageResponse.Body.String())
 		}
 	}
 	hostsResponse := perform(server, http.MethodGet, "/v1/hosts", "")
-	for _, expected := range []string{`"used":{"cpu":4`, `"ram_mb":8192`, `"disk_gb":100`, `"projects":1`} {
+	for _, expected := range []string{`"used":{"cpu":8`, `"ram_mb":16384`, `"disk_gb":160`, `"projects":1`} {
 		if !strings.Contains(hostsResponse.Body.String(), expected) {
 			t.Fatalf("expected scaled host usage %s: %s", expected, hostsResponse.Body.String())
 		}
@@ -3387,7 +3387,7 @@ func TestCreateHostAndPlaceProject(t *testing.T) {
 	}
 
 	hostsResponse := perform(server, http.MethodGet, "/v1/hosts", "")
-	for _, expected := range []string{`"cpu":1`, `"ram_mb":2048`, `"disk_gb":20`, `"projects":1`} {
+	for _, expected := range []string{`"cpu":2`, `"ram_mb":4096`, `"disk_gb":40`, `"projects":1`} {
 		if !strings.Contains(hostsResponse.Body.String(), expected) {
 			t.Fatalf("expected host usage %s: %s", expected, hostsResponse.Body.String())
 		}
@@ -3421,7 +3421,7 @@ func TestCreateHostAndPlaceProject(t *testing.T) {
 func TestProjectPlacementRejectsInsufficientHostCapacity(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
-	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"tiny","address":"localhost","capacity":{"cpu":1,"ram_mb":2048,"disk_gb":20,"projects":1}}`)
+	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"tiny","address":"localhost","capacity":{"cpu":2,"ram_mb":4096,"disk_gb":40,"projects":1}}`)
 	if hostResponse.Code != http.StatusCreated {
 		t.Fatalf("expected host status 201, got %d: %s", hostResponse.Code, hostResponse.Body.String())
 	}
@@ -3442,7 +3442,7 @@ func TestProjectPlacementRejectsInsufficientHostCapacity(t *testing.T) {
 	}
 
 	// A host with ample CPU/RAM/slots but too little disk must still reject a
-	// small-tier project (which reserves 20 GiB), proving placement enforces a
+	// small-tier project (which reserves 40 GiB), proving placement enforces a
 	// per-dimension capacity check beyond the project-slot count.
 	diskHostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"disk-tight","address":"127.0.0.2","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":10,"projects":10}}`)
 	if diskHostResponse.Code != http.StatusCreated {
@@ -3467,7 +3467,7 @@ func TestOrgQuotasTrackUsageAndRejectProjectOverLimit(t *testing.T) {
 		t.Fatalf("expected default unlimited quota: %d %s", defaultQuotaResponse.Code, defaultQuotaResponse.Body.String())
 	}
 
-	updateQuotaResponse := perform(server, http.MethodPut, "/v1/orgs/"+orgID+"/quotas", `{"max_projects":1,"max_cpu":1,"max_ram_mb":2048,"max_disk_gb":20}`)
+	updateQuotaResponse := perform(server, http.MethodPut, "/v1/orgs/"+orgID+"/quotas", `{"max_projects":1,"max_cpu":2,"max_ram_mb":4096,"max_disk_gb":40}`)
 	if updateQuotaResponse.Code != http.StatusOK {
 		t.Fatalf("expected quota update 200, got %d: %s", updateQuotaResponse.Code, updateQuotaResponse.Body.String())
 	}
@@ -3479,7 +3479,7 @@ func TestOrgQuotasTrackUsageAndRejectProjectOverLimit(t *testing.T) {
 	}
 
 	quotaResponse := perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/quotas", "")
-	for _, expected := range []string{`"max_projects":1`, `"cpu":1`, `"ram_mb":2048`, `"disk_gb":20`, `"projects":1`} {
+	for _, expected := range []string{`"max_projects":1`, `"cpu":2`, `"ram_mb":4096`, `"disk_gb":40`, `"projects":1`} {
 		if !strings.Contains(quotaResponse.Body.String(), expected) {
 			t.Fatalf("expected quota usage %s: %s", expected, quotaResponse.Body.String())
 		}
@@ -3541,9 +3541,9 @@ func TestOrgUsageMeteringTracksControlPlaneResources(t *testing.T) {
 		t.Fatalf("expected usage status 200, got %d: %s", usageResponse.Code, usageResponse.Body.String())
 	}
 	for _, expected := range []string{
-		`"cpu":3`,
-		`"ram_mb":6144`,
-		`"disk_gb":70`,
+		`"cpu":6`,
+		`"ram_mb":12288`,
+		`"disk_gb":120`,
 		`"projects":2`,
 		`"healthy":2`,
 		`"backup_count":1`,
@@ -3551,7 +3551,7 @@ func TestOrgUsageMeteringTracksControlPlaneResources(t *testing.T) {
 		`"custom_domains":1`,
 		`"log_drains":1`,
 		`"secrets":20`,
-		`"db_allocated_bytes":75161927680`,
+		`"db_allocated_bytes":128849018880`,
 	} {
 		if !strings.Contains(usageResponse.Body.String(), expected) {
 			t.Fatalf("expected metering value %s: %s", expected, usageResponse.Body.String())
@@ -3712,7 +3712,7 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		`"projects":1`,
 		`"healthy":1`,
 		`"host_capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}`,
-		`"host_used":{"cpu":1,"ram_mb":2048,"disk_gb":20,"projects":1}`,
+		`"host_used":{"cpu":2,"ram_mb":4096,"disk_gb":40,"projects":1}`,
 		`"database_ingress":{"mode":"private","public":false,"postgres_addr":"127.0.0.1:5432","pooler_addr":"127.0.0.1:6543","postgres_public":false,"pooler_public":false`,
 		`"node_observed":[{"host_id":"` + hostID + `","source":"compose-local-node","cpu_percent":12.5`,
 		`"network_sampled":true,"network_rx_bytes":1234,"network_tx_bytes":5678`,
@@ -3735,7 +3735,7 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		"supadupa_projects_total 1",
 		"supadupa_projects_by_status{status=\"healthy\"} 1",
 		"supadupa_host_capacity_cpu 8",
-		"supadupa_host_used_cpu 1",
+		"supadupa_host_used_cpu 2",
 		"supadupa_node_cpu_percent{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 12.5",
 		"supadupa_node_memory_used_bytes{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 4294967296",
 		"supadupa_node_disk_used_bytes{host_id=\"" + hostID + "\",source=\"compose-local-node\"} 85899345920",
@@ -3748,7 +3748,7 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		"supadupa_function_deployments_total 1",
 		"supadupa_backup_storage_bytes 2048",
 		"supadupa_audit_verified 1",
-		"supadupa_project_resource_cpu{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 1",
+		"supadupa_project_resource_cpu{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 2",
 		"supadupa_project_logs_total{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"}",
 		"supadupa_project_backups_total{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 1",
 		"supadupa_project_backup_storage_bytes{org_id=\"" + orgID + "\",project_ref=\"metrics-proj\",resource_tier=\"small\",status=\"healthy\"} 2048",

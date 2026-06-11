@@ -335,9 +335,9 @@ function ResourceBar({
 const LARGE_PRESET = reservationForTier("large");
 
 function reservationForTier(tier: string): HostCapacity {
-  if (tier === "large") return { cpu: 4, ram_mb: 8192, disk_gb: 100, projects: 1 };
-  if (tier === "medium") return { cpu: 2, ram_mb: 4096, disk_gb: 50, projects: 1 };
-  return { cpu: 1, ram_mb: 2048, disk_gb: 20, projects: 1 };
+  if (tier === "large") return { cpu: 8, ram_mb: 16384, disk_gb: 160, projects: 1 };
+  if (tier === "medium") return { cpu: 4, ram_mb: 8192, disk_gb: 80, projects: 1 };
+  return { cpu: 2, ram_mb: 4096, disk_gb: 40, projects: 1 };
 }
 
 // effectiveReservation mirrors the control plane: start from the tier preset and

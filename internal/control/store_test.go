@@ -49,7 +49,7 @@ func TestCreateProjectAppliesExactSizingOverridesAndAccounting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Medium tier preset is 2 CPU / 4096 MB / 50 GB; override CPU and RAM only,
+	// Medium tier preset is 4 CPU / 8192 MB / 80 GB; override CPU and RAM only,
 	// leaving disk to fall back to the preset.
 	project, err := store.CreateProject(ctx, CreateProjectRequest{
 		OrgID: org.ID, Ref: "sized-one", Name: "Sized", HostID: host.ID,
@@ -62,15 +62,15 @@ func TestCreateProjectAppliesExactSizingOverridesAndAccounting(t *testing.T) {
 		t.Fatalf("spec did not carry overrides: %+v", project.Spec)
 	}
 	cpu, ramMB, diskGB := EffectiveResourceSizing(project.Spec)
-	if cpu != 6 || ramMB != 12288 || diskGB != 50 {
-		t.Fatalf("effective sizing = %d/%d/%d, want 6/12288/50", cpu, ramMB, diskGB)
+	if cpu != 6 || ramMB != 12288 || diskGB != 80 {
+		t.Fatalf("effective sizing = %d/%d/%d, want 6/12288/80", cpu, ramMB, diskGB)
 	}
 	hosts, err := store.ListHosts(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hosts[0].Used.CPU != 6 || hosts[0].Used.RAMMB != 12288 || hosts[0].Used.DiskGB != 50 {
-		t.Fatalf("host reservation = %+v, want CPU 6 / RAM 12288 / Disk 50", hosts[0].Used)
+	if hosts[0].Used.CPU != 6 || hosts[0].Used.RAMMB != 12288 || hosts[0].Used.DiskGB != 80 {
+		t.Fatalf("host reservation = %+v, want CPU 6 / RAM 12288 / Disk 80", hosts[0].Used)
 	}
 
 	// Out-of-bounds overrides are rejected.

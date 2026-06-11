@@ -234,7 +234,7 @@ func TestCreateProjectDefaultsToAvailableHostCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metrics.HostUsed.Project != 1 || metrics.HostUsed.CPU != 1 || metrics.HostUsed.RAMMB != 2048 || metrics.HostUsed.DiskGB != 20 {
+	if metrics.HostUsed.Project != 1 || metrics.HostUsed.CPU != 2 || metrics.HostUsed.RAMMB != 4096 || metrics.HostUsed.DiskGB != 40 {
 		t.Fatalf("expected small tier reservation in host usage, got %#v", metrics.HostUsed)
 	}
 }

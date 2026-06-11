@@ -482,10 +482,15 @@ const (
 	maxProjectDiskGB = 16384  // 16 TB
 )
 
+// Tier presets are sized for a full-profile Supabase project (Postgres, Kong,
+// Auth, REST, Realtime, Storage, Studio, edge functions, and Logflare
+// analytics). "small" is the realistic floor for the full profile — the BEAM
+// analytics service alone wants ~1 GB — so small starts at 4 GB rather than the
+// 2 GB that can't actually run the full stack.
 var resourceTierReservations = map[ResourceTier]HostCapacity{
-	ResourceTierSmall:  {CPU: 1, RAMMB: 2048, DiskGB: 20, Project: 1},
-	ResourceTierMedium: {CPU: 2, RAMMB: 4096, DiskGB: 50, Project: 1},
-	ResourceTierLarge:  {CPU: 4, RAMMB: 8192, DiskGB: 100, Project: 1},
+	ResourceTierSmall:  {CPU: 2, RAMMB: 4096, DiskGB: 40, Project: 1},
+	ResourceTierMedium: {CPU: 4, RAMMB: 8192, DiskGB: 80, Project: 1},
+	ResourceTierLarge:  {CPU: 8, RAMMB: 16384, DiskGB: 160, Project: 1},
 }
 
 type Store interface {

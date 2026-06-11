@@ -104,7 +104,7 @@ services:
     networks:
       - default
       - supadupa-ingress
-      - docker-proxy
+      - supadupa-docker-proxy
 
   # Limited Docker API proxy: holds the real socket and translates project bind
   # paths (container -> host) so the control plane can run compose without a raw
@@ -131,7 +131,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - docker-proxy
+      - supadupa-docker-proxy
 
   admin-ui:
     build:
@@ -211,5 +211,5 @@ networks:
   supadupa-ingress:
     name: supadupa-ingress
     external: true
-  docker-proxy:
+  supadupa-docker-proxy:
     internal: true

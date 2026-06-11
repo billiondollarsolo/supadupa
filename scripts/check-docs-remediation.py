@@ -10,9 +10,9 @@ CHECKS = {
         "docs/install.md",
         [".env", "0600", "control-character"],
     ),
-    "install docs public database opt-in": (
+    "install docs public database gating": (
         "docs/install.md",
-        ["--expose-db", "SUPADUPA_POSTGRES_ADDR", "SUPADUPA_POOLER_ADDR", "SUPADUPA_DB_INGRESS_ALLOWED_CIDRS"],
+        ["--db-loopback", "SUPADUPA_POSTGRES_ADDR", "SUPADUPA_POOLER_ADDR", "SUPADUPA_DB_INGRESS_ALLOWED_CIDRS"],
     ),
     "install docs docker socket proxy": (
         "docs/install.md",

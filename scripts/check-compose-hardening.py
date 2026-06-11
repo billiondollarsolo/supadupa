@@ -40,8 +40,11 @@ def compose_config_json(env: dict[str, str], *files: str) -> dict:
 def assert_base_compose(config: dict) -> None:
     services = config.get("services") or {}
     socket_owners = docker_socket_owners(config)
-    if socket_owners:
-        raise SystemExit(f"base compose config must not mount the Docker socket: {socket_owners!r}")
+    if socket_owners != ["docker-socket-proxy"]:
+        raise SystemExit(
+            "base compose config may only mount the Docker socket via docker-socket-proxy, "
+            f"got: {socket_owners!r}"
+        )
 
     for name, service in services.items():
         command = service.get("command") or []

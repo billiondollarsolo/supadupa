@@ -52,8 +52,8 @@ func TestReconcileUpdatesProjectStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Action != "project.reconciled" {
-		t.Fatalf("expected reconciled audit event, got %#v", events)
+	if len(events) != 0 {
+		t.Fatalf("reconcile must not write audit events, got %#v", events)
 	}
 	logs, err := store.ListProjectLogs(ctx, project.Ref, 10)
 	if err != nil {
@@ -105,8 +105,8 @@ func TestReconcileMarksDegradedDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Action != "project.reconciled" || events[0].Metadata["to"] != string(control.ProjectDegraded) {
-		t.Fatalf("expected degraded reconciled audit event, got %#v", events)
+	if len(events) != 0 {
+		t.Fatalf("reconcile must not write audit events, got %#v", events)
 	}
 	logs, err := store.ListProjectLogs(ctx, project.Ref, 10)
 	if err != nil {
@@ -158,8 +158,8 @@ func TestReconcileUpdatesSamePhaseMessageDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Action != "project.reconciled" || events[0].Metadata["from"] != string(control.ProjectDegraded) || events[0].Metadata["to"] != string(control.ProjectDegraded) {
-		t.Fatalf("expected same-phase reconciled audit event, got %#v", events)
+	if len(events) != 0 {
+		t.Fatalf("reconcile must not write audit events, got %#v", events)
 	}
 }
 

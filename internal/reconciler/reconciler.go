@@ -141,14 +141,14 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			if status.Phase == control.ProjectDegraded || status.Phase == control.ProjectError {
 				level = "warning"
 			}
+			// Status convergence is routine system telemetry, not an operator or
+			// security action — record it in the project's activity log, but keep
+			// it out of the immutable audit trail (where it otherwise dominates the
+			// signal). Reconcile *errors* still audit below.
 			control.LogProject(ctx, r.store, project.Ref, level, "Project reconciled", map[string]string{
 				"from":    string(project.Status),
 				"to":      string(status.Phase),
 				"message": status.Message,
-			})
-			control.Audit(ctx, r.store, "project.reconciled", "project:"+project.Ref, map[string]string{
-				"from": string(project.Status),
-				"to":   string(status.Phase),
 			})
 		}
 	}

@@ -168,7 +168,11 @@ func withAuth(required bool, auth *control.AuthService, next http.Handler) http.
 			writeError(w, http.StatusUnauthorized, "invalid bearer token")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tokenClaimsKey, claims)))
+		// Carry the authenticated actor + client IP so every audited action
+		// downstream records who did it and from where.
+		ctx := context.WithValue(r.Context(), tokenClaimsKey, claims)
+		ctx = control.WithAuditContext(ctx, claims.Subject, clientIP(r))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

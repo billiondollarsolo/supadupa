@@ -7108,11 +7108,45 @@ func (s *MemoryStore) GetProjectMetrics(ctx context.Context, ref string) (Projec
 	return metrics, nil
 }
 
+type auditContextKey struct{}
+
+type auditContextValue struct {
+	actorID  string
+	clientIP string
+}
+
+// WithAuditContext attaches the authenticated actor and client IP to a context
+// so every Audit() call made downstream records WHO did the action and from
+// WHERE, without each call site having to pass them. Set by the API auth
+// middleware (per request) and by the login handler (which runs pre-auth).
+func WithAuditContext(ctx context.Context, actorID, clientIP string) context.Context {
+	return context.WithValue(ctx, auditContextKey{}, auditContextValue{actorID: strings.TrimSpace(actorID), clientIP: strings.TrimSpace(clientIP)})
+}
+
+func auditContextFrom(ctx context.Context) auditContextValue {
+	v, _ := ctx.Value(auditContextKey{}).(auditContextValue)
+	return v
+}
+
 func Audit(ctx context.Context, store Store, action string, target string, metadata map[string]string) {
 	if store == nil {
 		return
 	}
+	actor := auditContextFrom(ctx)
+	// The hash chain already covers ActorID and (sorted) metadata, so the actor
+	// and client_ip we add here are tamper-protected like every other field.
+	if actor.clientIP != "" {
+		merged := make(map[string]string, len(metadata)+1)
+		for k, v := range metadata {
+			merged[k] = v
+		}
+		if _, exists := merged["client_ip"]; !exists {
+			merged["client_ip"] = actor.clientIP
+		}
+		metadata = merged
+	}
 	_, _ = store.RecordAuditEvent(ctx, AuditEventInput{
+		ActorID:  actor.actorID,
 		Action:   action,
 		Target:   target,
 		Metadata: metadata,

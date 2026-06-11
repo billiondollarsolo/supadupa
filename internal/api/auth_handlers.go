@@ -143,7 +143,7 @@ func bootstrapHandler(store control.Store, auth *control.AuthService) http.Handl
 		if at, err := store.RecordUserLogin(r.Context(), user.ID); err == nil {
 			user.LastLoginAt = &at
 		}
-		control.Audit(r.Context(), store, "user.bootstrap", "user:"+user.ID, map[string]string{"email": user.Email})
+		control.Audit(control.WithAuditContext(r.Context(), user.ID, clientIP(r)), store, "user.bootstrap", "user:"+user.ID, map[string]string{"email": user.Email})
 		writeJSON(w, http.StatusCreated, authResponseForRequest(r, token, user))
 	}
 }
@@ -191,7 +191,7 @@ func loginHandler(store control.Store, auth *control.AuthService, limiter *authA
 		if at, err := store.RecordUserLogin(r.Context(), user.ID); err == nil {
 			user.LastLoginAt = &at
 		}
-		control.Audit(r.Context(), store, "user.login", "user:"+user.ID, map[string]string{"email": user.Email})
+		control.Audit(control.WithAuditContext(r.Context(), user.ID, clientIP(r)), store, "user.login", "user:"+user.ID, map[string]string{"email": user.Email})
 		writeJSON(w, http.StatusOK, authResponseForRequest(r, token, user))
 	}
 }
@@ -311,7 +311,7 @@ func platformSSOCallbackHandler(store control.Store, auth *control.AuthService, 
 		if at, err := store.RecordUserLogin(r.Context(), user.ID); err == nil {
 			user.LastLoginAt = &at
 		}
-		control.Audit(r.Context(), store, "user.sso_login", "user:"+user.ID, map[string]string{
+		control.Audit(control.WithAuditContext(r.Context(), user.ID, clientIP(r)), store, "user.sso_login", "user:"+user.ID, map[string]string{
 			"email":   user.Email,
 			"issuer":  assertion.Issuer,
 			"name_id": assertion.NameID,

@@ -129,23 +129,32 @@ function NextStepsStrip({ metrics, onOpenTab, project }: { project?: Project; me
 
 function ObservedMetricsPanel({ history, loading, metrics }: { history: ProjectTelemetryPoint[]; metrics?: ProjectMetrics; loading: boolean }) {
   const observed = metrics?.observed;
-  const hasDiskSample = Boolean(observed && (observed.disk_used_bytes > 0 || observed.disk_limit_bytes > 0));
-  const memoryPercent = observed && observed.memory_limit_bytes > 0 ? (observed.memory_bytes / observed.memory_limit_bytes) * 100 : 0;
-  const diskPercent = hasDiskSample && observed && observed.disk_limit_bytes > 0 ? (observed.disk_used_bytes / observed.disk_limit_bytes) * 100 : 0;
+  // Measure usage against the project's RESERVED allocation (tier/size), not the
+  // host — a "small" project should read against 1 vCPU / 2 GB, not the whole
+  // box. Reservations are soft (containers can burst above them unless limit
+  // enforcement is on), so usage can exceed 100%.
+  const reservedCpu = metrics?.resources?.cpu ?? 0;
+  const reservedRamBytes = (metrics?.resources?.ram_mb ?? 0) * 1024 * 1024;
+  const reservedDiskBytes = (metrics?.resources?.disk_gb ?? 0) * 1024 * 1024 * 1024;
+  const usedCores = observed ? observed.cpu_percent / 100 : 0; // docker: 100% = 1 core
+  const cpuPercent = reservedCpu > 0 ? (usedCores / reservedCpu) * 100 : 0;
+  const memoryPercent = reservedRamBytes > 0 && observed ? (observed.memory_bytes / reservedRamBytes) * 100 : 0;
+  const diskUsed = observed?.disk_used_bytes ?? 0;
+  const diskPercent = reservedDiskBytes > 0 && diskUsed > 0 ? (diskUsed / reservedDiskBytes) * 100 : 0;
   return (
     <AppPanel actions={observed ? <time className="text-xs text-faint">{formatTime(observed.sampled_at)}</time> : null} eyebrow="Monitoring" title="Resource telemetry">
       {loading ? <p className="mt-4 text-sm text-muted">Loading project metrics...</p> : null}
       <div className="mt-4 grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-        <ResourceMeter label="CPU" value={observed ? `${observed.cpu_percent.toFixed(1)}%` : "No sample"} detail={observed ? observed.source : "Collector pending"} footer={observed ? "observed" : "reserved"} percent={observed ? Math.min(100, observed.cpu_percent) : 0} />
-        <ResourceMeter label="Memory" value={observed ? `${memoryPercent.toFixed(1)}%` : "No sample"} detail={observed && observed.memory_limit_bytes > 0 ? `${formatBytes(observed.memory_bytes)} of ${formatBytes(observed.memory_limit_bytes)}` : "Collector pending"} footer={observed ? "observed" : "reserved"} percent={memoryPercent} />
-        <ResourceMeter label="Disk" value={hasDiskSample ? `${diskPercent.toFixed(1)}%` : "No volume sample"} detail={hasDiskSample && observed && observed.disk_limit_bytes > 0 ? `${formatBytes(observed.disk_used_bytes)} of ${formatBytes(observed.disk_limit_bytes)}` : metrics ? `${formatBytes(metrics.db_allocated_bytes)} reserved` : "Collector pending"} footer={hasDiskSample ? "observed" : "reserved"} percent={diskPercent} />
+        <ResourceMeter label="CPU" value={observed ? `${cpuPercent.toFixed(1)}%` : "No sample"} detail={observed ? `${usedCores.toFixed(2)} of ${reservedCpu} vCPU reserved` : `${reservedCpu} vCPU reserved`} footer="of reservation" percent={Math.min(100, cpuPercent)} />
+        <ResourceMeter label="Memory" value={observed ? `${memoryPercent.toFixed(1)}%` : "No sample"} detail={`${observed ? formatBytes(observed.memory_bytes) + " of " : ""}${formatBytes(reservedRamBytes)} reserved`} footer="of reservation" percent={Math.min(100, memoryPercent)} />
+        <ResourceMeter label="Disk" value={diskUsed > 0 ? `${diskPercent.toFixed(1)}%` : "No volume sample"} detail={`${diskUsed > 0 ? formatBytes(diskUsed) + " of " : ""}${formatBytes(reservedDiskBytes)} reserved`} footer="of reservation" percent={Math.min(100, diskPercent)} />
       </div>
       <TelemetryLineChart ariaLabel="Recent project CPU and memory utilization" points={history.map((point) => ({ sampledAt: point.sampledAt, cpu: point.cpuPercent, memory: point.memoryPercent }))} title="Recent telemetry" />
-      {!observed ? (
-        <p className="mt-3 text-xs text-faint">
-          Showing reserved capacity until a Compose or Kubernetes telemetry collector records live samples.
-        </p>
-      ) : null}
+      <p className="mt-3 text-xs text-faint">
+        {observed
+          ? "Usage is shown against this project's reserved size. Reservations are soft — containers can burst above them unless database limit enforcement is enabled, so a bar may read over 100%."
+          : "Showing reserved capacity until a Compose or Kubernetes telemetry collector records live samples."}
+      </p>
     </AppPanel>
   );
 }

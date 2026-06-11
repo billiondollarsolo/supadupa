@@ -74,6 +74,32 @@ Recommended checklist:
 7. Check project route health.
 8. Check Advisor and Compliance for new findings.
 
+## Operator Notes
+
+### 0.1.0 — Docker proxy network rename
+
+The base Compose definition previously named the internal Docker-API proxy
+network `docker-proxy`, while the apply overlay named it `supadupa-docker-proxy`.
+The merged stack therefore attached `docker-socket-proxy` (and the control plane)
+to **two** redundant internal networks. Both names are now unified to
+`supadupa-docker-proxy`.
+
+- **Externally observable behavior:** none. The proxy keeps the same service DNS
+  name (`docker-socket-proxy:2375`) and remains on an `internal: true` network;
+  only the network's Compose key changed.
+- **Who is affected:** existing Compose installs (base and apply mode) on their
+  next `up`. Local dev and fresh installs are unaffected beyond the new name.
+- **Required action:** none beyond a normal redeploy. On the next
+  `docker compose ... up -d`, Compose creates `<project>_supadupa-docker-proxy`
+  and the stale `<project>_docker-proxy` network is left orphaned; remove it with
+  `docker network prune` (or `docker network rm <project>_docker-proxy`) once the
+  stack is healthy. No restart ordering or backup is required.
+- **Validation:** `scripts/check-compose-hardening.py` (asserts the proxy is the
+  sole Docker-socket owner on exactly the `supadupa-docker-proxy` network) and
+  `docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml config`.
+- **Risk if skipped:** none — the orphaned network is harmless; pruning it is
+  housekeeping only. There is no rollback constraint.
+
 ## Validation Commands
 
 ```bash

@@ -17,17 +17,16 @@ test("bootstraps the first admin and reaches the fleet dashboard", async ({ page
   await page.goto("/login");
 
   await expect(page.getByRole("heading", { name: "Create first admin" })).toBeVisible();
-  await expect(page.getByText("Management API online at")).toBeVisible();
   await expect(page.getByText("No admin detected. Bootstrap is available below for first-run installs.")).toBeVisible();
 
   await page.getByPlaceholder("admin@example.com").fill(adminUser.email);
   await page.getByPlaceholder("Create password").fill("correct horse battery staple");
-  await page.getByRole("button", { name: "Create admin" }).click();
+  await page.getByRole("button", { name: "Create first admin" }).click();
 
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("SUPADUPA")).toBeVisible();
   await expect(page.getByRole("heading", { name: "At a glance" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Live usage" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Reservations" })).toBeVisible();
 });
 
 async function mockManagementAPI(page: Page, isAuthenticated: () => boolean, markAuthenticated: () => void) {

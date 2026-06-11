@@ -258,6 +258,7 @@ docker_gid="0"
 if [[ -S /var/run/docker.sock ]]; then
   docker_gid="$(stat -c '%g' /var/run/docker.sock)"
 fi
+build_sha="$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo unknown)"
 secret_key="$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 auth_secret="$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 
@@ -427,6 +428,7 @@ SUPADUPA_CERTS_HOST_DIR=$runtime_dir/certs
 SUPADUPA_PROJECT_HOST_ROOT=$runtime_dir/projects
 SUPADUPA_CONTROL_PLANE_USER=$control_plane_user
 SUPADUPA_DOCKER_GID=$docker_gid
+SUPADUPA_BUILD_SHA=$build_sha
 
 SUPADUPA_PROVISIONER=compose
 SUPADUPA_COMPOSE_APPLY=true
@@ -467,6 +469,20 @@ echo "Wrote .env"
 echo "Created runtime directories under $runtime_dir"
 echo "Ensured Docker network supadupa-ingress exists"
 echo "Configured control-plane container user $control_plane_user and Docker proxy socket group $docker_gid"
+
+# Warn (do not block) when the host has less RAM than a single full-profile
+# project realistically needs (~4 GB) plus the control plane (~0.5 GB). The full
+# profile includes Logflare/analytics (Elixir/BEAM), which is OOM-killed on
+# small hosts and leaves the project "degraded" — the #1 first-run surprise.
+mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+mem_gb=$(( mem_kb / 1024 / 1024 ))
+if [[ "$mem_kb" -gt 0 && "$mem_gb" -lt 4 ]]; then
+  echo
+  echo "Warning: this host has ~${mem_gb} GB RAM. A single full-profile project needs ~4 GB"
+  echo "(Logflare/analytics alone wants ~1 GB) plus ~0.5 GB for the control plane. On less,"
+  echo "the analytics container is OOM-killed and the project reports 'degraded'. Use a larger"
+  echo "host, or create projects with analytics disabled. See docs/install.md (Resource Requirements)."
+fi
 echo "Project defaults will seed from SUPADUPA_APPS_DOMAIN on first startup"
 if [[ "$mode" != "local" && "$mode" != "offline" ]]; then
   echo

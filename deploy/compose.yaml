@@ -23,6 +23,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.control-plane
+      args:
+        BUILD_SHA: ${SUPADUPA_BUILD_SHA:-unknown}
     user: "${SUPADUPA_CONTROL_PLANE_USER:-10001:10001}"
     cap_drop:
       - ALL
@@ -111,6 +113,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.control-plane
+      args:
+        BUILD_SHA: ${SUPADUPA_BUILD_SHA:-unknown}
     command: ["supadupa-docker-proxy"]
     # Runs as root so it can access the host docker socket (root:docker, 0660).
     # This is the single privileged boundary; the control plane stays unprivileged

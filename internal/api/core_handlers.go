@@ -11,7 +11,7 @@ import (
 )
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": control.Version})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": control.Version, "build": control.BuildSHA})
 }
 
 func provisionerHandler(provisioner control.Provisioner) http.HandlerFunc {

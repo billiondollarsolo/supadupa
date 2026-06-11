@@ -24,7 +24,7 @@ This repo is currently in MVP shape. The Docker Compose backend is the supported
 
 This is a very early release. There will be many rough edges, missing features, and potential instability. There will also likely be breaking changes to the API, CLI, and runtime behavior as we iterate quickly toward a more stable v1.0.
 
-Supadupa is good enough for MVP evaluation and internal dev environments where the operator understands the remaining hosted-grade gaps.
+Supadupa is good enough for MVP evaluation and internal dev environments where the operator understands the remaining hosted-grade gaps. Before running it for real, skim [Known Issues & Operational Notes](docs/known-issues.md) — especially the resource-sizing requirement (a full-profile project needs ~4 GB RAM).
 
 Working at MVP level:
 
@@ -282,10 +282,12 @@ GET /v1/stack-releases
 
 The upgrade API creates or verifies a pre-upgrade logical backup and records rollback metadata. For production-like upgrades, enable durable upgrade backup enforcement and use an off-host target.
 
-Control-plane updates use normal Compose rebuild/restart:
+Control-plane updates use normal Compose rebuild/restart. Set `SUPADUPA_BUILD_SHA` on the build so `GET /v1/health` and the About page report the commit you just deployed:
 
 ```bash
-docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
+git pull
+SUPADUPA_BUILD_SHA="$(git rev-parse --short HEAD)" \
+  docker compose --env-file .env -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edge up -d --build
 ```
 
 The API runs meta DB migrations on startup and reconciles persisted project runtime artifacts.

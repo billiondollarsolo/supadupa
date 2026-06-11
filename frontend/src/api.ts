@@ -110,7 +110,7 @@ function formatErrorDetail(detail: string) {
 }
 
 export function getApiHealth() {
-  return request<{ status: string; version?: string }>("/v1/health");
+  return request<{ status: string; version?: string; build?: string }>("/v1/health");
 }
 
 export function getAuthState(init?: RequestInit) {

@@ -10,6 +10,7 @@ import { BUILDERS, REPO_URL } from "../components/built-by-footer";
 export function AboutPage() {
   const health = useQuery({ queryKey: ["api-health"], queryFn: getApiHealth, refetchInterval: 30_000 });
   const version = health.data?.version ?? "—";
+  const build = health.data?.build && health.data.build !== "unknown" ? health.data.build : "—";
 
   return (
     <div className="grid max-w-2xl gap-6">
@@ -28,6 +29,7 @@ export function AboutPage() {
       <AppPanel eyebrow="Release" title="Version">
         <div className="mt-3 grid gap-1">
           <InfoRow title="Platform version" detail="Reported by the control-plane API" value={version} />
+          <InfoRow title="Build" detail="Git commit this build was compiled from" value={build} />
           <InfoRow title="API status" detail="Live management API health" value={health.isError ? "offline" : health.data?.status ?? "checking"} />
         </div>
       </AppPanel>

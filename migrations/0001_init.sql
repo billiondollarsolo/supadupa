@@ -14,6 +14,7 @@ CREATE TABLE users (
     mfa_pending_secret TEXT,
     mfa_confirmed_at TIMESTAMPTZ,
     mfa_updated_at TIMESTAMPTZ,
+    token_version BIGINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

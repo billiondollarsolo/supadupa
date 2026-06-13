@@ -36,6 +36,9 @@ for (const path of walk(new URL("../src", import.meta.url))) {
     continue;
   }
   const source = readFileSync(path, "utf8");
+  if (source.includes("dangerouslySetInnerHTML")) {
+    failures.push(`${relativeSourcePath(path)}: dangerouslySetInnerHTML requires an explicit security review and sanitizer`);
+  }
   source.split("\n").forEach((line, index) => {
     if (line.includes("/projects/${") || line.includes("`/projects/")) {
       failures.push(`${relativeSourcePath(path)}:${index + 1}: project routes must use projectPath() or route params`);

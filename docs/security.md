@@ -34,6 +34,18 @@ SUPADUPA_VAULT_KEY_FILE
 
 For MVP installs, keep `SUPADUPA_SECRET_KEY` protected and stable. For production hardening, use an external key provider or a protected vault key file.
 
+## Runtime Secret Hygiene
+
+Generated `.env` files, rendered project runtime directories, local certificates, backup artifacts, logs, and compatibility artifacts can contain production secrets. They are ignored by `.gitignore` and should not be copied into tickets, review bundles, or external storage unless explicitly sanitized.
+
+Run this check before sharing artifacts or from CI jobs that have access to a workspace checkout:
+
+```bash
+scripts/check-runtime-secret-hygiene.sh
+```
+
+Use `--fail-on-present` for sterile release or review bundles where no local runtime artifacts should exist. Use `--markdown-report docs/reviews/<date>/local-runtime-artifact-inventory.md` when a review needs count-only evidence. The script reports counts and tracked-file mistakes without printing secret values.
+
 ## Network Exposure
 
 Default public ports should be:
@@ -51,7 +63,7 @@ Under the Compose provisioner each project runs on its own dedicated Docker netw
 
 The Kubernetes provisioner does **not** yet enforce equivalent isolation — all projects share one namespace with no `NetworkPolicy`. Treat the Kubernetes path as single-tenant until namespace-per-project + default-deny `NetworkPolicy` lands; see "Project Network Isolation" in `docs/kubernetes.md`.
 
-Direct Postgres and pooler edge routes use `5432` and `6543`. Those ports bind `0.0.0.0` by default, but the host bind is not the access gate — Traefik is. Two independent, default-closed gates must both be opened before any external client can reach a project database: the platform `database_external_access` master switch, and the per-project `db_ingress_mode` (`private` by default, set to `allowlisted` or `public` per project). With either closed, Traefik renders no DB TCP route and refuses the connection even though the port is bound. Pass `--db-loopback` at setup (or set `SUPADUPA_POSTGRES_ADDR` / `SUPADUPA_POOLER_ADDR` to `127.0.0.1`) to avoid binding publicly at all. Private database ingress does not block normal app access through public HTTPS Auth, REST, GraphQL, Storage, Realtime, or Functions routes.
+Direct Postgres and pooler edge routes use `5432` and `6543`. Those ports bind `127.0.0.1` by default in generated Compose environments and in the Compose fallback values. Pass `--db-public-bind` at setup (or set `SUPADUPA_POSTGRES_ADDR` / `SUPADUPA_POOLER_ADDR` to `0.0.0.0`) only when external raw database clients are required. Even with public host binds, two independent, default-closed gates must both be opened before any external client can reach a project database: the platform `database_external_access` master switch, and the per-project `db_ingress_mode` (`private` by default, set to `allowlisted` or `public` per project). With either closed, Traefik renders no DB TCP route and refuses the connection. Private database ingress does not block normal app access through public HTTPS Auth, REST, GraphQL, Storage, Realtime, or Functions routes.
 
 When raw database ingress is public, treat it as a separate production exposure decision. Restrict `5432` and `6543` to trusted client networks with host firewall or provider firewall rules, and configure the same CIDRs in `Settings -> Database Ingress`. Saving that UI setting persists the allowlist, rewrites existing project route manifests, and lets Traefik's file provider reload TCP `ipAllowList` middleware without a container restart.
 
@@ -87,6 +99,14 @@ New platform user passwords are stored as `bcrypt-sha256$...` hashes: the submit
 
 Browser sessions are cookie based. The admin UI should not store reusable bearer tokens in `localStorage` or `sessionStorage`; the static frontend checks guard that behavior.
 
+Platform admin bearer tokens include a user token version. Platform-admin authorization reloads the current user before privileged actions and rejects stale tokens when the user was demoted, deleted, or had credentials/MFA state changed. Existing admin tokens issued before this token-version field may need users to log in again after deploying this change; lower-risk development no-auth mode remains explicit through server configuration, not implicit missing-claim success.
+
+## MFA Seed Storage
+
+Control-plane TOTP seeds are encrypted before they are written to normalized `users.mfa_secret` and `users.mfa_pending_secret` persistence columns. Encrypted values use an application envelope marker so legacy plaintext rows can still be read during migration.
+
+Existing plaintext MFA seed rows are treated as legacy input: the control plane can load them, and a later normalized persistence sync rewrites the row with encrypted values. If prior database dumps, backups, logs, or support bundles may have exposed plaintext seeds, require affected users to disable and re-enroll MFA after rotating any related account credentials. Do not paste TOTP seed values into logs, tickets, or review artifacts.
+
 ## Platform SSO
 
 The current platform SSO endpoint is a compatibility/development adapter, not a complete SAML implementation. It accepts a normalized signed JSON assertion and validates issuer, audience, email domain, expiry, role binding, and the configured certificate signature over that normalized payload. It does not parse a real `SAMLResponse` XML document or validate XML signature transforms.
@@ -120,6 +140,22 @@ S3/R2 credentials should be scoped to the backup bucket/prefix where possible. T
 - Secret access key.
 - Bucket name and endpoint where sensitive.
 - Backup artifacts.
+
+S3-compatible backup target endpoints are configured by platform admins. The API reports warnings for loopback, local interface, private RFC1918, link-local, and cloud metadata endpoint destinations so operators can distinguish production off-host storage from local/dev targets. These warnings do not print credentials and do not by themselves prove durability; production recovery targets should use provider S3/R2 or another trusted off-host object store, pass the target test, and avoid metadata or internal network endpoints unless the deployment has an explicit private-storage design.
+
+## Project Restore Authorization
+
+Logical project restores and PITR restores are destructive recovery actions. They require project admin authority; project developers may still trigger allowed backup/read workflows but cannot restore project databases. The API requires project-bound confirmation text:
+
+```json
+{"backup_id":"backup-id","confirmation":"restore project project-ref"}
+```
+
+```json
+{"recovery_time_target_unix":"1781310000","confirmation":"restore pitr project project-ref"}
+```
+
+Accepted restore audit events record the project, restore type, backup id or target timestamp, and that confirmation was present. Missing or mismatched confirmation is rejected before the restore command is started.
 
 ## Cloudflare Credentials
 
@@ -164,3 +200,4 @@ Anon keys are public by design, but policies and row-level security must still b
 10. Compatibility tests run against a disposable project.
 11. Sanitized compatibility artifacts reviewed before upload or sharing.
 12. Public DB/pooler ports exposed only when required and firewall-controlled.
+13. `scripts/check-runtime-secret-hygiene.sh` passes before sharing a checkout or artifact bundle.

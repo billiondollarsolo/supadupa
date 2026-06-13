@@ -15,7 +15,7 @@ import (
 // so search reaches all history rather than just a recent client-side window.
 func listAuditEventsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		q := r.URL.Query()
@@ -67,7 +67,7 @@ func parseAuditTime(raw string, endOfDay bool) time.Time {
 
 func getAuditIntegrityHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		integrity, err := store.VerifyAuditLog(r.Context())
@@ -81,7 +81,7 @@ func getAuditIntegrityHandler(store control.Store) http.HandlerFunc {
 
 func createHostHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		var payload control.CreateHostRequest
@@ -101,7 +101,7 @@ func createHostHandler(store control.Store) http.HandlerFunc {
 
 func listHostsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		hosts, err := store.ListHosts(r.Context())
@@ -115,7 +115,7 @@ func listHostsHandler(store control.Store) http.HandlerFunc {
 
 func getHostHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		host, err := store.GetHost(r.Context(), r.PathValue("id"))
@@ -129,7 +129,7 @@ func getHostHandler(store control.Store) http.HandlerFunc {
 
 func deleteHostHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		id := r.PathValue("id")

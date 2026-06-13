@@ -1348,7 +1348,7 @@ curl -fsS "$SUPADUPA_API_URL/v1/projects/$SUPADUPA_TEST_REF/database/backups" \
 curl -fsS -X POST "$SUPADUPA_API_URL/v1/projects/$SUPADUPA_TEST_REF/database/backups/restore-pitr" \
   -H "Authorization: Bearer $SUPADUPA_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"recovery_time_target_unix":"1735689600"}'
+  -d '{"recovery_time_target_unix":"1735689600","confirmation":"restore pitr project '"$SUPADUPA_TEST_REF"'"}'
 ```
 
 Expected:

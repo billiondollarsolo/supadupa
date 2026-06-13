@@ -683,6 +683,7 @@ type User struct {
 	MFAConfirmedAt   time.Time `json:"-"`
 	MFAUpdatedAt     time.Time `json:"-"`
 	MFALastCounter   int64     `json:"-"`
+	TokenVersion     int64     `json:"-"`
 	CreatedAt        time.Time `json:"created_at"`
 	// LastLoginAt is the most recent successful login (post-MFA). Nil until the
 	// user has logged in at least once, so the API omits it rather than emitting
@@ -1360,6 +1361,7 @@ type BackupStorageTarget struct {
 	RecoveryReady    bool       `json:"recovery_ready"`
 	ReadinessStatus  string     `json:"readiness_status"`
 	ReadinessMessage string     `json:"readiness_message,omitempty"`
+	Warnings         []string   `json:"warnings,omitempty"`
 	LastTestedAt     *time.Time `json:"last_tested_at,omitempty"`
 	LastTestStatus   string     `json:"last_test_status,omitempty"`
 	LastTestError    string     `json:"last_test_error,omitempty"`
@@ -2339,6 +2341,7 @@ func (s *MemoryStore) CreateUser(ctx context.Context, req CreateUserRequest) (Us
 		Email:        email,
 		PasswordHash: hashPassword(req.Password),
 		Role:         role,
+		TokenVersion: 1,
 		CreatedAt:    time.Now().UTC(),
 	}
 
@@ -2382,6 +2385,7 @@ func (s *MemoryStore) UpdateUser(ctx context.Context, id string, req UpdateUserR
 	if currentEmail == "" {
 		return User{}, fmt.Errorf("%w: user %s", ErrNotFound, id)
 	}
+	securityStateChanged := currentEmail != nextEmail || user.Role != nextRole || req.Password != ""
 	if currentEmail != nextEmail {
 		if _, ok := s.users[nextEmail]; ok {
 			return User{}, fmt.Errorf("%w: user %s already exists", ErrConflict, nextEmail)
@@ -2416,6 +2420,9 @@ func (s *MemoryStore) UpdateUser(ctx context.Context, id string, req UpdateUserR
 	user.Role = nextRole
 	if req.Password != "" {
 		user.PasswordHash = hashPassword(req.Password)
+	}
+	if securityStateChanged {
+		user.TokenVersion = nextTokenVersion(user.TokenVersion)
 	}
 	s.users[nextEmail] = user
 	return user, nil
@@ -2566,6 +2573,7 @@ func (s *MemoryStore) BeginUserMFAEnrollment(ctx context.Context, userID string)
 	}
 	user.MFAPendingSecret = secret
 	user.MFAUpdatedAt = time.Now().UTC()
+	user.TokenVersion = nextTokenVersion(user.TokenVersion)
 	s.users[user.Email] = user
 
 	return MFAEnrollment{
@@ -2596,6 +2604,7 @@ func (s *MemoryStore) ConfirmUserMFA(ctx context.Context, userID string, code st
 	user.MFAConfirmedAt = now
 	user.MFAUpdatedAt = now
 	user.MFALastCounter = int64(counter)
+	user.TokenVersion = nextTokenVersion(user.TokenVersion)
 	s.users[user.Email] = user
 	return mfaStatusForUser(user), nil
 }
@@ -2610,6 +2619,7 @@ func (s *MemoryStore) DisableUserMFA(ctx context.Context, userID string, code st
 	if !user.MFAEnabled {
 		user.MFAPendingSecret = ""
 		user.MFAUpdatedAt = time.Now().UTC()
+		user.TokenVersion = nextTokenVersion(user.TokenVersion)
 		s.users[user.Email] = user
 		return mfaStatusForUser(user), nil
 	}
@@ -2626,8 +2636,16 @@ func (s *MemoryStore) DisableUserMFA(ctx context.Context, userID string, code st
 	user.MFAConfirmedAt = time.Time{}
 	user.MFAUpdatedAt = time.Now().UTC()
 	user.MFALastCounter = 0
+	user.TokenVersion = nextTokenVersion(user.TokenVersion)
 	s.users[user.Email] = user
 	return mfaStatusForUser(user), nil
+}
+
+func nextTokenVersion(current int64) int64 {
+	if current < 1 {
+		return 1
+	}
+	return current + 1
 }
 
 func (s *MemoryStore) HasUsers(ctx context.Context) bool {
@@ -10621,6 +10639,7 @@ func redactBackupStorageTarget(target BackupStorageTarget) BackupStorageTarget {
 	target.SecretConfigured = strings.TrimSpace(target.SecretAccessKey) != ""
 	target.SecretAccessKey = ""
 	target.DurableOffHost, target.RecoveryReady, target.ReadinessStatus, target.ReadinessMessage = backupStorageTargetReadiness(target)
+	target.Warnings = backupStorageTargetNetworkWarnings(target)
 	return target
 }
 

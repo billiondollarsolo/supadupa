@@ -2186,7 +2186,7 @@ func TestBackupsRestorePostsBackupID(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got["backup_id"] != "bkp_123" {
+		if got["backup_id"] != "bkp_123" || got["confirmation"] != "restore project alpha" {
 			t.Fatalf("unexpected restore payload %#v", got)
 		}
 		_, _ = w.Write([]byte(`{"restore_state":"completed","backup":{"id":"bkp_123"}}`))
@@ -2198,7 +2198,7 @@ func TestBackupsRestorePostsBackupID(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
-	}.Run(context.Background(), []string{"backups", "restore", "--ref", "alpha", "--backup-id", "bkp_123"})
+	}.Run(context.Background(), []string{"backups", "restore", "--ref", "alpha", "--backup-id", "bkp_123", "--confirmation", "restore project alpha"})
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
@@ -3058,6 +3058,19 @@ func TestFunctionsDeployReadsSourceFileAndSecrets(t *testing.T) {
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+}
+
+func TestBackupsRestoreRequiresConfirmation(t *testing.T) {
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": "http://127.0.0.1:1"},
+	}.Run(context.Background(), []string{"backups", "restore", "--ref", "alpha", "--backup-id", "bkp_123"})
+
+	if exitCode == 0 || !strings.Contains(stderr.String(), "confirmation is required") {
+		t.Fatalf("expected confirmation error, exit=%d stderr=%s", exitCode, stderr.String())
 	}
 }
 

@@ -14,9 +14,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": control.Version, "build": control.BuildSHA})
 }
 
-func provisionerHandler(provisioner control.Provisioner) http.HandlerFunc {
+func provisionerHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		name := "unconfigured"
@@ -27,9 +27,9 @@ func provisionerHandler(provisioner control.Provisioner) http.HandlerFunc {
 	}
 }
 
-func getRuntimeConfigHandler(provisioner control.Provisioner) http.HandlerFunc {
+func getRuntimeConfigHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		name := "unconfigured"
@@ -68,9 +68,9 @@ func getRuntimeConfigHandler(provisioner control.Provisioner) http.HandlerFunc {
 	}
 }
 
-func listStackReleasesHandler() http.HandlerFunc {
+func listStackReleasesHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		versions := control.SupportedStackReleaseVersionsFromEnv(os.Getenv)
@@ -86,7 +86,7 @@ func listStackReleasesHandler() http.HandlerFunc {
 
 func getFleetMetricsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		metrics, err := store.GetFleetMetrics(r.Context())
@@ -171,7 +171,7 @@ func bindAddressIsPublic(addr string) bool {
 
 func getAdvisorFindingsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		findings, err := control.FleetAdvisorFindings(r.Context(), store)
@@ -185,7 +185,7 @@ func getAdvisorFindingsHandler(store control.Store) http.HandlerFunc {
 
 func getComplianceReportHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		report, err := control.FleetComplianceReport(r.Context(), store)
@@ -199,7 +199,7 @@ func getComplianceReportHandler(store control.Store) http.HandlerFunc {
 
 func prometheusMetricsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		metrics, err := store.GetFleetMetrics(r.Context())

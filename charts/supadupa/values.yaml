@@ -13,7 +13,7 @@ controlPlane:
   metaDsn: ""
   image:
     repository: supadupa-control-plane
-    tag: 0.1.0
+    tag: 0.2.0
   service:
     type: ClusterIP
     port: 8080
@@ -61,7 +61,7 @@ admin:
   replicaCount: 1
   image:
     repository: supadupa-admin
-    tag: 0.1.0
+    tag: 0.2.0
   service:
     type: ClusterIP
     port: 8080
@@ -141,7 +141,7 @@ operator:
   replicaCount: 1
   image:
     repository: supadupa-operator
-    tag: 0.1.0
+    tag: 0.2.0
   health:
     # Liveness/readiness HTTP server. Empty port disables the probes + server.
     port: 8081

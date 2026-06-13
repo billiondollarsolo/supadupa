@@ -20,7 +20,7 @@ db-smoke.apps.example.com:5432             direct Postgres
 pooler-smoke.apps.example.com:6543         transaction/session pooler
 ```
 
-Direct Postgres and pooler routes require public `5432`/`6543` bindings. `scripts/setup-compose.sh --mode vps` keeps those bindings on loopback unless `--expose-db` is supplied.
+Direct Postgres and pooler routes require public `5432`/`6543` bindings. `scripts/setup-compose.sh --mode vps` keeps those bindings on loopback unless `--db-public-bind` is supplied.
 
 ## DNS Records
 
@@ -62,7 +62,7 @@ The edge profile runs Traefik and publishes by default:
 443     HTTPS control-plane and project HTTP surfaces
 ```
 
-With `--expose-db` or explicit `SUPADUPA_POSTGRES_ADDR=0.0.0.0:5432` and `SUPADUPA_POOLER_ADDR=0.0.0.0:6543`, Traefik also publishes TLS-routed direct Postgres and pooler routes. This is only needed for external raw Postgres/pooler clients; browser apps and `supabase-js` style clients continue to use the public HTTPS project routes when DB ingress is private.
+With `--db-public-bind` or explicit `SUPADUPA_POSTGRES_ADDR=0.0.0.0:5432` and `SUPADUPA_POOLER_ADDR=0.0.0.0:6543`, Traefik also publishes TLS-routed direct Postgres and pooler routes. This is only needed for external raw Postgres/pooler clients; browser apps and `supabase-js` style clients continue to use the public HTTPS project routes when DB ingress is private.
 
 If direct database ingress is public, restrict `5432` and `6543` to trusted client networks with host or provider firewall rules. Configure the same trusted CIDRs in `Settings -> Database Ingress`; saving that setting rewrites existing project route manifests so Traefik reloads TCP `ipAllowList` middleware and the Admin dashboard can report `Public with allowlist` instead of unrestricted public ingress.
 

@@ -68,6 +68,7 @@ run scripts/check-compose-hardening.py
 run scripts/check-setup-compose.sh
 run scripts/check-release-note-policy.sh
 run python3 scripts/check-docs-remediation.py
+run python3 scripts/check-security-regressions.py
 run python3 scripts/check-kubernetes-crds.py
 run jq empty charts/supadupa/values.schema.json
 
@@ -97,6 +98,7 @@ run bash -n \
 run python3 -m py_compile \
   scripts/check-compose-hardening.py \
   scripts/check-docs-remediation.py \
+  scripts/check-security-regressions.py \
   scripts/check-kubernetes-crds.py
 
 if [[ "${SUPADUPA_FINAL_SKIP_DOCKER_IMAGE_CHECKS:-}" == "1" ]]; then

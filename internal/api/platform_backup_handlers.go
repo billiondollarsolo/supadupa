@@ -31,7 +31,7 @@ type platformRuntimeRestoreSummary struct {
 
 func listPlatformBackupsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		backups, err := store.ListPlatformBackups(r.Context())
@@ -46,7 +46,7 @@ func listPlatformBackupsHandler(store control.Store) http.HandlerFunc {
 func triggerPlatformBackupHandler(store control.Store) http.HandlerFunc {
 	backupService := control.NewBackupService("")
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		backup, err := backupService.TriggerPlatformBackup(r.Context(), store)
@@ -67,7 +67,7 @@ func triggerPlatformBackupHandler(store control.Store) http.HandlerFunc {
 func restorePlatformBackupHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
 	backupService := control.NewBackupService("")
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		var payload restorePlatformBackupRequest

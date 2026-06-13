@@ -1153,17 +1153,17 @@ export function triggerBackup(ref: string) {
   });
 }
 
-export function restoreBackup(ref: string, backupId: string) {
+export function restoreBackup(ref: string, backupId: string, confirmation: string) {
   return request<{ backup: Backup; restore_path: string; restore_state: string }>(`/v1/projects/${segment(ref)}/restore`, {
     method: "POST",
-    body: JSON.stringify({ backup_id: backupId }),
+    body: JSON.stringify({ backup_id: backupId, confirmation }),
   });
 }
 
-export function restoreToTime(ref: string, recoveryTimeTargetUnix: number) {
+export function restoreToTime(ref: string, recoveryTimeTargetUnix: number, confirmation: string) {
   return request<RestoreToTimeResponse>(`/v1/projects/${segment(ref)}/database/backups/restore-pitr`, {
     method: "POST",
-    body: JSON.stringify({ recovery_time_target_unix: String(recoveryTimeTargetUnix) }),
+    body: JSON.stringify({ recovery_time_target_unix: String(recoveryTimeTargetUnix), confirmation }),
   });
 }
 

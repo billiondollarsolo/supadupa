@@ -507,7 +507,7 @@ process.stdout.write(String(unix));
       }
       restore_pitr_available_json="$ARTIFACT_DIR/recoverability-restore-pitr-available.json"
       restore_pitr_available_err="$ARTIFACT_DIR/recoverability-restore-pitr-available.stderr"
-      restore_pitr_available_status="$(api_json POST "/v1/projects/$SUPADUPA_TEST_REF/database/backups/restore-pitr" "{\"recovery_time_target_unix\":\"$restore_target_unix\"}" "$restore_pitr_available_json" "$restore_pitr_available_err")"
+      restore_pitr_available_status="$(api_json POST "/v1/projects/$SUPADUPA_TEST_REF/database/backups/restore-pitr" "{\"recovery_time_target_unix\":\"$restore_target_unix\",\"confirmation\":\"restore pitr project $SUPADUPA_TEST_REF\"}" "$restore_pitr_available_json" "$restore_pitr_available_err")"
       if [[ "$restore_pitr_available_status" != "201" ]]; then
         fail "recoverability.restore_pitr_available" "expected HTTP 201, got HTTP $restore_pitr_available_status"
       fi
@@ -527,7 +527,7 @@ if (Number(payload.recovery_time_target_unix) !== target) throw new Error(`recov
 else
   restore_pitr_json="$ARTIFACT_DIR/recoverability-restore-pitr.json"
   restore_pitr_err="$ARTIFACT_DIR/recoverability-restore-pitr.stderr"
-  restore_pitr_status="$(api_json POST "/v1/projects/$SUPADUPA_TEST_REF/database/backups/restore-pitr" '{"recovery_time_target_unix":"1735689600"}' "$restore_pitr_json" "$restore_pitr_err")"
+  restore_pitr_status="$(api_json POST "/v1/projects/$SUPADUPA_TEST_REF/database/backups/restore-pitr" "{\"recovery_time_target_unix\":\"1735689600\",\"confirmation\":\"restore pitr project $SUPADUPA_TEST_REF\"}" "$restore_pitr_json" "$restore_pitr_err")"
   if [[ "$restore_pitr_status" != "409" ]]; then
     fail "recoverability.restore_pitr_unavailable" "expected HTTP 409, got HTTP $restore_pitr_status"
   fi
@@ -835,7 +835,7 @@ process.stdout.write(String(unix));
 fi
 restore_full_json="$ARTIFACT_DIR/recoverability-full-pitr-restore.json"
 restore_full_err="$ARTIFACT_DIR/recoverability-full-pitr-restore.stderr"
-restore_full_status="$(api_json POST "/v1/projects/$SUPADUPA_TEST_REF/database/backups/restore-pitr" "{\"recovery_time_target_unix\":\"$restore_target_unix\"}" "$restore_full_json" "$restore_full_err")"
+restore_full_status="$(api_json POST "/v1/projects/$SUPADUPA_TEST_REF/database/backups/restore-pitr" "{\"recovery_time_target_unix\":\"$restore_target_unix\",\"confirmation\":\"restore pitr project $SUPADUPA_TEST_REF\"}" "$restore_full_json" "$restore_full_err")"
 if [[ "$restore_full_status" != "201" ]]; then
   fail "recoverability.full_pitr.restore" "expected HTTP 201, got HTTP $restore_full_status"
 fi

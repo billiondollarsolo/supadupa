@@ -11,7 +11,7 @@ import (
 
 func getPlatformDefaultsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		defaults, err := store.GetPlatformDefaults(r.Context())
@@ -25,7 +25,7 @@ func getPlatformDefaultsHandler(store control.Store) http.HandlerFunc {
 
 func updatePlatformDefaultsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		var payload control.PlatformDefaultsInput
@@ -65,7 +65,7 @@ func updatePlatformDefaultsHandler(store control.Store) http.HandlerFunc {
 
 func getPlatformSSOHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		config, err := store.GetPlatformSSOConfig(r.Context())
@@ -79,7 +79,7 @@ func getPlatformSSOHandler(store control.Store) http.HandlerFunc {
 
 func updatePlatformSSOHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		var payload control.PlatformSSOConfigInput
@@ -106,7 +106,7 @@ func updatePlatformSSOHandler(store control.Store) http.HandlerFunc {
 
 func listBackupStorageTargetsHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		targets, err := store.ListBackupStorageTargets(r.Context())
@@ -120,7 +120,7 @@ func listBackupStorageTargetsHandler(store control.Store) http.HandlerFunc {
 
 func createBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		var payload control.BackupStorageTargetInput
@@ -140,7 +140,7 @@ func createBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
 
 func updateBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		var payload control.BackupStorageTargetInput
@@ -160,7 +160,7 @@ func updateBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
 
 func testBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		id := r.PathValue("id")
@@ -193,7 +193,7 @@ func testBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
 
 func deleteBackupStorageTargetHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		id := r.PathValue("id")

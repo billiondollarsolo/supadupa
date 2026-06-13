@@ -133,7 +133,7 @@ scripts/setup-compose.sh \
   --bootstrap-email admin@example.com
 ```
 
-Postgres and pooler edge ports (`5432`/`6543`) publish on `0.0.0.0` by default, but stay unreachable until you enable external DB access (see "Database Ingress"). Pass `--db-loopback` to bind them to `127.0.0.1` instead.
+Postgres and pooler edge ports (`5432`/`6543`) bind to `127.0.0.1` by default. Pass `--db-public-bind` only when external raw Postgres/pooler clients are required, then also enable external DB access and restrict those ports with firewall rules.
 
 For Route53, use `--dns-provider route53` and provide AWS credentials or an instance role:
 
@@ -182,6 +182,7 @@ https://admin.example.com
 --bootstrap-email email
 --bootstrap-password value
 --db-loopback
+--db-public-bind
 --force
 ```
 
@@ -202,7 +203,7 @@ The helper writes `.env` with:
 - `SUPADUPA_SECRET_KEY` and `SUPADUPA_AUTH_SECRET`: generated control-plane secrets.
 - `SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER`: absent defaults to `false`; set manually only for development or controlled compatibility use of the normalized JSON SSO adapter, not for production SAML XML validation.
 - `SUPADUPA_META_DB_ADDR`: loopback metadata database bind address, defaulting to `127.0.0.1:15432`.
-- `SUPADUPA_POSTGRES_ADDR` and `SUPADUPA_POOLER_ADDR`: publish on `0.0.0.0` by default so Traefik can gate them; reachability still requires the `database_external_access` flag and a per-project `db_ingress_mode`. Pass `--db-loopback` (or set these to `127.0.0.1`) to bind to loopback instead.
+- `SUPADUPA_POSTGRES_ADDR` and `SUPADUPA_POOLER_ADDR`: bind to `127.0.0.1` by default. Pass `--db-public-bind` (or set these to `0.0.0.0`) only when external raw Postgres/pooler clients are required; reachability still requires the `database_external_access` flag and a per-project `db_ingress_mode`.
 - `SUPADUPA_DB_INGRESS_ALLOWED_CIDRS`: optional comma-separated trusted client CIDRs used for database-ingress posture reporting and Traefik TCP allowlist middleware when raw DB/pooler ports are public.
 - `SUPADUPA_RUNTIME_HOST_DIR`: host-side runtime directory mounted into the control plane.
 - `SUPADUPA_RUNTIME_CONTAINER_DIR`: container-side runtime mount path where the control plane writes project files, routes, certs, and backups.
@@ -223,12 +224,12 @@ On first startup, `SUPADUPA_APPS_DOMAIN` seeds the project default domain if the
 
 Normal Supabase-style applications use the public HTTPS project routes for Auth, REST, GraphQL, Storage, Realtime, and Edge Functions. Those routes remain public when direct database ingress is private.
 
-Raw Postgres clients, migration tools, ORMs, database GUIs, and pooler clients use separate TCP ingress on `5432` and `6543`. Those ports publish on `0.0.0.0` by default, but the host bind is **not** the access gate — Traefik is. Two gates, both default-closed, must be opened before any external client can connect:
+Raw Postgres clients, migration tools, ORMs, database GUIs, and pooler clients use separate TCP ingress on `5432` and `6543`. Those ports bind to `127.0.0.1` by default. To accept external raw database clients, pass `--db-public-bind` at setup or set `SUPADUPA_POSTGRES_ADDR=0.0.0.0:5432` and `SUPADUPA_POOLER_ADDR=0.0.0.0:6543`, then open both software gates:
 
 1. The platform master switch `database_external_access` (Settings -> Features), and
 2. Each project's `db_ingress_mode` (`private` by default; set to `allowlisted` or `public` per project).
 
-Until both are enabled, Traefik renders no DB TCP route and connections are refused even though the port is bound. Pass `--db-loopback` at setup (or set `SUPADUPA_POSTGRES_ADDR`/`SUPADUPA_POOLER_ADDR` to `127.0.0.1`) if you prefer the port not to bind publicly at all.
+Until both are enabled, Traefik renders no DB TCP route and connections are refused. Keep the default loopback bind unless external raw database clients are part of the deployment model.
 
 When external DB access is enabled, restrict `5432` and `6543` to trusted client networks with host/provider firewall rules and a project `db_allowlist`. Configure trusted CIDRs in `Settings -> Database Ingress`; saving rewrites existing project route manifests so Traefik's file provider reloads the TCP `ipAllowList` middleware without restarting the platform. `SUPADUPA_DB_INGRESS_ALLOWED_CIDRS` remains an initial `.env` default for first boot and diagnostics.
 
@@ -254,3 +255,7 @@ docker compose -f deploy/compose.yaml -f deploy/compose.apply.yaml --profile edg
 ```
 
 The control-plane API runs meta database migrations on startup and reconciles persisted project routes/runtime artifacts.
+
+Deploying the security remediation that adds platform-admin token versions may require active admins to log in again. Old platform-admin tokens without the current token version are rejected on privileged platform routes after deployment or after user role, password, email, MFA, or deletion changes.
+
+Existing plaintext MFA TOTP seeds in normalized persistence remain readable for migration compatibility and are rewritten encrypted on a subsequent persistence sync. If old database backups or support bundles may have exposed those seeds, require affected users to disable and re-enroll MFA after the upgrade.

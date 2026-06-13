@@ -44,7 +44,7 @@ func (routes routeRegistry) registerCoreRoutes() {
 	routes.mux.HandleFunc("GET /metrics", prometheusMetricsHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/metrics", getFleetMetricsHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/metrics/traffic", getFleetTrafficHandler(routes.store, routes.traffic))
-	routes.mux.HandleFunc("GET /v1/runtime-config", getRuntimeConfigHandler(routes.provisioner))
+	routes.mux.HandleFunc("GET /v1/runtime-config", getRuntimeConfigHandler(routes.store, routes.provisioner))
 	routes.mux.HandleFunc("GET /v1/advisor", getAdvisorFindingsHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/compliance/report", getComplianceReportHandler(routes.store))
 }
@@ -89,8 +89,8 @@ func (routes routeRegistry) registerSCIMRoutes() {
 }
 
 func (routes routeRegistry) registerPlatformRoutes() {
-	routes.mux.HandleFunc("GET /v1/provisioner", provisionerHandler(routes.provisioner))
-	routes.mux.HandleFunc("GET /v1/stack-releases", listStackReleasesHandler())
+	routes.mux.HandleFunc("GET /v1/provisioner", provisionerHandler(routes.store, routes.provisioner))
+	routes.mux.HandleFunc("GET /v1/stack-releases", listStackReleasesHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/settings/defaults", getPlatformDefaultsHandler(routes.store))
 	routes.mux.HandleFunc("PUT /v1/settings/defaults", updatePlatformDefaultsHandler(routes.store))
 	routes.mux.HandleFunc("GET /v1/settings/sso", getPlatformSSOHandler(routes.store))

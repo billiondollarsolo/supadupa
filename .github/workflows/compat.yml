@@ -178,6 +178,8 @@ jobs:
           scripts/check-release-note-policy.sh
       - name: Documentation remediation checks
         run: python3 scripts/check-docs-remediation.py
+      - name: Security regression checks
+        run: python3 scripts/check-security-regressions.py
       - name: Compose config hardening checks
         run: scripts/check-compose-hardening.py
       - name: Kubernetes CRD schema checks
@@ -215,7 +217,7 @@ jobs:
       - name: Script syntax
         run: |
           bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh
-          python3 -m py_compile scripts/check-compose-hardening.py scripts/check-docs-remediation.py scripts/check-kubernetes-crds.py
+          python3 -m py_compile scripts/check-compose-hardening.py scripts/check-docs-remediation.py scripts/check-security-regressions.py scripts/check-kubernetes-crds.py
 
   live-compat:
     name: Live Compatibility

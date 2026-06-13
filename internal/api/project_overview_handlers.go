@@ -146,7 +146,7 @@ func recordProjectTelemetryHandler(store control.Store) http.HandlerFunc {
 		SampledAt        time.Time `json:"sampled_at"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		var input payload

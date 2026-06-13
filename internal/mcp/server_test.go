@@ -1453,7 +1453,7 @@ func TestOperationalToolsUseProjectEndpoints(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got["backup_id"] != "bkp_123" {
+			if got["backup_id"] != "bkp_123" || got["confirmation"] != "restore project alpha" {
 				t.Fatalf("unexpected restore payload %#v", got)
 			}
 			_, _ = w.Write([]byte(`{"restore_state":"completed","backup":{"id":"bkp_123"}}`))
@@ -1518,7 +1518,7 @@ func TestOperationalToolsUseProjectEndpoints(t *testing.T) {
 
 	input := bytes.NewBuffer(nil)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"supadupa_set_project_backup_policy","arguments":{"ref":"alpha","enabled":true,"schedule":"0 2 * * *","kind":"physical"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_restore_project_backup","arguments":{"ref":"alpha","backup_id":"bkp_123"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_restore_project_backup","arguments":{"ref":"alpha","backup_id":"bkp_123","confirmation":"restore project alpha"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_set_project_pitr_policy","arguments":{"ref":"alpha","enabled":true,"archive_bucket":"s3://archive/alpha","retention_days":14}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"supadupa_list_project_wal_archives","arguments":{"ref":"alpha"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"supadupa_archive_project_wal","arguments":{"ref":"alpha"}}}`)

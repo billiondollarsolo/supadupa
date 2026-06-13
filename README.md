@@ -142,7 +142,7 @@ scripts/setup-compose.sh \
   --bootstrap-email admin@example.com
 ```
 
-Postgres and pooler edge ports (`5432`/`6543`) publish on `0.0.0.0` by default but stay unreachable until you enable external DB access (the `database_external_access` flag plus a per-project `db_ingress_mode`) — the host bind isn't the gate, Traefik is. Pass `--db-loopback` to bind them to `127.0.0.1` instead.
+Postgres and pooler edge ports (`5432`/`6543`) bind to `127.0.0.1` by default. Pass `--db-public-bind` only when external raw Postgres/pooler clients are required, then also enable external DB access (`database_external_access` plus a per-project `db_ingress_mode`) and restrict the ports with host/provider firewall rules.
 
 Create DNS records pointing at the VPS:
 

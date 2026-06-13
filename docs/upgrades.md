@@ -76,6 +76,30 @@ Recommended checklist:
 
 ## Operator Notes
 
+### 0.2.0 — Security hardening and public edge redeploy
+
+This release includes security, persistence, deployment, and validation changes
+from the repository-wide remediation pass.
+
+- **Externally observable behavior:** browser admin sessions are cookie-based and
+  old admin bearer tokens are rejected after account/security state changes.
+  Admins may need to log in again after deployment. Public edge installs can now
+  request a wildcard certificate for the control-plane host suffix, while project
+  routes request the apps wildcard when projects are created.
+- **Who is affected:** existing Compose and Helm operators, especially installs
+  with active admin sessions, apply-mode project provisioning, or public Traefik
+  TLS.
+- **Required action:** rebuild and restart the control plane/admin images, allow
+  metadata migrations to run, keep the Cloudflare/Route53 DNS token available to
+  Traefik for ACME renewal, and confirm admin/API health after startup.
+- **Validation:** `go test ./...`, frontend build/check/audit, Compose setup and
+  hardening checks, security regression checks, and a live HTTPS login/API smoke
+  against the public admin/API hosts.
+- **Rollback constraints:** migration checksums are now enforced. Do not edit
+  previously applied migrations on a live install. If rolling back binaries,
+  preserve the metadata database and verify admin login, route reconciliation,
+  and project health before serving traffic.
+
 ### 0.1.0 — Docker proxy network rename
 
 The base Compose definition previously named the internal Docker-API proxy

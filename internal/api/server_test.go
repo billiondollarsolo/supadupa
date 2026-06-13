@@ -701,17 +701,23 @@ func TestPlatformMFAEnrollmentLoginAndDisable(t *testing.T) {
 	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `"token"`) {
 		t.Fatalf("expected login with mfa token: %d %s", login.Code, login.Body.String())
 	}
+	mfaToken := extractString(t, login.Body.String(), "token")
 
 	disableCode, err := control.TOTPCode(secret, now.Add(30*time.Second))
 	if err != nil {
 		t.Fatalf("expected disable totp code: %v", err)
 	}
-	disable := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"`+disableCode+`"}`, token)
+	disable := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"`+disableCode+`"}`, mfaToken)
 	if disable.Code != http.StatusOK || !strings.Contains(disable.Body.String(), `"enabled":false`) {
 		t.Fatalf("expected mfa disabled: %d %s", disable.Code, disable.Body.String())
 	}
 
-	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
+	postDisableLogin := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
+	if postDisableLogin.Code != http.StatusOK || !strings.Contains(postDisableLogin.Body.String(), `"token"`) {
+		t.Fatalf("expected login after mfa disable: %d %s", postDisableLogin.Code, postDisableLogin.Body.String())
+	}
+	auditToken := extractString(t, postDisableLogin.Body.String(), "token")
+	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", auditToken)
 	for _, action := range []string{"user.mfa_enroll", "user.mfa_verify", "user.mfa_disable"} {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected %s audit event: %s", action, auditResponse.Body.String())
@@ -751,7 +757,12 @@ func TestPlatformMFAFailuresAreThrottledAndAudited(t *testing.T) {
 		t.Fatal("expected throttled mfa verify to include Retry-After")
 	}
 
-	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
+	login := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
+	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `"token"`) {
+		t.Fatalf("expected login after pending mfa failures: %d %s", login.Code, login.Body.String())
+	}
+	auditToken := extractString(t, login.Body.String(), "token")
+	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", auditToken)
 	if !strings.Contains(auditResponse.Body.String(), `"action":"user.mfa_verify_failed"`) {
 		t.Fatalf("expected failed mfa verify audit event: %s", auditResponse.Body.String())
 	}
@@ -784,23 +795,37 @@ func TestPlatformMFADisableFailuresAreThrottledAndResetAfterSuccess(t *testing.T
 	if verify.Code != http.StatusOK {
 		t.Fatalf("expected mfa verify: %d %s", verify.Code, verify.Body.String())
 	}
+	loginCode, err := control.TOTPCode(secret, now)
+	if err != nil {
+		t.Fatalf("expected login totp code: %v", err)
+	}
+	login := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure","totp_code":"`+loginCode+`"}`)
+	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `"token"`) {
+		t.Fatalf("expected login with mfa token: %d %s", login.Code, login.Body.String())
+	}
+	mfaToken := extractString(t, login.Body.String(), "token")
 
 	for i := 0; i < maxMFAAccessAttempts-1; i++ {
-		response := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"111111"}`, token)
+		response := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"111111"}`, mfaToken)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("expected bad mfa disable %d status 400, got %d: %s", i+1, response.Code, response.Body.String())
 		}
 	}
-	disableCode, err := control.TOTPCode(secret, now)
+	disableCode, err := control.TOTPCode(secret, now.Add(30*time.Second))
 	if err != nil {
 		t.Fatalf("expected disable totp code: %v", err)
 	}
-	disable := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"`+disableCode+`"}`, token)
+	disable := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"`+disableCode+`"}`, mfaToken)
 	if disable.Code != http.StatusOK || !strings.Contains(disable.Body.String(), `"enabled":false`) {
 		t.Fatalf("expected successful mfa disable before throttle, got %d: %s", disable.Code, disable.Body.String())
 	}
 
-	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", token)
+	postDisableLogin := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
+	if postDisableLogin.Code != http.StatusOK || !strings.Contains(postDisableLogin.Body.String(), `"token"`) {
+		t.Fatalf("expected login after mfa disable: %d %s", postDisableLogin.Code, postDisableLogin.Body.String())
+	}
+	auditToken := extractString(t, postDisableLogin.Body.String(), "token")
+	auditResponse := performWithToken(server, http.MethodGet, "/v1/audit-events", "", auditToken)
 	for _, action := range []string{"user.mfa_disable_failed", "user.mfa_disable"} {
 		if !strings.Contains(auditResponse.Body.String(), `"action":"`+action+`"`) {
 			t.Fatalf("expected %s audit event: %s", action, auditResponse.Body.String())
@@ -1183,7 +1208,7 @@ func TestBackupStorageTargetsAPIAndProjectPolicy(t *testing.T) {
 	if strings.Contains(created.Body.String(), "super-secret") || !strings.Contains(created.Body.String(), `"secret_configured":true`) {
 		t.Fatalf("expected redacted target response, got %s", created.Body.String())
 	}
-	if !strings.Contains(created.Body.String(), `"durable_off_host":false`) || !strings.Contains(created.Body.String(), `"recovery_ready":false`) || !strings.Contains(created.Body.String(), `"readiness_status":"local-or-loopback"`) {
+	if !strings.Contains(created.Body.String(), `"durable_off_host":false`) || !strings.Contains(created.Body.String(), `"recovery_ready":false`) || !strings.Contains(created.Body.String(), `"readiness_status":"local-or-loopback"`) || !strings.Contains(created.Body.String(), `"warnings":[`) {
 		t.Fatalf("expected local target readiness metadata, got %s", created.Body.String())
 	}
 
@@ -6105,7 +6130,7 @@ func TestProjectBackupsAndLogs(t *testing.T) {
 		}
 	}
 
-	restoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/restore", `{"backup_id":"`+backupID+`"}`)
+	restoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/restore", `{"backup_id":"`+backupID+`","confirmation":"restore project backup-proj"}`)
 	if restoreResponse.Code != http.StatusAccepted {
 		t.Fatalf("expected restore status 202, got %d: %s", restoreResponse.Code, restoreResponse.Body.String())
 	}
@@ -6113,15 +6138,15 @@ func TestProjectBackupsAndLogs(t *testing.T) {
 		t.Fatalf("expected dry-run restore response: %s", restoreResponse.Body.String())
 	}
 
-	missingRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/restore", `{"backup_id":"missing"}`)
+	missingRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/restore", `{"backup_id":"missing","confirmation":"restore project backup-proj"}`)
 	if missingRestoreResponse.Code != http.StatusNotFound {
 		t.Fatalf("expected missing restore backup 404, got %d: %s", missingRestoreResponse.Code, missingRestoreResponse.Body.String())
 	}
-	invalidPITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"not-a-timestamp"}`)
+	invalidPITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"not-a-timestamp","confirmation":"restore pitr project backup-proj"}`)
 	if invalidPITRRestoreResponse.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid PITR restore timestamp 400, got %d: %s", invalidPITRRestoreResponse.Code, invalidPITRRestoreResponse.Body.String())
 	}
-	unavailablePITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"1735689600"}`)
+	unavailablePITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/backup-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"1735689600","confirmation":"restore pitr project backup-proj"}`)
 	if unavailablePITRRestoreResponse.Code != http.StatusConflict || !strings.Contains(unavailablePITRRestoreResponse.Body.String(), `"restore_to_time_available":false`) || !strings.Contains(unavailablePITRRestoreResponse.Body.String(), `"status":"local-backup-only"`) {
 		t.Fatalf("expected unavailable PITR restore conflict with recoverability: %d %s", unavailablePITRRestoreResponse.Code, unavailablePITRRestoreResponse.Body.String())
 	}
@@ -6300,7 +6325,7 @@ func TestProjectPITRPolicyAndWALArchives(t *testing.T) {
 			t.Fatalf("expected recoverability response to include %s: %s", expected, recoverabilityResponse.Body.String())
 		}
 	}
-	unavailablePITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/pitr-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"1735689600"}`)
+	unavailablePITRRestoreResponse := perform(server, http.MethodPost, "/v1/projects/pitr-proj/database/backups/restore-pitr", `{"recovery_time_target_unix":"1735689600","confirmation":"restore pitr project pitr-proj"}`)
 	if unavailablePITRRestoreResponse.Code != http.StatusConflict || !strings.Contains(unavailablePITRRestoreResponse.Body.String(), `"recoverability"`) || !strings.Contains(unavailablePITRRestoreResponse.Body.String(), `"pitr_enabled":true`) {
 		t.Fatalf("expected PITR restore conflict with recoverability: %d %s", unavailablePITRRestoreResponse.Code, unavailablePITRRestoreResponse.Body.String())
 	}
@@ -6416,7 +6441,7 @@ func TestProjectPITRRestoreAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restoreResponse := perform(server, http.MethodPost, "/v1/projects/pitr-restore/database/backups/restore-pitr", `{"recovery_time_target_unix":"`+fmt.Sprintf("%d", archive.CreatedAt.Unix())+`"}`)
+	restoreResponse := perform(server, http.MethodPost, "/v1/projects/pitr-restore/database/backups/restore-pitr", `{"recovery_time_target_unix":"`+fmt.Sprintf("%d", archive.CreatedAt.Unix())+`","confirmation":"restore pitr project pitr-restore"}`)
 	if restoreResponse.Code != http.StatusCreated || !strings.Contains(restoreResponse.Body.String(), `"restore_state":"completed"`) || !strings.Contains(restoreResponse.Body.String(), `"recovery_time_target_unix":`+fmt.Sprintf("%d", archive.CreatedAt.Unix())) {
 		t.Fatalf("expected created PITR restore response: %d %s", restoreResponse.Code, restoreResponse.Body.String())
 	}

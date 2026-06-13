@@ -144,6 +144,7 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
   const [kind, setKind] = useState("logical");
   const [storageTargetID, setStorageTargetID] = useState("");
   const [confirmAction, setConfirmAction] = useState<BackupConfirm | null>(null);
+  const [restoreConfirmation, setRestoreConfirmation] = useState("");
   const [showAll, setShowAll] = useState(false);
   const policyKey = `${project?.ref ?? ""}:${policy?.enabled ?? ""}:${policy?.schedule ?? ""}:${policy?.kind ?? ""}:${policy?.storage_target_id ?? ""}`;
   useEffect(() => {
@@ -180,9 +181,10 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
     },
   });
   const restoreMutation = useMutation({
-    mutationFn: ({ ref, backupId }: { ref: string; backupId: string }) => restoreBackup(ref, backupId),
+    mutationFn: ({ ref, backupId, confirmation }: { ref: string; backupId: string; confirmation: string }) => restoreBackup(ref, backupId, confirmation),
     onSuccess: (_, variables) => {
       setConfirmAction(null);
+      setRestoreConfirmation("");
       void queryClient.invalidateQueries({ queryKey: ["recoverability", variables.ref] });
       void queryClient.invalidateQueries({ queryKey: ["project-logs", variables.ref] });
       void queryClient.invalidateQueries({ queryKey: ["audit-events"] });
@@ -190,6 +192,7 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
   });
   const confirmPending = mutation.isPending || restoreMutation.isPending;
   const activeBackupTitle = confirmAction?.kind === "trigger" ? `Trigger ${policy?.kind ?? kind} backup?` : confirmAction?.kind === "restore" ? "Restore backup?" : "Confirm backup action";
+  const expectedRestoreConfirmation = project ? `restore project ${project.ref}` : "";
 
   function runConfirmedBackupAction() {
     if (!project || !confirmAction) return;
@@ -197,7 +200,7 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
       mutation.mutate(project.ref);
       return;
     }
-    restoreMutation.mutate({ ref: project.ref, backupId: confirmAction.backup.id });
+    restoreMutation.mutate({ ref: project.ref, backupId: confirmAction.backup.id, confirmation: restoreConfirmation });
   }
 
   const backupColumns = useMemo<ColumnDef<Backup>[]>(
@@ -438,22 +441,33 @@ export function BackupPanel({ project, backups, policy, recoverability, storageT
       </AppPanel>
       <Modal
         description={confirmAction?.kind === "trigger" ? `This creates a ${policy?.kind ?? kind} backup artifact for the selected project.` : "This starts a restore workflow from the selected logical backup."}
-        onClose={() => !confirmPending && setConfirmAction(null)}
+        onClose={() => {
+          if (confirmPending) return;
+          setConfirmAction(null);
+          setRestoreConfirmation("");
+        }}
         open={Boolean(confirmAction)}
         title={activeBackupTitle}
         footer={(
           <>
-            <Button variant="secondary" disabled={confirmPending} onClick={() => setConfirmAction(null)} type="button">Cancel</Button>
-            <Button variant={confirmAction?.kind === "restore" ? "danger" : "default"} disabled={confirmPending || !project} onClick={runConfirmedBackupAction} type="button">
+            <Button variant="secondary" disabled={confirmPending} onClick={() => {
+              setConfirmAction(null);
+              setRestoreConfirmation("");
+            }} type="button">Cancel</Button>
+            <Button variant={confirmAction?.kind === "restore" ? "danger" : "default"} disabled={confirmPending || !project || (confirmAction?.kind === "restore" && restoreConfirmation.trim() !== expectedRestoreConfirmation)} onClick={runConfirmedBackupAction} type="button">
               {confirmPending ? "Working..." : confirmAction?.kind === "restore" ? "Restore backup" : "Trigger backup"}
             </Button>
           </>
         )}
       >
         {confirmAction?.kind === "restore" ? (
-          <div className="grid gap-2 text-sm text-muted">
+          <div className="grid gap-3 text-sm text-muted">
             <p>Restoring can overwrite project data depending on the configured restore command.</p>
             <p className="truncate font-mono text-xs text-faint">{confirmAction.backup.location}</p>
+            <label className="grid gap-1">
+              <span className="label">Type <span className="font-mono text-text">{expectedRestoreConfirmation}</span> to confirm</span>
+              <Input autoFocus className="font-mono" placeholder={expectedRestoreConfirmation} value={restoreConfirmation} onChange={(event) => setRestoreConfirmation(event.target.value)} />
+            </label>
           </div>
         ) : (
           <p className="text-sm text-muted">Backup jobs can consume disk and database resources while they run.</p>
@@ -470,6 +484,7 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
   const [retentionDays, setRetentionDays] = useState(7);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [restoreTarget, setRestoreTarget] = useState("");
+  const [restoreConfirmation, setRestoreConfirmation] = useState("");
   const [showAll, setShowAll] = useState(false);
   const policyKey = `${project?.ref ?? ""}:${policy?.enabled ?? ""}:${policy?.archive_bucket ?? ""}:${policy?.retention_days ?? ""}`;
   useEffect(() => {
@@ -502,14 +517,16 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
     },
   });
   const restoreToTimeMutation = useMutation({
-    mutationFn: ({ ref, targetUnix }: { ref: string; targetUnix: number }) => restoreToTime(ref, targetUnix),
+    mutationFn: ({ ref, targetUnix, confirmation }: { ref: string; targetUnix: number; confirmation: string }) => restoreToTime(ref, targetUnix, confirmation),
     onSuccess: (_, variables) => {
+      setRestoreConfirmation("");
       void queryClient.invalidateQueries({ queryKey: ["project-logs", variables.ref] });
       void queryClient.invalidateQueries({ queryKey: ["audit-events"] });
     },
   });
   const restoreTargetUnix = restoreTarget ? Math.floor(new Date(restoreTarget).getTime() / 1000) : 0;
-  const restoreToTimeDisabled = !featureEnabled || !project || !recoverability?.restore_to_time_available || !restoreTargetUnix || restoreToTimeMutation.isPending;
+  const expectedPITRConfirmation = project ? `restore pitr project ${project.ref}` : "";
+  const restoreToTimeDisabled = !featureEnabled || !project || !recoverability?.restore_to_time_available || !restoreTargetUnix || restoreConfirmation.trim() !== expectedPITRConfirmation || restoreToTimeMutation.isPending;
   const archiveColumns = useMemo<ColumnDef<WALArchive>[]>(
     () => [
       {
@@ -583,11 +600,14 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
           {/* Restore-to-time is the primary recovery path for physical backups. */}
           {project ? (
             <SubSection title="Restore to point in time" description={recoverability?.restore_to_time_available && recoverability.recovery_window_start && recoverability.recovery_window_end ? `Recoverable window: ${formatDateTime(recoverability.recovery_window_start)} to ${formatDateTime(recoverability.recovery_window_end)}` : recoverability?.restore_to_time_unavailable ?? "Restore-to-time is not configured."}>
-              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 max-sm:grid-cols-1">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto] items-end gap-2 max-lg:grid-cols-1">
                 <Field label="Target time" hint="Database is recovered to this moment">
                   <Input disabled={!featureEnabled || !recoverability?.restore_to_time_available} onChange={(event) => setRestoreTarget(event.target.value)} type="datetime-local" value={restoreTarget} />
                 </Field>
-                <Button variant="danger" disabled={restoreToTimeDisabled} onClick={() => project && restoreToTimeMutation.mutate({ ref: project.ref, targetUnix: restoreTargetUnix })} type="button">
+                <Field label="Confirmation" hint={`Type ${expectedPITRConfirmation}`}>
+                  <Input className="font-mono" disabled={!featureEnabled || !recoverability?.restore_to_time_available} onChange={(event) => setRestoreConfirmation(event.target.value)} placeholder={expectedPITRConfirmation} value={restoreConfirmation} />
+                </Field>
+                <Button variant="danger" disabled={restoreToTimeDisabled} onClick={() => project && restoreToTimeMutation.mutate({ ref: project.ref, targetUnix: restoreTargetUnix, confirmation: restoreConfirmation })} type="button">
                   {restoreToTimeMutation.isPending ? "Restoring..." : "Restore to time"}
                 </Button>
               </div>

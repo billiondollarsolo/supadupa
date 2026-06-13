@@ -88,13 +88,17 @@ func requireProjectFeature(w http.ResponseWriter, r *http.Request, store control
 	return requireOrgFeature(w, r, store, project.OrgID, flag)
 }
 
-func requirePlatformAdmin(w http.ResponseWriter, r *http.Request) bool {
+func requirePlatformAdmin(w http.ResponseWriter, r *http.Request, store control.Store) bool {
 	claims, ok := claimsFromRequest(r)
 	if !ok {
-		return true
+		if requestAllowsAuthBypass(r) {
+			return true
+		}
+		writeError(w, http.StatusUnauthorized, "missing bearer token")
+		return false
 	}
 	if strings.EqualFold(claims.Role, "admin") {
-		return true
+		return requireCurrentPlatformAdminClaims(w, r, store, claims)
 	}
 	writeError(w, http.StatusForbidden, "forbidden: platform admin role required")
 	return false
@@ -102,7 +106,7 @@ func requirePlatformAdmin(w http.ResponseWriter, r *http.Request) bool {
 
 func requireSCIMOrPlatformAdmin(w http.ResponseWriter, r *http.Request, store control.Store, auth *control.AuthService) bool {
 	if claims, ok := claimsFromRequest(r); ok && strings.EqualFold(claims.Role, "admin") {
-		return true
+		return requireCurrentPlatformAdminClaims(w, r, store, claims)
 	}
 	token := tokenFromRequest(r)
 	if token == "" {
@@ -111,7 +115,7 @@ func requireSCIMOrPlatformAdmin(w http.ResponseWriter, r *http.Request, store co
 	}
 	if token != "" && auth != nil {
 		if claims, err := auth.Verify(token); err == nil && strings.EqualFold(claims.Role, "admin") {
-			return true
+			return requireCurrentPlatformAdminClaims(w, r, store, claims)
 		}
 	}
 	bearer := bearerTokenFromRequest(r)
@@ -150,10 +154,46 @@ func requireSCIMOrPlatformAdmin(w http.ResponseWriter, r *http.Request, store co
 	return false
 }
 
+func requireCurrentPlatformAdminClaims(w http.ResponseWriter, r *http.Request, store control.Store, claims control.TokenClaims) bool {
+	if store == nil {
+		writeError(w, http.StatusUnauthorized, "invalid bearer token")
+		return false
+	}
+	user, err := store.GetUserByID(r.Context(), claims.Subject)
+	if err != nil {
+		if errors.Is(err, control.ErrNotFound) {
+			writeError(w, http.StatusUnauthorized, "invalid bearer token")
+			return false
+		}
+		writeStoreError(w, err)
+		return false
+	}
+	if !strings.EqualFold(user.Role, "admin") {
+		writeError(w, http.StatusForbidden, "forbidden: platform admin role required")
+		return false
+	}
+	if !tokenVersionMatches(user.TokenVersion, claims.TokenVersion) {
+		writeError(w, http.StatusUnauthorized, "stale bearer token")
+		return false
+	}
+	return true
+}
+
+func tokenVersionMatches(userVersion int64, claimVersion int64) bool {
+	if userVersion < 1 {
+		userVersion = 1
+	}
+	return userVersion == claimVersion
+}
+
 func requireOrgRole(w http.ResponseWriter, r *http.Request, store control.Store, orgID string, minimum accessRole) bool {
 	claims, ok := claimsFromRequest(r)
 	if !ok {
-		return true
+		if requestAllowsAuthBypass(r) {
+			return true
+		}
+		writeError(w, http.StatusUnauthorized, "missing bearer token")
+		return false
 	}
 	role, err := orgRoleForEmail(r.Context(), store, orgID, claims.Email)
 	if err != nil {
@@ -175,7 +215,11 @@ func requireProjectRole(w http.ResponseWriter, r *http.Request, store control.St
 	}
 	claims, ok := claimsFromRequest(r)
 	if !ok {
-		return project, true
+		if requestAllowsAuthBypass(r) {
+			return project, true
+		}
+		writeError(w, http.StatusUnauthorized, "missing bearer token")
+		return control.Project{}, false
 	}
 	orgRole, err := orgRoleForEmail(r.Context(), store, project.OrgID, claims.Email)
 	if err != nil {
@@ -203,7 +247,13 @@ func projectsVisibleToRequest(r *http.Request, store control.Store) ([]control.P
 		return nil, err
 	}
 	claims, ok := claimsFromRequest(r)
-	if !ok || strings.EqualFold(claims.Role, "admin") {
+	if !ok && requestAllowsAuthBypass(r) {
+		return projects, nil
+	}
+	if !ok {
+		return []control.Project{}, nil
+	}
+	if strings.EqualFold(claims.Role, "admin") {
 		return projects, nil
 	}
 	email := strings.ToLower(strings.TrimSpace(claims.Email))
@@ -250,7 +300,13 @@ func orgsVisibleToRequest(r *http.Request, store control.Store) ([]control.Org, 
 		return nil, err
 	}
 	claims, ok := claimsFromRequest(r)
-	if !ok || strings.EqualFold(claims.Role, "admin") {
+	if !ok && requestAllowsAuthBypass(r) {
+		return orgs, nil
+	}
+	if !ok {
+		return []control.Org{}, nil
+	}
+	if strings.EqualFold(claims.Role, "admin") {
 		return orgs, nil
 	}
 	email := strings.ToLower(strings.TrimSpace(claims.Email))
@@ -284,6 +340,11 @@ func orgRoleForEmail(ctx context.Context, store control.Store, orgID string, ema
 func claimsFromRequest(r *http.Request) (control.TokenClaims, bool) {
 	claims, ok := r.Context().Value(tokenClaimsKey).(control.TokenClaims)
 	return claims, ok
+}
+
+func requestAllowsAuthBypass(r *http.Request) bool {
+	allowed, _ := r.Context().Value(authBypassKey).(bool)
+	return allowed
 }
 
 func userIDFromRequest(r *http.Request) (string, bool) {

@@ -1318,6 +1318,42 @@ func TestBackupStorageTargetDurabilityRejectsLocalInterfaceIP(t *testing.T) {
 	}
 }
 
+func TestBackupStorageTargetNetworkWarnings(t *testing.T) {
+	previousResolver := resolveBackupTargetHostIPs
+	t.Cleanup(func() {
+		resolveBackupTargetHostIPs = previousResolver
+	})
+	resolveBackupTargetHostIPs = func(host string) []net.IP {
+		switch host {
+		case "private.example.test":
+			return []net.IP{net.ParseIP("10.20.30.40")}
+		case "remote.example.test":
+			return []net.IP{net.ParseIP("203.0.113.10")}
+		default:
+			return nil
+		}
+	}
+
+	for _, tc := range []struct {
+		endpoint string
+		want     string
+	}{
+		{endpoint: "http://169.254.169.254/latest/meta-data", want: "metadata"},
+		{endpoint: "http://169.254.10.20:9000", want: "link-local"},
+		{endpoint: "https://10.0.0.5:9000", want: "private network"},
+		{endpoint: "https://private.example.test", want: "private network"},
+		{endpoint: "http://localhost:9000", want: "local container or host"},
+	} {
+		warnings := backupStorageTargetNetworkWarnings(BackupStorageTarget{Endpoint: tc.endpoint})
+		if !containsString(warnings, tc.want) {
+			t.Fatalf("expected %s warning for %s, got %#v", tc.want, tc.endpoint, warnings)
+		}
+	}
+	if warnings := backupStorageTargetNetworkWarnings(BackupStorageTarget{Endpoint: "https://remote.example.test"}); len(warnings) != 0 {
+		t.Fatalf("expected no warnings for remote endpoint, got %#v", warnings)
+	}
+}
+
 func TestBackupStorageTargetReadinessStates(t *testing.T) {
 	previousResolver := resolveBackupTargetHostIPs
 	t.Cleanup(func() {

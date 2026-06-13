@@ -132,6 +132,7 @@ export function App() {
   const setAuthenticated = useAuthSession((state) => state.setAuthenticated);
   const setUnauthenticated = useAuthSession((state) => state.setUnauthenticated);
   const logout = useAuthSession((state) => state.logout);
+  const theme = useUIStore((state) => state.theme);
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const authState = useQuery({ queryKey: ["auth-state"], queryFn: ({ signal }) => getAuthState({ signal }), retry: 1, refetchInterval: 30_000 });
@@ -139,6 +140,10 @@ export function App() {
   useEffect(() => {
     document.title = "SUPADUPA";
   }, [pathname]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   useEffect(() => {
     if (!authState.data) {

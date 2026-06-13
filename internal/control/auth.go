@@ -30,12 +30,13 @@ const (
 )
 
 type TokenClaims struct {
-	Subject    string `json:"sub"`
-	Email      string `json:"email"`
-	Role       string `json:"role"`
-	Expires    int64  `json:"exp"`
-	Audience   string `json:"aud,omitempty"`
-	ProjectRef string `json:"project_ref,omitempty"`
+	Subject      string `json:"sub"`
+	Email        string `json:"email"`
+	Role         string `json:"role"`
+	TokenVersion int64  `json:"ver,omitempty"`
+	Expires      int64  `json:"exp"`
+	Audience     string `json:"aud,omitempty"`
+	ProjectRef   string `json:"project_ref,omitempty"`
 }
 
 func NewAuthService(secret string) *AuthService {
@@ -57,10 +58,11 @@ func AuthSecretFromEnv(getenv func(string) string) string {
 
 func (s *AuthService) Issue(user User, ttl time.Duration) (string, error) {
 	claims := TokenClaims{
-		Subject: user.ID,
-		Email:   user.Email,
-		Role:    user.Role,
-		Expires: time.Now().Add(ttl).Unix(),
+		Subject:      user.ID,
+		Email:        user.Email,
+		Role:         user.Role,
+		TokenVersion: nextTokenVersion(user.TokenVersion - 1),
+		Expires:      time.Now().Add(ttl).Unix(),
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {

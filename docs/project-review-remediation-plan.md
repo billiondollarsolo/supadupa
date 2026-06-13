@@ -19,7 +19,7 @@ Current pass fixed the highest-risk auth/session, secret, persistence, migration
 - `npm --prefix scripts/compat ci && npm --prefix scripts/compat audit`
 - `scripts/check-dockerignore.sh && scripts/check-compose-hardening.py && bash -n scripts/check-dockerignore.sh scripts/setup-compose.sh scripts/setup-local-dns.sh && git diff --check`
 - `TERRAFORM_BIN=/tmp/supadupa-terraform-1.15.5/terraform scripts/check-compose-apply-lifecycle-smoke.sh` with Docker available after downloading Terraform v1.15.5 from HashiCorp releases and verifying the published SHA256SUMS entry; the script starts an isolated apply-mode platform stack with non-conflicting API/admin/meta-db ports, bootstraps an admin, creates an org, enables read replicas, builds the Terraform provider through dev overrides, applies a `supadupa_project` resource against the live local Management API so project creation reaches Docker Compose through the internal proxy, verifies required project containers run, verifies a Terraform no-op plan, exercises API pause/resume/restart/scale, upgrades the stack from `15.8.1.060` to `15.8.1.085` with a pre-upgrade backup assertion, creates a read replica, waits through a reconciler interval and verifies the project remains `healthy`, deletes the replica with manifest/env/container cleanup assertions, destroys the project through Terraform, and asserts project containers and volumes are removed.
-- `scripts/check-setup-compose.sh` validates setup-compose writes `.env` with mode `600`, rejects env-file injection inputs before `.env` creation, verifies VPS database binds stay loopback unless `--expose-db` is supplied, and validates setup-local-dns output plus invalid ref/address/hostname rejection before DNS helper file creation.
+- `scripts/check-setup-compose.sh` validates setup-compose writes `.env` with mode `600`, rejects env-file injection inputs before `.env` creation, verifies VPS database binds stay loopback unless `--db-public-bind` is supplied, and validates setup-local-dns output plus invalid ref/address/hostname rejection before DNS helper file creation.
 - `python3 scripts/check-docs-remediation.py` verifies operator docs keep required install, security, migration, backup-target, and dependency-validation topics.
 - `go test -race ./internal/scheduler`
 - `go test ./cmd/supadupa-docker-proxy`
@@ -604,9 +604,9 @@ Relevant files:
 ### Current Status
 
 - `scripts/setup-compose.sh` starts with `umask 077`, writes `.env` through a temporary `.env.XXXXXX` file, applies mode `600`, then renames it into place.
-- Setup-generated `.env` values are validated before writing: hostnames must be fully qualified DNS names, emails must have a basic address shape, bootstrap passwords and provider credential env vars reject control characters, and generated local/VPS database bind defaults stay loopback unless `--expose-db` is explicitly supplied for VPS mode.
+- Setup-generated `.env` values are validated before writing: hostnames must be fully qualified DNS names, emails must have a basic address shape, bootstrap passwords and provider credential env vars reject control characters, and generated local/VPS database bind defaults stay loopback unless `--db-public-bind` is explicitly supplied for VPS mode.
 - `scripts/setup-local-dns.sh` validates hostnames, IPv4/`::1` address input, and project refs before creating `runtime/local-dns` output; refs are normalized to lowercase after validation so invalid ref shapes cannot leave partial DNS helper files.
-- `scripts/check-setup-compose.sh` now verifies `.env` mode `600`, control-character rejection without `.env` creation, invalid compose domain/hostname/email/provider-token rejection, VPS default/`--expose-db` database binds, valid local-DNS output, invalid local-DNS ref/address/hostname rejection, and no local-DNS output after invalid input.
+- `scripts/check-setup-compose.sh` now verifies `.env` mode `600`, control-character rejection without `.env` creation, invalid compose domain/hostname/email/provider-token rejection, VPS default/`--db-public-bind` database binds, valid local-DNS output, invalid local-DNS ref/address/hostname rejection, and no local-DNS output after invalid input.
 
 ### Fixed Looks Like
 
@@ -761,8 +761,8 @@ Relevant files:
 
 - `deploy/compose.yaml` defaults `SUPADUPA_POSTGRES_ADDR` and `SUPADUPA_POOLER_ADDR` to `127.0.0.1`.
 - `.env.example` documents loopback database-facing edge bindings and warns to use `0.0.0.0` only for intentional public VPS exposure with firewall, TLS, and auth controls.
-- `scripts/setup-compose.sh` generates loopback Postgres and pooler binds for local, offline, and VPS modes by default; VPS mode switches those two binds to `0.0.0.0` only when `--expose-db` is supplied.
-- `scripts/check-setup-compose.sh` now verifies both VPS paths: default loopback binds and explicit `--expose-db` public binds.
+- `scripts/setup-compose.sh` generates loopback Postgres and pooler binds for local, offline, and VPS modes by default; VPS mode switches those two binds to `0.0.0.0` only when `--db-public-bind` is supplied.
+- `scripts/check-setup-compose.sh` now verifies both VPS paths: default loopback binds and explicit `--db-public-bind` public binds.
 - `docs/install.md`, `docs/dns-tls.md`, and `docs/security.md` document the public direct-DB exposure opt-in and operational risk.
 
 ### Fixed Looks Like
@@ -1432,7 +1432,7 @@ Relevant files:
 
 ### Current Status
 
-- `docs/install.md` documents required generated secrets, `.env` mode `0600`, setup input rejection, public direct-DB opt-in through `--expose-db`, loopback metadata/admin/API binds, and apply-mode Docker socket proxy requirements.
+- `docs/install.md` documents required generated secrets, `.env` mode `0600`, setup input rejection, public direct-DB opt-in through `--db-public-bind`, loopback metadata/admin/API binds, and apply-mode Docker socket proxy requirements.
 - `docs/security.md` documents stable control-plane secrets, browser HttpOnly cookie sessions, origin enforcement for cookie-authenticated mutations, SSO JSON adapter limitations and role binding, Studio one-time-code access, password hashing migration from legacy `sha256$...` to `bcrypt-sha256$...`, SCIM token hashing, Docker socket/proxy risk, and public DB/pooler exposure risk.
 - `docs/operations.md` documents migration checksum immutability and failure behavior, backup target/policy persistence including `BackupPolicy.StorageTargetID`, recovery-target enforcement flags, and local vulnerability/audit validation commands including `govulncheck` and `npm audit`.
 - `scripts/check-docs-remediation.py` guards the required Phase 9 topics across install, security, and operations docs, and `.github/workflows/compat.yml` runs it in local checks.

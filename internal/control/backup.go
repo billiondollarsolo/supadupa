@@ -1336,6 +1336,63 @@ func backupStorageTargetReadiness(target BackupStorageTarget) (durableOffHost bo
 	}
 }
 
+func backupStorageTargetNetworkWarnings(target BackupStorageTarget) []string {
+	endpoint := strings.TrimSpace(target.Endpoint)
+	if endpoint == "" {
+		return nil
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return []string{"endpoint URL could not be parsed for private-network risk analysis"}
+	}
+	host := strings.Trim(strings.ToLower(parsed.Hostname()), "[]")
+	if host == "" {
+		return []string{"endpoint host is empty"}
+	}
+	warnings := []string{}
+	switch host {
+	case "localhost", "localhost.localdomain", "host.docker.internal", "host.containers.internal":
+		warnings = append(warnings, "endpoint host targets local container or host networking")
+	}
+	ips := []net.IP{}
+	if ip := net.ParseIP(host); ip != nil {
+		ips = append(ips, ip)
+	} else {
+		ips = append(ips, resolveBackupTargetHostIPs(host)...)
+	}
+	for _, ip := range ips {
+		switch {
+		case ip == nil:
+			continue
+		case ip.Equal(net.ParseIP("169.254.169.254")):
+			warnings = append(warnings, "endpoint resolves to the cloud instance metadata address")
+		case ip.IsLoopback() || ip.IsUnspecified() || ipAssignedToLocalInterface(ip):
+			warnings = append(warnings, "endpoint resolves to this host or a loopback address")
+		case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+			warnings = append(warnings, "endpoint resolves to a link-local network address")
+		case ip.IsPrivate():
+			warnings = append(warnings, "endpoint resolves to a private network address")
+		}
+	}
+	return uniqueStrings(warnings)
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func walArchiveBucketForTarget(target BackupStorageTarget, ref string) string {
 	parts := []string{}
 	if prefix := strings.Trim(strings.TrimSpace(target.Prefix), "/"); prefix != "" {

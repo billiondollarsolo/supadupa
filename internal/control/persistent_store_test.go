@@ -1160,6 +1160,45 @@ func TestPersistentStoreUsesVaultFileEncryption(t *testing.T) {
 	}
 }
 
+func TestPersistentStoreEncryptsNormalizedMFASeedStrings(t *testing.T) {
+	store := &PersistentStore{encryption: newLocalPersistentCipher("mfa-seed-test-secret")}
+	encoded, err := store.encryptOptionalString("JBSWY3DPEHPK3PXP")
+	if err != nil {
+		t.Fatalf("encrypt mfa seed: %v", err)
+	}
+	encodedString, ok := encoded.(string)
+	if !ok {
+		t.Fatalf("expected encoded encrypted string, got %#v", encoded)
+	}
+	if strings.Contains(encodedString, "JBSWY3DPEHPK3PXP") {
+		t.Fatalf("encrypted mfa seed storage contains plaintext seed: %s", encodedString)
+	}
+	if !strings.HasPrefix(encodedString, encryptedStringPrefix) {
+		t.Fatalf("expected encrypted string prefix, got %q", encodedString)
+	}
+	decrypted, err := store.decryptOptionalString(sql.NullString{String: encodedString, Valid: true})
+	if err != nil {
+		t.Fatalf("decrypt mfa seed: %v", err)
+	}
+	if decrypted != "JBSWY3DPEHPK3PXP" {
+		t.Fatalf("expected decrypted seed, got %q", decrypted)
+	}
+	legacy, err := store.decryptOptionalString(sql.NullString{String: "LEGACYPLAINTEXT", Valid: true})
+	if err != nil {
+		t.Fatalf("decrypt legacy mfa seed: %v", err)
+	}
+	if legacy != "LEGACYPLAINTEXT" {
+		t.Fatalf("expected legacy plaintext passthrough, got %q", legacy)
+	}
+	empty, err := store.encryptOptionalString("")
+	if err != nil {
+		t.Fatalf("encrypt empty mfa seed: %v", err)
+	}
+	if empty != nil {
+		t.Fatalf("expected empty mfa seed to store as nil, got %#v", empty)
+	}
+}
+
 func TestPersistentEncryptionCommandRoundTrip(t *testing.T) {
 	commandPath := filepath.Join(t.TempDir(), "kms-command.sh")
 	script := `#!/bin/sh

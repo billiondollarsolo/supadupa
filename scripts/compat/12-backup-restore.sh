@@ -167,7 +167,7 @@ pass "restore.backup_list" "backup $backup_id listed with restore metadata"
 
 preflight_restore_json="$ARTIFACT_DIR/restore-preflight-response.json"
 preflight_restore_err="$ARTIFACT_DIR/restore-preflight-response.stderr"
-if ! supadupa_cli_authed backups restore --ref "$SUPADUPA_TEST_REF" --backup-id "$backup_id" >"$preflight_restore_json" 2>"$preflight_restore_err"; then
+if ! supadupa_cli_authed backups restore --ref "$SUPADUPA_TEST_REF" --backup-id "$backup_id" --confirmation "restore project $SUPADUPA_TEST_REF" >"$preflight_restore_json" 2>"$preflight_restore_err"; then
   fail "restore.preflight" "preflight restore command failed; see $(basename "$preflight_restore_err")"
 fi
 preflight_restore_state="$(json_get_file_optional "$preflight_restore_json" restore_state)"
@@ -203,7 +203,7 @@ pass "restore.mutate" "post-backup mutation written"
 
 restore_json="$ARTIFACT_DIR/restore-response.json"
 restore_err="$ARTIFACT_DIR/restore-response.stderr"
-if ! supadupa_cli_authed backups restore --ref "$SUPADUPA_TEST_REF" --backup-id "$backup_id" >"$restore_json" 2>"$restore_err"; then
+if ! supadupa_cli_authed backups restore --ref "$SUPADUPA_TEST_REF" --backup-id "$backup_id" --confirmation "restore project $SUPADUPA_TEST_REF" >"$restore_json" 2>"$restore_err"; then
   fail "restore.run" "restore command failed; see $(basename "$restore_err")"
 fi
 restore_state="$(json_get_file_optional "$restore_json" restore_state)"

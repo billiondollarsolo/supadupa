@@ -19,8 +19,9 @@ Options:
   --email email                 Let's Encrypt email
   --bootstrap-email email       optional first admin email
   --bootstrap-password value    optional first admin password; prefer SUPADUPA_BOOTSTRAP_PASSWORD
-  --db-loopback                 bind Postgres/pooler edge ports to 127.0.0.1 (default: 0.0.0.0, Traefik-gated)
-  --expose-db                   deprecated no-op (ports publish on 0.0.0.0 by default now)
+  --db-loopback                 keep Postgres/pooler edge ports on 127.0.0.1 (default)
+  --db-public-bind              bind Postgres/pooler edge ports to 0.0.0.0; pair with firewall rules
+  --expose-db                   deprecated alias for --db-public-bind
   --force                       overwrite existing .env
   -h, --help                    show this help
 
@@ -40,8 +41,7 @@ dns_provider=""
 email=""
 bootstrap_email=""
 bootstrap_password=""
-expose_db=false
-db_loopback=false
+db_public_bind=false
 force=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -83,13 +83,16 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       ;;
     --expose-db)
-      # Deprecated: DB/pooler ports now publish on 0.0.0.0 by default and are
-      # gated by Traefik. Accepted as a no-op for backward compatibility.
-      expose_db=true
+      # Deprecated compatibility alias for older install docs/scripts.
+      db_public_bind=true
+      shift
+      ;;
+    --db-public-bind)
+      db_public_bind=true
       shift
       ;;
     --db-loopback)
-      db_loopback=true
+      db_public_bind=false
       shift
       ;;
     --force)
@@ -215,16 +218,14 @@ else
   acme_dns_provider="${dns_provider:-cloudflare}"
   http_addr="0.0.0.0:80"
   https_addr="0.0.0.0:443"
-  # DB/pooler edge ports publish on 0.0.0.0 by default (matching .env.example).
-  # Reachability is gated by Traefik, not the host bind: the platform
-  # database_external_access flag (default off) and each project's
-  # db_ingress_mode (default private) must both be enabled before any external
-  # client can connect. Use --db-loopback to bind to 127.0.0.1 instead.
-  postgres_addr="0.0.0.0:5432"
-  pooler_addr="0.0.0.0:6543"
-  if [[ "$db_loopback" == "true" ]]; then
-    postgres_addr="127.0.0.1:5432"
-    pooler_addr="127.0.0.1:6543"
+  # Keep raw database/pooler entrypoints loopback by default. Operators who need
+  # external raw Postgres/pooler clients can opt in explicitly and should pair
+  # that with host/provider firewall rules plus project allowlists.
+  postgres_addr="127.0.0.1:5432"
+  pooler_addr="127.0.0.1:6543"
+  if [[ "$db_public_bind" == "true" ]]; then
+    postgres_addr="0.0.0.0:5432"
+    pooler_addr="0.0.0.0:6543"
   fi
 fi
 
@@ -316,6 +317,8 @@ EOF_LOCAL_TLS
 
 generate_platform_routes() {
   local route_file="$runtime_dir/routes/00-platform.yaml"
+  local api_wildcard="*.${api_host#*.}"
+  local admin_wildcard="*.${admin_host#*.}"
   {
     cat <<EOF_PLATFORM_API
 http:
@@ -330,6 +333,8 @@ EOF_PLATFORM_API
       cat <<EOF_PLATFORM_API_TLS
       tls:
         certResolver: $tls_cert_resolver
+        domains:
+          - main: "$api_wildcard"
 EOF_PLATFORM_API_TLS
     else
       cat <<'EOF_PLATFORM_API_TLS'
@@ -354,6 +359,8 @@ EOF_PLATFORM_ROUTES
       cat <<EOF_PLATFORM_ADMIN_TLS
       tls:
         certResolver: $tls_cert_resolver
+        domains:
+          - main: "$admin_wildcard"
 EOF_PLATFORM_ADMIN_TLS
     else
       cat <<'EOF_PLATFORM_ADMIN_TLS'
@@ -486,8 +493,9 @@ fi
 echo "Project defaults will seed from SUPADUPA_APPS_DOMAIN on first startup"
 if [[ "$mode" != "local" && "$mode" != "offline" ]]; then
   echo
-  if [[ "$db_loopback" == "true" ]]; then
+  if [[ "$db_public_bind" != "true" ]]; then
     echo "Database/pooler edge ports bound to loopback ($postgres_addr / $pooler_addr); external DB clients cannot reach them."
+    echo "Use --db-public-bind only when external raw Postgres/pooler clients are required."
   else
     echo "Note: Postgres/pooler edge ports publish on $postgres_addr / $pooler_addr."
     echo "Reachability is gated by Traefik — the platform database_external_access flag (default off) and each"

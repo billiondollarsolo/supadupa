@@ -11,7 +11,8 @@ import (
 )
 
 type restoreBackupRequest struct {
-	BackupID string `json:"backup_id"`
+	BackupID     string `json:"backup_id"`
+	Confirmation string `json:"confirmation"`
 }
 
 type restoreBackupResponse struct {
@@ -22,6 +23,7 @@ type restoreBackupResponse struct {
 
 type restorePITRBackupRequest struct {
 	RecoveryTimeTargetUnix string `json:"recovery_time_target_unix"`
+	Confirmation           string `json:"confirmation"`
 }
 
 type restorePITRBackupResponse struct {
@@ -80,12 +82,16 @@ func restoreBackupHandler(store control.Store) http.HandlerFunc {
 	backupService := control.NewBackupService("")
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleDeveloper); !ok {
+		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
 			return
 		}
 		var payload restoreBackupRequest
 		if err := decodeJSON(r, &payload); err != nil {
 			writeDecodeError(w, err)
+			return
+		}
+		if !restoreConfirmationMatches(ref, "logical", payload.Confirmation) {
+			writeError(w, http.StatusBadRequest, `confirmation must be "restore project `+ref+`"`)
 			return
 		}
 		backup, restore, err := backupService.RestoreBackup(r.Context(), store, ref, payload.BackupID)
@@ -94,7 +100,7 @@ func restoreBackupHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		control.LogProject(r.Context(), store, ref, "warning", "Restore "+restore.State, map[string]string{"backup_id": backup.ID, "restore_path": restore.Path})
-		control.Audit(r.Context(), store, "project.restore", "project:"+ref, map[string]string{"backup_id": backup.ID, "state": restore.State})
+		control.Audit(r.Context(), store, "project.restore", "project:"+ref, map[string]string{"backup_id": backup.ID, "state": restore.State, "restore_type": "logical", "confirmation": "present"})
 		writeJSON(w, http.StatusAccepted, restoreBackupResponse{Backup: backup, RestorePath: restore.Path, RestoreState: restore.State})
 	}
 }
@@ -103,12 +109,16 @@ func restorePITRBackupHandler(store control.Store) http.HandlerFunc {
 	backupService := control.NewBackupService("")
 	return func(w http.ResponseWriter, r *http.Request) {
 		ref := r.PathValue("ref")
-		if _, ok := requireProjectRole(w, r, store, ref, roleDeveloper); !ok {
+		if _, ok := requireProjectRole(w, r, store, ref, roleAdmin); !ok {
 			return
 		}
 		var payload restorePITRBackupRequest
 		if err := decodeJSON(r, &payload); err != nil {
 			writeDecodeError(w, err)
+			return
+		}
+		if !restoreConfirmationMatches(ref, "pitr", payload.Confirmation) {
+			writeError(w, http.StatusBadRequest, `confirmation must be "restore pitr project `+ref+`"`)
 			return
 		}
 		targetUnix, err := strconv.ParseInt(strings.TrimSpace(payload.RecoveryTimeTargetUnix), 10, 64)
@@ -126,7 +136,7 @@ func restorePITRBackupHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		control.LogProject(r.Context(), store, ref, "warning", "PITR restore "+result.State, map[string]string{"restore_path": result.Path, "recovery_time_target_unix": fmt.Sprintf("%d", result.RecoveryTimeTargetUnix)})
-		control.Audit(r.Context(), store, "project.restore_pitr", "project:"+ref, map[string]string{"state": result.State, "recovery_time_target_unix": fmt.Sprintf("%d", result.RecoveryTimeTargetUnix)})
+		control.Audit(r.Context(), store, "project.restore_pitr", "project:"+ref, map[string]string{"state": result.State, "restore_type": "pitr", "confirmation": "present", "recovery_time_target_unix": fmt.Sprintf("%d", result.RecoveryTimeTargetUnix)})
 		writeJSON(w, http.StatusCreated, restorePITRBackupResponse{
 			ProjectRef:             ref,
 			RecoveryTimeTargetUnix: result.RecoveryTimeTargetUnix,
@@ -135,6 +145,14 @@ func restorePITRBackupHandler(store control.Store) http.HandlerFunc {
 			RestoreState:           result.State,
 		})
 	}
+}
+
+func restoreConfirmationMatches(ref string, restoreType string, confirmation string) bool {
+	expected := "restore project " + ref
+	if restoreType == "pitr" {
+		expected = "restore pitr project " + ref
+	}
+	return strings.TrimSpace(confirmation) == expected
 }
 
 func getProjectRecoverabilityHandler(store control.Store) http.HandlerFunc {

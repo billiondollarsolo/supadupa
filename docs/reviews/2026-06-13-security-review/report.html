@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>supadupa Codex Security Scan</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #fff;
+      --bg-elev: #fafafa;
+      --bg-muted: #f5f5f7;
+      --fg: #111827;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --code: #f3f4f6;
+      --shadow: 0 4px 10px rgba(0, 0, 0, 0.06);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b0f14;
+        --bg-elev: #0f141b;
+        --bg-muted: #121923;
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --border: #243040;
+        --accent: #60a5fa;
+        --code: #111827;
+        --shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    body.sidebar-collapsed .layout { grid-template-columns: 44px minmax(0, 1fr); }
+
+    .sidebar {
+      min-height: 100vh;
+      border-right: 1px solid var(--border);
+      background: var(--bg-muted);
+    }
+
+    .toc-inner {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+      padding: 10px 8px;
+    }
+
+    .nav-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      margin: 0 0 8px;
+      text-transform: uppercase;
+    }
+
+    .nav-toggle {
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--fg);
+      border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 5px;
+    }
+
+    .nav-toggle:hover { box-shadow: var(--shadow); }
+    .nav-meta { color: var(--muted); font-size: 12px; margin: 0 0 12px; padding: 0 4px; }
+
+    body.sidebar-collapsed .toc-inner {
+      display: flex;
+      align-items: center;
+      padding: 8px 6px;
+    }
+
+    body.sidebar-collapsed .nav-title span,
+    body.sidebar-collapsed .nav-meta,
+    body.sidebar-collapsed .toc { display: none; }
+
+    main { max-width: 1040px; padding: 32px 44px 80px; }
+    h1, h2, h3 { line-height: 1.2; margin-top: 1.7em; }
+    h1:first-child { margin-top: 0; }
+    h2 { border-top: 1px solid var(--border); padding-top: 1em; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { background: var(--code); border-radius: 4px; padding: 0.1em 0.3em; }
+    pre { background: var(--code); border: 1px solid var(--border); border-radius: 8px; overflow: auto; padding: 16px; }
+    pre code { background: transparent; padding: 0; }
+    table { border-collapse: collapse; width: 100%; margin: 18px 0; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; vertical-align: top; }
+    th { text-align: left; background: var(--code); }
+
+    main h3[id^="0-"] + table,
+    main h3[id^="1-"] + table,
+    main h3[id^="2-"] + table,
+    main h3[id^="3-"] + table,
+    main h3[id^="4-"] + table,
+    main h3[id^="5-"] + table,
+    main h3[id^="6-"] + table,
+    main h3[id^="7-"] + table,
+    main h3[id^="8-"] + table,
+    main h3[id^="9-"] + table {
+      margin: 10px 0 24px;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      background: var(--bg-elev);
+      box-shadow: var(--shadow);
+    }
+
+    main h3[id^="0-"] + table th,
+    main h3[id^="1-"] + table th,
+    main h3[id^="2-"] + table th,
+    main h3[id^="3-"] + table th,
+    main h3[id^="4-"] + table th,
+    main h3[id^="5-"] + table th,
+    main h3[id^="6-"] + table th,
+    main h3[id^="7-"] + table th,
+    main h3[id^="8-"] + table th,
+    main h3[id^="9-"] + table th { display: none; }
+
+    main h3[id^="0-"] + table td:first-child,
+    main h3[id^="1-"] + table td:first-child,
+    main h3[id^="2-"] + table td:first-child,
+    main h3[id^="3-"] + table td:first-child,
+    main h3[id^="4-"] + table td:first-child,
+    main h3[id^="5-"] + table td:first-child,
+    main h3[id^="6-"] + table td:first-child,
+    main h3[id^="7-"] + table td:first-child,
+    main h3[id^="8-"] + table td:first-child,
+    main h3[id^="9-"] + table td:first-child {
+      width: 170px;
+      color: var(--muted);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    main h3[id^="0-"] + table td,
+    main h3[id^="1-"] + table td,
+    main h3[id^="2-"] + table td,
+    main h3[id^="3-"] + table td,
+    main h3[id^="4-"] + table td,
+    main h3[id^="5-"] + table td,
+    main h3[id^="6-"] + table td,
+    main h3[id^="7-"] + table td,
+    main h3[id^="8-"] + table td,
+    main h3[id^="9-"] + table td { border-left: 0; border-right: 0; }
+
+    .toc { list-style: none; padding: 0; margin: 0; }
+    .toc a {
+      display: block;
+      border-radius: 6px;
+      color: var(--fg);
+      font-size: 13px;
+      line-height: 1.3;
+      padding: 4px 6px;
+      position: relative;
+      transition: background 160ms ease, color 160ms ease, padding-left 160ms ease;
+    }
+
+    .toc a:hover { background: var(--bg-elev); text-decoration: none; }
+    .toc-item { list-style: none; margin: 1px 0; }
+    .toc-item.depth-1 > a { font-weight: 700; }
+    .toc-item.depth-2 { padding-left: 14px; }
+    .toc-item.depth-3 { padding-left: 28px; }
+
+    .toc-item.active > a {
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      font-weight: 700;
+      padding-left: 10px;
+    }
+
+    .toc-item.active > a::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 4px;
+      bottom: 4px;
+      width: 3px;
+      border-radius: 2px;
+      background: var(--accent);
+    }
+
+    @media (max-width: 900px) {
+      .layout { display: block; }
+      .sidebar { min-height: 0; border-right: 0; border-bottom: 1px solid var(--border); }
+      .toc-inner { position: static; height: auto; max-height: 45vh; }
+      main { padding: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Table of contents">
+      <div class="toc-inner">
+        <div class="nav-title">
+          <span>Outline</span>
+          <button id="navToggle" class="nav-toggle" aria-pressed="false" aria-label="Collapse sidebar" title="Collapse sidebar">
+            <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path id="navToggleIcon" d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <div class="nav-meta">supadupa Codex Security Scan</div>
+        <ul class="toc">
+          <li class="toc-item depth-1"><a href="#security-review-supadupa">Security Review: supadupa</a></li>
+<li class="toc-item depth-2"><a href="#scope">Scope</a></li>
+<li class="toc-item depth-3"><a href="#scan-summary">Scan Summary</a></li>
+<li class="toc-item depth-2"><a href="#threat-model">Threat Model</a></li>
+<li class="toc-item depth-2"><a href="#findings">Findings</a></li>
+<li class="toc-item depth-3"><a href="#confidence-scale">Confidence Scale</a></li>
+<li class="toc-item depth-3"><a href="#1-project-developers-can-trigger-destructive-database-restores">[1] Project developers can trigger destructive database restores</a></li>
+<li class="toc-item depth-3"><a href="#2-revoked-platform-admins-retain-admin-authority-until-stateless-token-expiry">[2] Revoked platform admins retain admin authority until stateless token expiry</a></li>
+<li class="toc-item depth-3"><a href="#3-control-plane-mfa-totp-seeds-are-stored-plaintext-in-normalized-users-rows">[3] Control-plane MFA TOTP seeds are stored plaintext in normalized users rows</a></li>
+<li class="toc-item depth-2"><a href="#reviewed-surfaces">Reviewed Surfaces</a></li>
+<li class="toc-item depth-2"><a href="#open-questions-and-follow-up">Open Questions And Follow Up</a></li>
+        </ul>
+      </div>
+    </aside>
+    <main>
+      <h1 id="security-review-supadupa">Security Review: supadupa</h1>
+
+<h2 id="scope">Scope</h2>
+
+<ul><li>Scan mode: repository-wide security and engineering review for <code>/root/supadupa-all/supadupa</code>.</li><li>Scan id: <code>ce8f05a_20260613T010755Z</code>.</li><li>Primary reviewed surfaces: Go management API, control store, persistence, backup/restore, provisioning, Docker proxy, Kubernetes/operator rendering, Terraform client, CLI/MCP, React frontend, deployment files, and setup scripts.</li><li>Threat model: generated during Phase 1 from local repository context and copied below.</li><li>Artifact root: <code>/tmp/codex-security-scans/supadupa/ce8f05a_20260613T010755Z</code>.</li><li>Coverage artifacts: <code>artifacts/02_discovery</code>, <code>artifacts/03_coverage</code>, <code>artifacts/04_reconciliation</code>, and <code>artifacts/05_findings</code>.</li><li>Test status: scoped Go tests passed for reviewed packages; frontend static checks and Vitest passed; <code>npm audit --omit=dev</code> reported 0 vulnerabilities.</li><li>Limitation: <code>govulncheck ./...</code> could not complete because <code>https://vuln.go.dev/index/modules.json.gz</code> returned HTTP 403.</li><li>Worktree note: pre-existing local changes were present in <code>frontend/src/app.tsx</code> and <code>frontend/capture-screenshots.mjs</code>; this scan did not modify repository files.</li></ul>
+
+<h3 id="scan-summary">Scan Summary</h3>
+
+<table>
+<thead><tr>
+<th>Field</th>
+<th>Value</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>Reportable findings</td>
+<td>3</td>
+</tr>
+<tr>
+<td>Severity mix</td>
+<td>1 high, 2 medium</td>
+</tr>
+<tr>
+<td>Confidence mix</td>
+<td>1 high, 2 medium</td>
+</tr>
+<tr>
+<td>Coverage</td>
+<td>36 selected deep-review rows from 3945 ranked inventory rows, plus supporting files named in ledgers</td>
+</tr>
+<tr>
+<td>Validation mode</td>
+<td>Static source trace, scoped package tests, frontend static/tests, dependency audit</td>
+</tr>
+<tr>
+<td>Local hygiene issue</td>
+<td>Ignored <code>runtime/</code> files contain live-looking generated secrets/backups/cert material in this workspace</td>
+</tr>
+</tbody></table>
+
+<h2 id="threat-model">Threat Model</h2>
+
+<p>Supadupa is a self-hosted, multi-project Supabase control plane. Its primary product surfaces are the Go management API and admin control plane (<code>internal/api</code>, <code>internal/control</code>), Docker Compose provisioning path (<code>internal/provisioner/compose</code>, <code>deploy/compose.yaml</code>, <code>scripts/setup-compose.sh</code>), Kubernetes/operator rendering path (<code>internal/provisioner/kubernetes</code>, <code>internal/operator</code>, <code>charts/supadupa</code>), Terraform provider (<code>internal/terraform</code>), CLI and MCP binaries (<code>cmd/*</code>, <code>internal/cli</code>, <code>internal/mcp</code>), and React admin UI (<code>frontend/src</code>). The platform creates and manages isolated project stacks, public routes, database and pooler exposure, project secrets, SSO/SCIM configuration, backups, audit logs, and operational metadata.</p>
+
+<p>Key assets include control-plane authentication secrets, session tokens, bootstrap credentials, SSO/SCIM tokens, MFA secrets, password hashes, project service-role keys, database passwords, S3 keys, backup credentials, Docker/Kubernetes privileges, meta database state, audit logs, backup/PITR metadata, platform defaults, organization membership, RBAC, and public edge routes.</p>
+
+<p>Important trust boundaries include internet clients versus public admin/API/project routes, browser admin users versus bearer-token clients, authenticated users versus admin-only platform operations, organization/project members versus other tenants, the control plane versus managed project runtimes, the control plane versus Docker/Kubernetes APIs, and the control plane versus external IdPs, SCIM clients, DNS/TLS providers, S3-compatible backup targets, SMTP/SMS/OAuth providers, and observability endpoints.</p>
+
+<p>Production-like assumptions used for severity calibration: <code>AuthRequired</code> is enabled, control-plane secrets are stable and non-development, TLS terminates correctly at the edge, bootstrap is not exposed after initialization, and operators are trusted to configure DNS, host firewall rules, backup targets, and database/pooler exposure intentionally. Project tenants may still be mutually untrusted in hosted-like usage.</p>
+
+<p>Priority attacker stories were lower-privilege authenticated users crossing org/project boundaries, stale or forged authentication state, secret reveal/persistence mistakes, unsafe restore or provisioning actions, Docker proxy breakout, public routing/database exposure mistakes, and backup/SSRF-like egress through storage target configuration. Developer-only scripts and local smoke tooling were treated as lower priority unless they directly affected production runtime.</p>
+
+<h2 id="findings">Findings</h2>
+
+<table>
+<thead><tr>
+<th>#</th>
+<th>Severity</th>
+<th>Confidence</th>
+<th>Finding</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>High</td>
+<td>Medium</td>
+<td><a href="#1-project-developers-can-trigger-destructive-database-restores">Project developers can trigger destructive database restores</a></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Medium</td>
+<td>High</td>
+<td><a href="#2-revoked-platform-admins-retain-admin-authority-until-stateless-token-expiry">Revoked platform admins retain admin authority until stateless token expiry</a></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Medium</td>
+<td>Medium</td>
+<td><a href="#3-control-plane-mfa-totp-seeds-are-stored-plaintext-in-normalized-users-rows">Control-plane MFA TOTP seeds are stored plaintext in normalized users rows</a></td>
+</tr>
+</tbody></table>
+
+<h3 id="confidence-scale">Confidence Scale</h3>
+
+<table>
+<thead><tr>
+<th>Label</th>
+<th>Meaning</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>high</td>
+<td>Direct source, configuration, or runtime evidence supports the finding, with no material unresolved reachability or exploitability blocker.</td>
+</tr>
+<tr>
+<td>medium</td>
+<td>Source evidence supports a plausible issue, but runtime behavior, deployment configuration, role reachability, type constraints, or exploit reliability still need proof.</td>
+</tr>
+<tr>
+<td>low</td>
+<td>Weak or incomplete evidence; included only for explicit follow-up candidates.</td>
+</tr>
+</tbody></table>
+
+<h3 id="1-project-developers-can-trigger-destructive-database-restores">[1] Project developers can trigger destructive database restores</h3>
+
+<table>
+<thead><tr>
+<th>Field</th>
+<th>Value</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>Severity</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Confidence</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Confidence rationale</td>
+<td>The HTTP routes, developer role gate, and restore command sinks are directly traced, but final severity depends on whether product policy intentionally grants developers destructive restore authority.</td>
+</tr>
+<tr>
+<td>Category</td>
+<td>Authorization bypass / destructive action authorization</td>
+</tr>
+<tr>
+<td>CWE</td>
+<td>CWE-862 Missing Authorization; CWE-863 Incorrect Authorization</td>
+</tr>
+<tr>
+<td>Affected lines</td>
+<td><code>internal/api/routes.go:286</code>, <code>internal/api/routes.go:287</code>, <code>internal/api/project_backup_recovery_handlers.go:83</code>, <code>internal/api/project_backup_recovery_handlers.go:106</code>, <code>internal/control/backup.go:1537</code>, <code>internal/control/backup.go:1686</code></td>
+</tr>
+</tbody></table>
+
+<h4 id="summary">Summary</h4>
+
+<p>Logical and PITR restore endpoints are exposed as authenticated project routes, but both handlers require only <code>roleDeveloper</code>. Restore operations can roll back or overwrite project database state, so this grants a non-admin project member a destructive recovery action that is stronger than normal development access.</p>
+
+<h4 id="validation">Validation</h4>
+
+<p>Static validation traced the route registration to the handler guard and then to the restore sinks. <code>POST /v1/projects/{ref}/restore</code> maps to <code>restoreBackupHandler</code>, and <code>POST /v1/projects/{ref}/database/backups/restore-pitr</code> maps to <code>restorePITRBackupHandler</code>. Both use <code>requireProjectRole(..., roleDeveloper)</code>. The backup service then executes the logical restore or PITR restore command when dry-run mode is not active. Scoped backend tests passed.</p>
+
+<p>Existing checks scope backups to the project and validate backup status, checksum, and PITR recoverability. Those are good integrity controls, but they do not make the caller an admin or require explicit destructive confirmation.</p>
+
+<h4 id="dataflow">Dataflow</h4>
+
+<p>Authenticated developer request -&gt; <code>routes.go</code> restore route -&gt; <code>restoreBackupHandler</code> or <code>restorePITRBackupHandler</code> -&gt; <code>requireProjectRole(..., roleDeveloper)</code> -&gt; request payload backup id or target timestamp -&gt; <code>BackupService.RestoreBackup</code> or <code>BackupService.RestoreToTime</code> -&gt; restore command execution.</p>
+
+<h4 id="reachability">Reachability</h4>
+
+<p>The attacker needs authenticated developer membership on the target project or organization. From the remote API, that developer can send the restore request for the project they can access. The impact is same-project, not cross-tenant by itself, but it crosses the administrative boundary between build/deploy participation and destructive database recovery.</p>
+
+<h4 id="severity">Severity</h4>
+
+<p>Severity is high because a lower project role can trigger broad integrity and availability impact on production project data through a normal HTTP API. The impact is limited to projects where the attacker already has developer access, which keeps this below critical. Evidence that the product intentionally defines developers as restore operators would lower this to a policy/design decision; evidence that production projects routinely grant developer to non-admin contributors reinforces high severity.</p>
+
+<h4 id="remediation">Remediation</h4>
+
+<p>Require project admin, organization owner/admin, or platform admin for restore execution. Add an explicit destructive confirmation field for logical and PITR restores, similar to platform restore confirmation. Add tests that a project developer receives 403 for both restore endpoints while an admin succeeds. Audit all project routes where <code>roleDeveloper</code> gates irreversible lifecycle, data, or exposure changes.</p>
+
+<h3 id="2-revoked-platform-admins-retain-admin-authority-until-stateless-token-expiry">[2] Revoked platform admins retain admin authority until stateless token expiry</h3>
+
+<table>
+<thead><tr>
+<th>Field</th>
+<th>Value</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>Severity</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Confidence</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Confidence rationale</td>
+<td>Token issue, token verification, platform-admin authorization, and admin sinks are directly traced; the only material precondition is possession of a previously valid admin token.</td>
+</tr>
+<tr>
+<td>Category</td>
+<td>Stale session / privilege revocation bypass</td>
+</tr>
+<tr>
+<td>CWE</td>
+<td>CWE-613 Insufficient Session Expiration; CWE-863 Incorrect Authorization</td>
+</tr>
+<tr>
+<td>Affected lines</td>
+<td><code>internal/api/auth_handlers.go:137</code>, <code>internal/api/auth_handlers.go:183</code>, <code>internal/api/http_helpers.go:166</code>, <code>internal/api/authz_helpers.go:96</code>, <code>internal/api/user_handlers.go:20</code>, <code>internal/api/user_handlers.go:51</code>, <code>internal/api/user_handlers.go:80</code></td>
+</tr>
+</tbody></table>
+
+<h4 id="summary">Summary</h4>
+
+<p>Bootstrap and login issue 24-hour tokens carrying the user&#x27;s role. <code>withAuth</code> verifies only token signature and expiry, then <code>requirePlatformAdmin</code> accepts <code>claims.Role == &quot;admin&quot;</code> without checking the current user record. A platform admin who is demoted or deleted can continue using the old token against platform-admin routes until it expires.</p>
+
+<h4 id="validation">Validation</h4>
+
+<p>Static validation traced token issuance at login/bootstrap, verification in middleware, and authorization in <code>requirePlatformAdmin</code>. <code>AuthService.Verify</code> is used as the closest control and installs token claims into the request context. No current-user lookup, token version, revocation list, or issued-after cutoff is checked before accepting the embedded role. Scoped API/control tests passed.</p>
+
+<p>Counterevidence is that this requires prior admin authority. It is still reportable because demotion/deletion is intended to revoke admin authority, and the old token remains valid for up to 24 hours.</p>
+
+<h4 id="dataflow">Dataflow</h4>
+
+<p>Admin login/bootstrap -&gt; role-bearing token valid for 24 hours -&gt; another admin demotes or deletes the user -&gt; old bearer token or auth cookie reaches <code>withAuth</code> -&gt; HMAC/expiry check succeeds -&gt; <code>requirePlatformAdmin</code> trusts embedded <code>admin</code> role -&gt; user create/update/delete and other platform-admin actions remain available.</p>
+
+<h4 id="reachability">Reachability</h4>
+
+<p>The attacker must be a former platform admin or have stolen a valid admin token before revocation. The API remains production-authenticated, but the stale token is still accepted as authenticated and authorized. Representative sinks are user create, update, and delete; other platform-admin-only handlers using the same helper are likely affected.</p>
+
+<h4 id="severity">Severity</h4>
+
+<p>Severity is medium because this is not an initial admin escalation, but it materially weakens incident response, offboarding, and demotion. It can preserve control-plane privileges for the token TTL after access should have been revoked. Shorter token lifetime would reduce severity; adding immediate revocation checks would close the path.</p>
+
+<h4 id="remediation">Remediation</h4>
+
+<p>Add stateful token invalidation for platform-admin authorization: user existence, current role, disabled/deleted status, and a token version or <code>issued_after</code> timestamp. Recheck current user state before privileged platform routes, at least for platform-admin actions. Invalidate sessions on role change, password reset, MFA reset, and user deletion. Add regression tests that reuse an old admin token after demotion and deletion and expect 403 or 401.</p>
+
+<h3 id="3-control-plane-mfa-totp-seeds-are-stored-plaintext-in-normalized-users-rows">[3] Control-plane MFA TOTP seeds are stored plaintext in normalized users rows</h3>
+
+<table>
+<thead><tr>
+<th>Field</th>
+<th>Value</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>Severity</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Confidence</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Confidence rationale</td>
+<td>The seed generation and normalized-table write/read path are directly traced, but exploitability depends on access to the database rows or backups and any deployment-level encryption controls.</td>
+</tr>
+<tr>
+<td>Category</td>
+<td>Sensitive secret stored without application-level encryption</td>
+</tr>
+<tr>
+<td>CWE</td>
+<td>CWE-312 Cleartext Storage of Sensitive Information; CWE-522 Insufficiently Protected Credentials</td>
+</tr>
+<tr>
+<td>Affected lines</td>
+<td><code>internal/control/store.go:2555</code>, <code>internal/control/store.go:2567</code>, <code>internal/control/store.go:2593</code>, <code>internal/control/persistent_store.go:334</code>, <code>internal/control/persistent_store.go:346</code>, <code>internal/control/persistent_store.go:1991</code>, <code>internal/control/persistent_store.go:1993</code>, <code>internal/control/persistent_store.go:2506</code></td>
+</tr>
+</tbody></table>
+
+<h4 id="summary">Summary</h4>
+
+<p>MFA enrollment stores TOTP seeds in <code>User.MFAPendingSecret</code> and promotes them to <code>User.MFASecret</code> after confirmation. The persistent store writes both fields directly into normalized <code>users</code> columns. The same persistence layer encrypts project secrets before normalized storage, showing that application-level encryption is available but not applied to MFA seeds.</p>
+
+<h4 id="validation">Validation</h4>
+
+<p>Static validation traced generation at <code>BeginUserMFAEnrollment</code>, assignment to pending/confirmed user fields, normalized <code>users</code> insert, and normalized reload. Project secrets are encrypted before insertion into the <code>secrets</code> table, which is a useful negative control. Scoped control tests passed.</p>
+
+<p>Counterevidence is that MFA fields are omitted from JSON responses and the encrypted checkpoint protects another copy of state. Those controls do not protect normalized users rows or backups/exports that include them.</p>
+
+<h4 id="dataflow">Dataflow</h4>
+
+<p>MFA enrollment -&gt; TOTP seed generation -&gt; <code>user.MFAPendingSecret</code> -&gt; MFA confirmation -&gt; <code>user.MFASecret</code> -&gt; persistent checkpoint sync -&gt; <code>users.mfa_secret</code> / <code>users.mfa_pending_secret</code> plaintext insert -&gt; later reload directly into user state.</p>
+
+<h4 id="reachability">Reachability</h4>
+
+<p>This is not reachable by an ordinary HTTP user. The attacker needs read access to the normalized control-plane database, an exported SQL backup, or equivalent operational artifact. With the seed and the user&#x27;s primary credential, the attacker can generate valid TOTP codes and bypass the intended MFA barrier.</p>
+
+<h4 id="severity">Severity</h4>
+
+<p>Severity is medium because the issue weakens MFA for control-plane accounts, including admins, but exploitation requires database/backup access and usually another credential. Mandatory external database encryption or column encryption would reduce practical exposure; storing only encrypted seeds in application-controlled fields would close the code-level weakness.</p>
+
+<h4 id="remediation">Remediation</h4>
+
+<p>Encrypt MFA seeds before writing normalized user rows, using an authenticated encryption path equivalent to project secret encryption. Consider separating pending and confirmed seed encryption metadata and rotating/re-enrolling existing MFA seeds after migration. Keep JSON omission, and add persistence tests asserting the normalized database does not contain raw TOTP seeds.</p>
+
+<h2 id="reviewed-surfaces">Reviewed Surfaces</h2>
+
+<table>
+<thead><tr>
+<th>Surface</th>
+<th>Risk Area</th>
+<th>Outcome</th>
+<th>Notes</th>
+</tr></thead>
+<tbody>
+<tr>
+<td><code>internal/api/project_backup_recovery_handlers.go</code></td>
+<td>Destructive project restore authorization</td>
+<td>Reported</td>
+<td>Developer-role users can trigger logical and PITR restore.</td>
+</tr>
+<tr>
+<td><code>internal/api/auth_handlers.go</code>, <code>internal/api/http_helpers.go</code>, <code>internal/api/authz_helpers.go</code>, <code>internal/api/user_handlers.go</code></td>
+<td>Authentication token revocation and platform-admin authorization</td>
+<td>Reported</td>
+<td>Role-bearing 24-hour token remains authoritative after demotion/deletion.</td>
+</tr>
+<tr>
+<td><code>internal/control/store.go</code>, <code>internal/control/persistent_store.go</code></td>
+<td>MFA seed persistence</td>
+<td>Reported</td>
+<td>Normalized users rows store TOTP seeds without application-level encryption.</td>
+</tr>
+<tr>
+<td><code>frontend/src/api.ts</code>, <code>frontend/src/lib/auth-session.ts</code>, <code>frontend/src/app.tsx</code>, <code>frontend/scripts/check-static.mjs</code></td>
+<td>Browser token handling, XSS sinks, URL construction</td>
+<td>No issue found</td>
+<td>No token storage or HTML sink found; static checks and frontend tests passed.</td>
+</tr>
+<tr>
+<td><code>cmd/supadupa-docker-proxy/main.go</code></td>
+<td>Docker daemon mediation</td>
+<td>No issue found</td>
+<td>Allowlist, label validation, privileged mode rejection, namespace checks, and bind-mount limits reviewed.</td>
+</tr>
+<tr>
+<td><code>internal/provisioner/compose/compose.go</code></td>
+<td>Compose generation, file writes, command execution</td>
+<td>No issue found</td>
+<td>Project refs validated; commands use argv arrays or quoted operator templates.</td>
+</tr>
+<tr>
+<td><code>internal/provisioner/kubernetes/kubernetes.go</code>, <code>internal/operator/isolation.go</code>, <code>charts/supadupa</code></td>
+<td>Kubernetes rendering, network policy, RBAC</td>
+<td>No issue found</td>
+<td>Rendering and network isolation reviewed; no reachable lower-privilege bypass found.</td>
+</tr>
+<tr>
+<td><code>internal/control/sso.go</code>, SSO/SCIM routes</td>
+<td>SSO/SCIM assertion and token handling</td>
+<td>No issue found</td>
+<td>JSON adapter is gated; validation and replay controls reviewed. Production SAML support remains a readiness gap.</td>
+</tr>
+<tr>
+<td><code>internal/control/backup.go</code>, <code>internal/api/platform_backup_handlers.go</code></td>
+<td>Backup targets, platform restore, S3 endpoint testing</td>
+<td>Rejected</td>
+<td>Platform-admin-only backup target testing did not produce a lower-privilege SSRF finding; retain private-network warnings or allowlists as hardening.</td>
+</tr>
+<tr>
+<td><code>deploy/compose.yaml</code>, <code>scripts/setup-compose.sh</code></td>
+<td>Deployment defaults and port exposure</td>
+<td>Needs follow-up</td>
+<td>Direct Postgres/pooler exposure defaults deserve explicit production hardening, even though routing config gates project DB ingress.</td>
+</tr>
+<tr>
+<td><code>runtime/</code> ignored local files</td>
+<td>Local secret hygiene</td>
+<td>Needs follow-up</td>
+<td>Ignored runtime/backups contain live-looking generated secrets, control-plane backup data, and ACME material in this workspace. These were not tracked by git, but should be purged and rotated if real.</td>
+</tr>
+<tr>
+<td>Large implementation files</td>
+<td>Maintainability and reviewability</td>
+<td>Needs follow-up</td>
+<td><code>internal/control/store.go</code> is 10703 lines; several API, MCP, CLI, provisioning, and frontend files exceed 1000 lines.</td>
+</tr>
+</tbody></table>
+
+<h2 id="open-questions-and-follow-up">Open Questions And Follow Up</h2>
+
+<ul><li>Confirm whether project developers are intended to run database restores. If not, change both restore endpoints to project admin or owner/admin and add regression tests.</li><li>Decide the platform session revocation model. A token version or user <code>sessions_valid_after</code> timestamp would cover role change, password reset, MFA reset, and deletion.</li><li>Migrate existing MFA seeds to encrypted storage and plan forced MFA re-enrollment if seed exposure through existing backups is plausible.</li><li>Purge local ignored <code>runtime/</code> artifacts containing generated secrets, project backups, and ACME account material from this machine; rotate any values that were real.</li><li>Split the largest implementation files along stable ownership boundaries. Highest-return candidates are <code>internal/control/store.go</code>, <code>internal/mcp/server.go</code>, <code>internal/provisioner/compose/compose.go</code>, <code>internal/cli/cli.go</code>, and <code>frontend/src/pages/project/database-panels.tsx</code>.</li><li>Follow up on production hardening for direct database/pooler bind defaults, backup target private-network allowlists, and real SAML support versus the current signed JSON adapter gate.</li></ul>
+    </main>
+  </div>
+  <script>
+    const toggle = document.getElementById('navToggle');
+    const icon = document.getElementById('navToggleIcon');
+    const collapsedKey = 'codex-security-report:sidebar-collapsed';
+
+    function setCollapsed(collapsed) {
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      if (toggle) {
+        toggle.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+        toggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+        toggle.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+      }
+      if (icon) icon.setAttribute('d', collapsed ? 'M9 6l6 6-6 6' : 'M15 6l-6 6 6 6');
+      try { localStorage.setItem(collapsedKey, collapsed ? '1' : '0'); } catch {}
+    }
+
+    try { setCollapsed(localStorage.getItem(collapsedKey) === '1'); } catch {}
+    if (toggle) toggle.addEventListener('click', () => setCollapsed(!document.body.classList.contains('sidebar-collapsed')));
+
+    const tocLinks = Array.from(document.querySelectorAll('.toc a'));
+    const sections = tocLinks.map((link) => {
+      const id = decodeURIComponent(link.getAttribute('href').slice(1));
+      return [link, document.getElementById(id)];
+    }).filter((pair) => pair[1]);
+
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+      if (!visible) return;
+      tocLinks.forEach((link) => link.parentElement.classList.remove('active'));
+      const active = tocLinks.find((link) => link.getAttribute('href') === '#' + visible.target.id);
+      if (active) active.parentElement.classList.add('active');
+    }, { rootMargin: '-10% 0px -75% 0px', threshold: [0, 1] });
+
+    sections.forEach(([, section]) => observer.observe(section));
+  </script>
+</body>
+</html>

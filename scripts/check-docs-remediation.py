@@ -12,7 +12,7 @@ CHECKS = {
     ),
     "install docs public database gating": (
         "docs/install.md",
-        ["--db-loopback", "SUPADUPA_POSTGRES_ADDR", "SUPADUPA_POOLER_ADDR", "SUPADUPA_DB_INGRESS_ALLOWED_CIDRS"],
+        ["--db-public-bind", "SUPADUPA_POSTGRES_ADDR", "SUPADUPA_POOLER_ADDR", "SUPADUPA_DB_INGRESS_ALLOWED_CIDRS"],
     ),
     "install docs docker socket proxy": (
         "docs/install.md",
@@ -29,6 +29,22 @@ CHECKS = {
     "security docs password hashing migration": (
         "docs/security.md",
         ["bcrypt-sha256", "sha256$", "rehashed"],
+    ),
+    "security docs platform token revocation": (
+        "docs/security.md",
+        ["token version", "demoted", "deleted", "log in again"],
+    ),
+    "security docs mfa seed encryption": (
+        "docs/security.md",
+        ["TOTP seeds", "encrypted", "legacy plaintext", "re-enroll MFA"],
+    ),
+    "security docs restore confirmation": (
+        "docs/security.md",
+        ["Project Restore Authorization", "project admin", "restore project project-ref", "restore pitr project project-ref"],
+    ),
+    "security docs backup target endpoint warnings": (
+        "docs/security.md",
+        ["S3-compatible backup target endpoints", "warnings", "loopback", "cloud metadata"],
     ),
     "security docs csrf origin policy": (
         "docs/security.md",

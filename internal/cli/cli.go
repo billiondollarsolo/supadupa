@@ -2071,10 +2071,14 @@ func (r Runner) backups(ctx context.Context, c apiClient, args []string) error {
 		return r.printResponse(c.do(ctx, method, path, nil, false))
 	case "restore":
 		backupID := fs.String("backup-id", "", "Backup ID")
+		confirmation := fs.String("confirmation", "", "Exact restore confirmation, for example: restore project <ref>")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		payload := map[string]string{"backup_id": *backupID}
+		if strings.TrimSpace(*confirmation) == "" {
+			return fmt.Errorf("confirmation is required")
+		}
+		payload := map[string]string{"backup_id": *backupID, "confirmation": strings.TrimSpace(*confirmation)}
 		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(*ref)+"/restore", payload, false))
 	case "set-policy":
 		enabled := fs.Bool("enabled", false, "Enable scheduled backups")

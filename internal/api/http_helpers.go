@@ -17,7 +17,10 @@ import (
 
 type contextKey string
 
-const tokenClaimsKey contextKey = "token_claims"
+const (
+	tokenClaimsKey contextKey = "token_claims"
+	authBypassKey  contextKey = "auth_bypass"
+)
 
 const authCookieName = "supadupa_session"
 
@@ -151,7 +154,10 @@ func addDerivedCORSOrigin(out map[string]bool, value string) {
 
 func withAuth(required bool, auth *control.AuthService, next http.Handler) http.Handler {
 	if !required {
-		return next
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), authBypassKey, true)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions || isPublicPath(r.URL.Path) {

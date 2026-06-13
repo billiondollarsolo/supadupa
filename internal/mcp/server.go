@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"supadupa2026/internal/control"
 	"time"
 )
 
@@ -272,8 +273,9 @@ type projectLifecycleArgs struct {
 }
 
 type projectBackupRestoreArgs struct {
-	Ref      string `json:"ref"`
-	BackupID string `json:"backup_id"`
+	Ref          string `json:"ref"`
+	BackupID     string `json:"backup_id"`
+	Confirmation string `json:"confirmation"`
 }
 
 type projectBackupPolicyArgs struct {
@@ -598,7 +600,7 @@ func (s server) handle(ctx context.Context, request rpcRequest) rpcResponse {
 	case "initialize":
 		response.Result = map[string]any{
 			"protocolVersion": "2024-11-05",
-			"serverInfo":      map[string]string{"name": "supadupa-mcp", "version": "0.1.0"},
+			"serverInfo":      map[string]string{"name": "supadupa-mcp", "version": control.Version},
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 		}
 	case "tools/list":
@@ -1354,7 +1356,7 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 			return nil, err
 		}
 		method, path = http.MethodPost, "/v1/projects/"+url.PathEscape(args.Ref)+"/restore"
-		body = map[string]string{"backup_id": args.BackupID}
+		body = map[string]string{"backup_id": args.BackupID, "confirmation": args.Confirmation}
 	case "supadupa_get_project_pitr_policy":
 		ref, err := decodeRef(params.Arguments)
 		if err != nil {
@@ -1955,10 +1957,11 @@ func tools() []map[string]any {
 	backupRestoreSchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"ref":       map[string]string{"type": "string", "description": "Project ref"},
-			"backup_id": map[string]string{"type": "string", "description": "Backup ID to restore"},
+			"ref":          map[string]string{"type": "string", "description": "Project ref"},
+			"backup_id":    map[string]string{"type": "string", "description": "Backup ID to restore"},
+			"confirmation": map[string]string{"type": "string", "description": "Exact destructive confirmation, for example: restore project <ref>"},
 		},
-		"required": []string{"ref", "backup_id"},
+		"required": []string{"ref", "backup_id", "confirmation"},
 	}
 	backupPolicySchema := map[string]any{
 		"type": "object",
@@ -3263,11 +3266,15 @@ func decodeProjectBackupRestoreArgs(payload json.RawMessage) (projectBackupResto
 	}
 	args.Ref = strings.TrimSpace(args.Ref)
 	args.BackupID = strings.TrimSpace(args.BackupID)
+	args.Confirmation = strings.TrimSpace(args.Confirmation)
 	if args.Ref == "" {
 		return projectBackupRestoreArgs{}, fmt.Errorf("ref is required")
 	}
 	if args.BackupID == "" {
 		return projectBackupRestoreArgs{}, fmt.Errorf("backup_id is required")
+	}
+	if args.Confirmation == "" {
+		return projectBackupRestoreArgs{}, fmt.Errorf("confirmation is required")
 	}
 	return args, nil
 }

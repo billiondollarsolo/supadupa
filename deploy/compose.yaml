@@ -36,8 +36,8 @@ services:
       # Edge-router database/pooler bind addresses, so the control plane's
       # database-ingress readiness reflects whether the host actually publishes
       # those ports (loopback vs public).
-      SUPADUPA_POSTGRES_ADDR: ${SUPADUPA_POSTGRES_ADDR:-0.0.0.0:5432}
-      SUPADUPA_POOLER_ADDR: ${SUPADUPA_POOLER_ADDR:-0.0.0.0:6543}
+      SUPADUPA_POSTGRES_ADDR: ${SUPADUPA_POSTGRES_ADDR:-127.0.0.1:5432}
+      SUPADUPA_POOLER_ADDR: ${SUPADUPA_POOLER_ADDR:-127.0.0.1:6543}
       SUPADUPA_SECRET_KEY: ${SUPADUPA_SECRET_KEY:?SUPADUPA_SECRET_KEY is required; run scripts/setup-compose.sh}
       SUPADUPA_AUTH_SECRET: ${SUPADUPA_AUTH_SECRET:?SUPADUPA_AUTH_SECRET is required; run scripts/setup-compose.sh}
       SUPADUPA_ALLOW_DEV_SECRETS: ${SUPADUPA_ALLOW_DEV_SECRETS:-}
@@ -191,8 +191,8 @@ services:
     ports:
       - "${SUPADUPA_HTTP_ADDR:-0.0.0.0:80}:80"
       - "${SUPADUPA_HTTPS_ADDR:-0.0.0.0:443}:443"
-      - "${SUPADUPA_POSTGRES_ADDR:-0.0.0.0:5432}:5432"
-      - "${SUPADUPA_POOLER_ADDR:-0.0.0.0:6543}:6543"
+      - "${SUPADUPA_POSTGRES_ADDR:-127.0.0.1:5432}:5432"
+      - "${SUPADUPA_POOLER_ADDR:-127.0.0.1:6543}:6543"
       - "${SUPADUPA_TRAEFIK_DASHBOARD_ADDR:-127.0.0.1:8088}:8080"
     volumes:
       - ${SUPADUPA_ROUTES_HOST_DIR:-../runtime/routes}:/etc/traefik/dynamic:ro

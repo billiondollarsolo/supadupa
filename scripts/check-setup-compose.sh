@@ -114,18 +114,18 @@ vps_exposed_dir="$work_dir/vps-exposed"
 mkdir -p "$vps_exposed_dir"
 (
   cd "$vps_exposed_dir"
-  PATH="$bin_dir:$PATH" "$repo_root/scripts/setup-compose.sh" --mode vps --domain example.com --expose-db --force >"$work_dir/vps-exposed.out"
+  PATH="$bin_dir:$PATH" "$repo_root/scripts/setup-compose.sh" --mode vps --domain example.com --db-public-bind --force >"$work_dir/vps-exposed.out"
 )
 if ! grep -q '^SUPADUPA_POSTGRES_ADDR=0.0.0.0:5432$' "$vps_exposed_dir/.env"; then
-  echo "setup-compose --expose-db did not publish Postgres" >&2
+  echo "setup-compose --db-public-bind did not publish Postgres" >&2
   exit 1
 fi
 if ! grep -q '^SUPADUPA_POOLER_ADDR=0.0.0.0:6543$' "$vps_exposed_dir/.env"; then
-  echo "setup-compose --expose-db did not publish pooler" >&2
+  echo "setup-compose --db-public-bind did not publish pooler" >&2
   exit 1
 fi
-if ! grep -q -- '--expose-db publishes raw Postgres and pooler ingress' "$work_dir/vps-exposed.out"; then
-  echo "setup-compose --expose-db did not print database ingress warning" >&2
+if ! grep -q -- 'Postgres/pooler edge ports publish on 0.0.0.0:5432 / 0.0.0.0:6543' "$work_dir/vps-exposed.out"; then
+  echo "setup-compose --db-public-bind did not print database ingress warning" >&2
   exit 1
 fi
 

@@ -669,7 +669,7 @@ restore_failed_upgrade_backup_if_enabled() {
     fi
   fi
 
-  if ! supadupa_cli_authed backups restore --ref "$SUPADUPA_TEST_REF" --backup-id "$backup_id" >"$out" 2>"$err"; then
+  if ! supadupa_cli_authed backups restore --ref "$SUPADUPA_TEST_REF" --backup-id "$backup_id" --confirmation "restore project $SUPADUPA_TEST_REF" >"$out" 2>"$err"; then
     fail "upgrade_matrix.failure_restore.$label" "restore command failed; see $(basename "$err")"
   fi
   restore_state="$(json_get_file_optional "$out" restore_state)"

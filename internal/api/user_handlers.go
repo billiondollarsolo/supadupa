@@ -9,7 +9,7 @@ import (
 
 func createUserHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		var payload control.CreateUserRequest
@@ -29,7 +29,7 @@ func createUserHandler(store control.Store) http.HandlerFunc {
 
 func updateUserHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		id := r.PathValue("id")
@@ -60,7 +60,7 @@ func updateUserHandler(store control.Store) http.HandlerFunc {
 
 func deleteUserHandler(store control.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePlatformAdmin(w, r) {
+		if !requirePlatformAdmin(w, r, store) {
 			return
 		}
 		id := r.PathValue("id")

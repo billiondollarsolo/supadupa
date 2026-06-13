@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 const (
 	controlStateCheckpointID       = "default"
 	normalizedMetaSyncAdvisoryLock = int64(787403015222885991)
+	encryptedStringPrefix          = "supadupa:v1:encrypted-string:"
 )
 
 type PersistentStore struct {
@@ -331,7 +333,7 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 		return snapshot, fmt.Errorf("iterate normalized orgs: %w", err)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, COALESCE(mfa_last_accepted_counter, 0), created_at, last_login_at FROM users`)
+	rows, err = s.db.QueryContext(ctx, `SELECT id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, COALESCE(mfa_last_accepted_counter, 0), COALESCE(token_version, 1), created_at, last_login_at FROM users`)
 	if err != nil {
 		return snapshot, fmt.Errorf("load normalized users: %w", err)
 	}
@@ -339,12 +341,23 @@ func (s *PersistentStore) loadNormalizedSnapshot(ctx context.Context) (memorySto
 		var user User
 		var mfaSecret, pendingSecret sql.NullString
 		var confirmedAt, updatedAt, lastLoginAt sql.NullTime
-		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Role, &user.MFAEnabled, &mfaSecret, &pendingSecret, &confirmedAt, &updatedAt, &user.MFALastCounter, &user.CreatedAt, &lastLoginAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Role, &user.MFAEnabled, &mfaSecret, &pendingSecret, &confirmedAt, &updatedAt, &user.MFALastCounter, &user.TokenVersion, &user.CreatedAt, &lastLoginAt); err != nil {
 			rows.Close()
 			return snapshot, fmt.Errorf("scan normalized user: %w", err)
 		}
-		user.MFASecret = mfaSecret.String
-		user.MFAPendingSecret = pendingSecret.String
+		user.MFASecret, err = s.decryptOptionalString(mfaSecret)
+		if err != nil {
+			rows.Close()
+			return snapshot, fmt.Errorf("decrypt normalized user mfa secret: %w", err)
+		}
+		user.MFAPendingSecret, err = s.decryptOptionalString(pendingSecret)
+		if err != nil {
+			rows.Close()
+			return snapshot, fmt.Errorf("decrypt normalized user pending mfa secret: %w", err)
+		}
+		if user.TokenVersion < 1 {
+			user.TokenVersion = 1
+		}
 		if confirmedAt.Valid {
 			user.MFAConfirmedAt = confirmedAt.Time
 		}
@@ -1987,10 +2000,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		return fmt.Errorf("sync platform sso: %w", err)
 	}
 	for _, user := range snapshot.Users {
+		encryptedMFASecret, err := s.encryptOptionalString(user.MFASecret)
+		if err != nil {
+			return fmt.Errorf("encrypt user %s mfa secret: %w", user.ID, err)
+		}
+		encryptedPendingMFASecret, err := s.encryptOptionalString(user.MFAPendingSecret)
+		if err != nil {
+			return fmt.Errorf("encrypt user %s pending mfa secret: %w", user.ID, err)
+		}
 		if _, err := tx.ExecContext(ctx, `
-	INSERT INTO users (id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, mfa_last_accepted_counter, created_at, last_login_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-			user.ID, user.Email, user.PasswordHash, user.Role, user.MFAEnabled, nullString(user.MFASecret), nullString(user.MFAPendingSecret), nullTime(user.MFAConfirmedAt), nullTime(user.MFAUpdatedAt), user.MFALastCounter, user.CreatedAt, nullTimePtr(user.LastLoginAt)); err != nil {
+		INSERT INTO users (id, email, password_hash, role, mfa_enabled, mfa_secret, mfa_pending_secret, mfa_confirmed_at, mfa_updated_at, mfa_last_accepted_counter, token_version, created_at, last_login_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			user.ID, user.Email, user.PasswordHash, user.Role, user.MFAEnabled, encryptedMFASecret, encryptedPendingMFASecret, nullTime(user.MFAConfirmedAt), nullTime(user.MFAUpdatedAt), user.MFALastCounter, nextTokenVersion(user.TokenVersion-1), user.CreatedAt, nullTimePtr(user.LastLoginAt)); err != nil {
 			return fmt.Errorf("sync user %s: %w", user.ID, err)
 		}
 	}
@@ -2640,6 +2661,36 @@ func decodeJSON(payload []byte, target any) error {
 		return nil
 	}
 	return json.Unmarshal(payload, target)
+}
+
+func (s *PersistentStore) encryptOptionalString(value string) (any, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	payload, err := s.encryption.Encrypt([]byte(value))
+	if err != nil {
+		return nil, err
+	}
+	return encryptedStringPrefix + base64.RawStdEncoding.EncodeToString(payload), nil
+}
+
+func (s *PersistentStore) decryptOptionalString(value sql.NullString) (string, error) {
+	if !value.Valid || value.String == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(value.String, encryptedStringPrefix) {
+		return value.String, nil
+	}
+	encoded := strings.TrimPrefix(value.String, encryptedStringPrefix)
+	payload, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", err
+	}
+	plaintext, err := s.encryption.Decrypt(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
 }
 
 func nullString(value string) any {

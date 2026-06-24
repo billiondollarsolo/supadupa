@@ -16,13 +16,15 @@ host-memory limit, not a bug.
 - On a small host, disable the analytics service (or use a leaner profile).
 - See [Resource Requirements](install.md#resource-requirements).
 
-## Resource sizes are reservations, not hard caps
+## Resource sizes are reservations unless limits are enforced
 
 Tier/custom sizes (CPU/RAM/disk) are used for **placement and quota accounting**.
-They are **not** enforced container limits unless you enable "Enforce limits on
-the database container" (DB container only). A project can burst above its size
-on a host with free capacity, and the overview's telemetry bars can read over
-100%. True project-level (sum-of-containers) enforcement is not available yet.
+They are **not** enforced container limits unless you enable "Enforce limits".
+When enabled, Supadupa distributes the selected CPU/RAM budget across enabled
+service containers and writes per-container Docker Compose limits or Kubernetes
+requests/limits. Docker Compose does not provide a true project-wide aggregate
+cap, so an unenforced project can burst above its size on a host with free
+capacity, and telemetry bars can read over 100%.
 
 ## Edge-router restarts have a brief self-heal window
 

@@ -75,8 +75,8 @@ func (r *platformDefaultsResource) Schema(ctx context.Context, req resource.Sche
 			"resource_tier": resourceschema.StringAttribute{
 				Optional:    true,
 				Computed:    true,
-				Default:     stringdefault.StaticString("small"),
-				Description: "Default resource tier: small, medium, or large.",
+				Default:     stringdefault.StaticString("custom"),
+				Description: "Default resource sizing mode. Use custom for exact CPU/RAM/disk sizing.",
 			},
 			"backup_schedule": resourceschema.StringAttribute{
 				Optional:    true,

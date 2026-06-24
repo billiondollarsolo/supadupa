@@ -37,8 +37,14 @@ fi
 if [[ -n "${SUPADUPA_STACK_PROFILE:-full}" ]]; then
   create_args+=(--profile "${SUPADUPA_STACK_PROFILE:-full}")
 fi
-if [[ -n "${SUPADUPA_RESOURCE_TIER:-small}" ]]; then
-  create_args+=(--tier "${SUPADUPA_RESOURCE_TIER:-small}")
+if [[ -n "${SUPADUPA_CPU:-}" ]]; then
+  create_args+=(--cpu "$SUPADUPA_CPU")
+fi
+if [[ -n "${SUPADUPA_RAM_MB:-}" ]]; then
+  create_args+=(--ram-mb "$SUPADUPA_RAM_MB")
+fi
+if [[ -n "${SUPADUPA_DISK_GB:-}" ]]; then
+  create_args+=(--disk-gb "$SUPADUPA_DISK_GB")
 fi
 if [[ -n "${SUPADUPA_HOST_ID:-}" ]]; then
   create_args+=(--host-id "$SUPADUPA_HOST_ID")

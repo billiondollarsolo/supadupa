@@ -49,8 +49,8 @@ func TestCreateProjectAppliesExactSizingOverridesAndAccounting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Medium tier preset is 4 CPU / 8192 MB / 80 GB; override CPU and RAM only,
-	// leaving disk to fall back to the preset.
+	// Legacy/imported tier values are still understood; override CPU and RAM
+	// only, leaving disk to fall back to the legacy preset.
 	project, err := store.CreateProject(ctx, CreateProjectRequest{
 		OrgID: org.ID, Ref: "sized-one", Name: "Sized", HostID: host.ID,
 		ResourceTier: ResourceTierMedium, CPU: 6, RAMMB: 12288, EnforceLimits: true,
@@ -79,6 +79,149 @@ func TestCreateProjectAppliesExactSizingOverridesAndAccounting(t *testing.T) {
 	}
 	if _, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "too-small", Name: "Too Small", HostID: host.ID, RAMMB: 64}); err == nil || !strings.Contains(err.Error(), "ram cannot be below") {
 		t.Fatalf("expected ram floor rejection, got %v", err)
+	}
+}
+
+func TestCreateProjectUsesRecommendedSizingWithHeadroom(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := store.CreateHost(ctx, CreateHostRequest{Name: "big", Address: "127.0.0.1", Capacity: HostCapacity{CPU: 64, RAMMB: 262144, DiskGB: 16384, Project: 50}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectRequest{
+		OrgID: org.ID, Ref: "recommended-one", Name: "Recommended", HostID: host.ID, ResourceTier: ResourceTierCustom,
+	})
+	if err != nil {
+		t.Fatalf("create with recommended sizing failed: %v", err)
+	}
+	if project.Spec.CPU != 5 || project.Spec.RAMMB != 8448 || project.Spec.DiskGB != 60 {
+		t.Fatalf("recommended sizing = %d/%d/%d, want 5/8448/60", project.Spec.CPU, project.Spec.RAMMB, project.Spec.DiskGB)
+	}
+	minimum := minimumReservationForSpec(project.Spec)
+	recommended := recommendedReservationForSpec(project.Spec)
+	if minimum.CPU != 4 || minimum.RAMMB != 6656 || minimum.DiskGB != 50 {
+		t.Fatalf("minimum sizing = %+v, want 4/6656/50", minimum)
+	}
+	if recommended.CPU != project.Spec.CPU || recommended.RAMMB != project.Spec.RAMMB || recommended.DiskGB != project.Spec.DiskGB {
+		t.Fatalf("project sizing did not match recommendation: project=%+v recommended=%+v", project.Spec, recommended)
+	}
+	hosts, err := store.ListHosts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hosts[0].Used.CPU != 5 || hosts[0].Used.RAMMB != 8448 || hosts[0].Used.DiskGB != 60 {
+		t.Fatalf("host reservation = %+v, want CPU 5 / RAM 8448 / Disk 60", hosts[0].Used)
+	}
+}
+
+func TestEnforcedProjectSizingRejectsBelowStackMinimum(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := store.CreateHost(ctx, CreateHostRequest{Name: "big", Address: "127.0.0.1", Capacity: HostCapacity{CPU: 64, RAMMB: 262144, DiskGB: 16384, Project: 50}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.CreateProject(ctx, CreateProjectRequest{
+		OrgID: org.ID, Ref: "too-low-create", Name: "Too Low Create", HostID: host.ID,
+		CPU: 1, RAMMB: minProjectRAMMB, DiskGB: 1, EnforceLimits: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "enforced limits cannot be below") {
+		t.Fatalf("expected create minimum rejection, got %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "resize-low", Name: "Resize Low", HostID: host.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.UpdateProjectResources(ctx, project.Ref, ProjectResourcesInput{CPU: 1, RAMMB: minProjectRAMMB, DiskGB: 1, EnforceLimits: true})
+	if err == nil || !strings.Contains(err.Error(), "enforced limits cannot be below") {
+		t.Fatalf("expected resize minimum rejection, got %v", err)
+	}
+}
+
+func TestProjectServiceResourceAllocationsDistributeAcrossEnabledContainers(t *testing.T) {
+	spec := ProjectSpec{
+		ResourceTier:  ResourceTierCustom,
+		CPU:           4,
+		RAMMB:         6656,
+		DiskGB:        50,
+		EnforceLimits: true,
+		Services: map[string]ServiceSpec{
+			"analytics": {Enabled: false},
+			"graphql":   {Enabled: true},
+			"vector":    {Enabled: false},
+		},
+	}
+
+	allocations := ProjectServiceResourceAllocations(spec)
+	for _, service := range []string{"db", "kong", "meta", "auth", "rest", "realtime", "storage", "imgproxy", "functions", "pooler", "studio"} {
+		allocation, ok := allocations[service]
+		if !ok {
+			t.Fatalf("expected allocation for %s, got %#v", service, allocations)
+		}
+		if allocation.CPUMilli <= 0 || allocation.RAMMB <= 0 {
+			t.Fatalf("expected positive allocation for %s, got %#v", service, allocation)
+		}
+	}
+	for _, service := range []string{"analytics", "graphql", "vector"} {
+		if _, ok := allocations[service]; ok {
+			t.Fatalf("did not expect allocation for %s, got %#v", service, allocations[service])
+		}
+	}
+	totalCPU := 0
+	totalRAM := 0
+	for _, allocation := range allocations {
+		totalCPU += allocation.CPUMilli
+		totalRAM += allocation.RAMMB
+	}
+	if totalCPU != 4000 || totalRAM != 6656 {
+		t.Fatalf("allocation totals = %d/%d, want 4000/6656", totalCPU, totalRAM)
+	}
+
+	spec.EnforceLimits = false
+	if allocations := ProjectServiceResourceAllocations(spec); len(allocations) != 0 {
+		t.Fatalf("expected no allocations without enforcement, got %#v", allocations)
+	}
+}
+
+func TestCreateProjectReplicaDefaultsCustomProjectToReplicaTierAndRejectsInvalidTier(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "replica-custom", Name: "Replica Custom"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Spec.ResourceTier != ResourceTierCustom {
+		t.Fatalf("expected custom project default, got %q", project.Spec.ResourceTier)
+	}
+
+	replica, err := store.CreateProjectReplica(ctx, project.Ref, ProjectReplicaInput{Name: "east"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replica.Tier != ResourceTierSmall {
+		t.Fatalf("expected omitted custom-project replica tier to default to small, got %q", replica.Tier)
+	}
+	if _, err := store.CreateProjectReplica(ctx, project.Ref, ProjectReplicaInput{Name: "west", Tier: ResourceTierCustom}); err == nil || !strings.Contains(err.Error(), "unsupported replica resource tier") {
+		t.Fatalf("expected custom replica tier rejection, got %v", err)
+	}
+	if _, err := store.CreateProjectReplica(ctx, project.Ref, ProjectReplicaInput{Name: "north", Tier: ResourceTier("nano")}); err == nil || !strings.Contains(err.Error(), "unsupported replica resource tier") {
+		t.Fatalf("expected invalid replica tier rejection, got %v", err)
 	}
 }
 

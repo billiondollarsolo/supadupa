@@ -8,7 +8,7 @@ import { CardButton } from "../../components/ui/card-button";
 import { RevealField } from "../../components/ui/reveal-field";
 import { Segmented } from "../../components/ui/segmented";
 import { StatusPill } from "../../components/ui/status-pill";
-import { auditProjectSecretCopy } from "../../api";
+import { auditProjectSecretCopy, revealProjectSecret } from "../../api";
 import { useUIStore } from "../../lib/ui-store";
 import { formatBytes, formatTime } from "../../lib/format";
 import { connectSections, type ConnectSection as ProjectConnectSection } from "../../lib/project-config";
@@ -24,15 +24,14 @@ function isSensitiveSection(section: ProjectConnectSection): boolean {
 
 // Map a connect entry (section prefix + key) to the canonical managed secret
 // kind the audit endpoint understands (POST /secrets/{kind}/copy calls
-// RevealProjectSecret, which only accepts these). Returns null when the value
-// isn't a managed secret (e.g. a `secret://` handle), in which case we skip the
-// audit call entirely rather than fire a request that would 400.
-function canonicalSecretKind(prefix: string, key: string): string | null {
+// RevealProjectSecret, which only accepts these). Returns null when the entry
+// has no managed secret material behind it.
+function canonicalSecretKind(prefix: string, key: string, value: string): string | null {
   const k = key.toLowerCase();
   switch (prefix) {
     case "api_key":
     case "secret":
-      return { anon: "anon_key", service_role: "service_role", publishable: "publishable_key", secret: "secret_key" }[k] ?? null;
+      return { anon: "anon_key", service_role: "service_role", publishable: "publishable_key", secret: "secret_key" }[k] ?? (knownManagedSecretKinds.has(k) ? k : null);
     case "jwt":
       if (k.includes("current")) return "jwt_signing_key_current";
       if (k.includes("next")) return "jwt_signing_key_next";
@@ -40,8 +39,9 @@ function canonicalSecretKind(prefix: string, key: string): string | null {
       return null;
     case "postgres":
     case "pooler":
-      // Connection URIs embed the database password.
-      return "db_password";
+      // Connection URIs embed the database password placeholder. Pooler config
+      // entries such as pool_mode and ports are not secret-bearing.
+      return value.includes("${DB_PASSWORD}") ? "db_password" : null;
     case "storage":
       if (k.includes("access")) return "s3_access_key";
       if (k.includes("secret")) return "s3_secret_key";
@@ -49,6 +49,36 @@ function canonicalSecretKind(prefix: string, key: string): string | null {
     default:
       return null;
   }
+}
+
+const knownManagedSecretKinds = new Set([
+  "anon_key",
+  "db_password",
+  "jwt_secret",
+  "jwt_signing_key_current",
+  "jwt_signing_key_next",
+  "publishable_key",
+  "s3_access_key",
+  "s3_secret_key",
+  "secret_key",
+  "service_role",
+]);
+
+function materializeConnectValue(value: string, kind: string, secretValue: string): string {
+  if (kind === "db_password") {
+    return value.split("${DB_PASSWORD}").join(encodeURIComponent(secretValue));
+  }
+  if (value.startsWith("secret://")) {
+    return secretValue;
+  }
+  return secretValue;
+}
+
+function secretHint(value: string, kind: string | null): string | undefined {
+  if (!kind) return undefined;
+  if (value.startsWith("secret://")) return value;
+  if (kind === "db_password" && value.includes("${DB_PASSWORD}")) return "Password is materialized on reveal/copy.";
+  return undefined;
 }
 
 export function ConnectPanel({
@@ -376,13 +406,18 @@ function ConnectSection({
       </summary>
       <div className="mt-3 grid gap-2">
         {Object.entries(entries).map(([key, value]) => {
-          const auditKind = auditRef ? canonicalSecretKind(auditPrefix, key) : null;
+          const auditKind = auditRef ? canonicalSecretKind(auditPrefix, key, value) : null;
           return sensitive ? (
             <RevealField
               key={key}
               label={key}
               sensitive
+              hint={secretHint(value, auditKind)}
               value={value}
+              onReveal={auditKind ? async () => {
+                const secret = await revealProjectSecret(auditRef, auditKind);
+                return materializeConnectValue(value, auditKind, secret.value);
+              } : undefined}
               onCopy={auditKind ? () => auditProjectSecretCopy(auditRef, auditKind) : undefined}
             />
           ) : (
@@ -405,12 +440,12 @@ export function ProjectMetricsPanel({ metrics, loading }: { metrics?: ProjectMet
         {loading ? <p className="text-sm text-muted">Loading project metrics...</p> : null}
         {metrics ? (
           <>
-            <div className="metric-grid">
-              <Metric label="Status" value={metrics.status} />
-              <Metric label="Tier" value={metrics.resource_tier} />
-              <Metric label="Reserved CPU" value={metrics.resources.cpu.toString()} />
-              <Metric label="Reserved RAM" value={formatBytes(metrics.resources.ram_mb * 1024 * 1024)} />
-            </div>
+	            <div className="metric-grid">
+	              <Metric label="Status" value={metrics.status} />
+	              <Metric label="Reserved CPU" value={metrics.resources.cpu.toString()} />
+	              <Metric label="Reserved RAM" value={formatBytes(metrics.resources.ram_mb * 1024 * 1024)} />
+	              <Metric label="Reserved disk" value={`${metrics.resources.disk_gb} GB`} />
+	            </div>
             <div className="usage-row">
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">Operational surface</p>

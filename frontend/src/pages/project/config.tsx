@@ -1,6 +1,8 @@
 import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
+import { listProjectSecrets } from "../../api";
 import { useDashboardContext } from "../../lib/dashboard-context";
 import { projectSettingsSections, type ProjectSettingsSection } from "../../lib/project-config";
 import { projectPath, projectSectionFromPathname } from "../../lib/routes";
@@ -12,7 +14,7 @@ import { ConfigPanel, DangerZonePanel, DatabaseExposurePanel, DomainsPanel, Netw
 import { RoutesPanel } from "./connect-panels";
 import { CDNPanel } from "./cdn-panel";
 import { ProjectPage } from "./layout";
-import { LifecyclePanel, RuntimeStatusPanel } from "./side-panels";
+import { LifecyclePanel, RuntimeStatusPanel, SecretsPanel } from "./side-panels";
 
 export function ProjectConfigPage() {
   const { activeFeatureFlags, activeOrgId, activeProject, cdnInvalidations, cdnPolicy, configArea, domains, networkConnections, networkPolicy, onProjectDestroyed, projectConfig, projectServices, routeManifest, setConfigArea } = useDashboardContext();
@@ -20,6 +22,12 @@ export function ProjectConfigPage() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const selectedSection = projectSectionFromPathname(pathname, "config");
   const activeSection: ProjectSettingsSection = projectSettingsSections.some((section) => section.id === selectedSection) ? selectedSection as ProjectSettingsSection : "overview";
+  const projectRef = activeProject?.ref ?? "";
+  const projectSecrets = useQuery({
+    queryKey: ["project-secrets", projectRef],
+    queryFn: () => listProjectSecrets(projectRef),
+    enabled: activeSection === "operations" && Boolean(projectRef),
+  });
   const stats = useMemo(() => {
     const services = projectServices.data?.services ?? {};
     const serviceValues = Object.values(services);
@@ -87,6 +95,7 @@ export function ProjectConfigPage() {
       {activeSection === "operations" ? (
         <div className="grid gap-4">
           <LifecyclePanel orgId={activeOrgId} project={activeProject} />
+          <SecretsPanel project={activeProject} secrets={projectSecrets.data ?? []} loading={projectSecrets.isLoading} />
           <RuntimeStatusPanel project={activeProject} />
         </div>
       ) : null}

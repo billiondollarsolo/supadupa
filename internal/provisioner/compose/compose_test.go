@@ -329,7 +329,7 @@ func TestCreateRendersProjectFiles(t *testing.T) {
 	}
 }
 
-func TestCreateRendersDatabaseLimitsOnlyWhenEnforced(t *testing.T) {
+func TestCreateRendersServiceLimitsOnlyWhenEnforced(t *testing.T) {
 	// Default: no enforcement -> no deploy limits emitted.
 	root := t.TempDir()
 	if err := NewWithOptions(Options{RootDir: root}).Create(context.Background(), control.ProjectSpec{
@@ -345,8 +345,8 @@ func TestCreateRendersDatabaseLimitsOnlyWhenEnforced(t *testing.T) {
 		t.Fatalf("expected no deploy limits without enforcement:\n%s", compose)
 	}
 
-	// Enforced with an exact override -> deploy limits reflect the override, not
-	// the medium-tier preset (2 CPU / 4096M).
+	// Enforced with an exact override -> per-service deploy limits are emitted
+	// across the enabled container set.
 	root2 := t.TempDir()
 	if err := NewWithOptions(Options{RootDir: root2}).Create(context.Background(), control.ProjectSpec{
 		Ref: "enforced", Domain: "supadupa.test", StackVersion: "15.8.1.060",
@@ -358,10 +358,11 @@ func TestCreateRendersDatabaseLimitsOnlyWhenEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"deploy:", "resources:", "limits:", `cpus: "3"`, "memory: 6144M"} {
-		if !strings.Contains(string(compose2), expected) {
-			t.Fatalf("expected enforced limit %q in compose:\n%s", expected, compose2)
-		}
+	for _, service := range []string{"db", "kong", "meta", "auth", "rest", "realtime", "storage", "imgproxy", "edge-runtime", "pooler", "studio", "analytics", "vector"} {
+		assertComposeServiceHasLimits(t, compose2, service)
+	}
+	if count := strings.Count(string(compose2), "    deploy:\n"); count != 13 {
+		t.Fatalf("expected deploy limits for 13 enabled containers, got %d:\n%s", count, compose2)
 	}
 }
 
@@ -2138,7 +2139,7 @@ func TestUpgradePreservesServiceToggles(t *testing.T) {
 	}
 }
 
-func TestScaleWritesTierManifest(t *testing.T) {
+func TestScaleRewritesComposeResourceLimits(t *testing.T) {
 	root := t.TempDir()
 	provisioner := NewWithOptions(Options{RootDir: root})
 
@@ -2150,23 +2151,74 @@ func TestScaleWritesTierManifest(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
-	if err := provisioner.Scale(context.Background(), "alpha", control.ResourceTierLarge); err != nil {
+	if err := provisioner.Scale(context.Background(), "alpha", control.ProjectSpec{
+		Ref:           "alpha",
+		Domain:        "supadupa.test",
+		StackVersion:  "15.8.1.060",
+		ResourceTier:  control.ResourceTierCustom,
+		CPU:           6,
+		RAMMB:         12288,
+		DiskGB:        120,
+		EnforceLimits: true,
+	}); err != nil {
 		t.Fatalf("scale failed: %v", err)
 	}
 	env, err := os.ReadFile(filepath.Join(root, "alpha", ".env"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(env), "RESOURCE_TIER=large") {
+	if !strings.Contains(string(env), "RESOURCE_TIER=custom") || !strings.Contains(string(env), "SUPADUPA_RESOURCE_CPU=6") || !strings.Contains(string(env), "SUPADUPA_ENFORCE_LIMITS=true") {
 		t.Fatalf("expected RESOURCE_TIER update, got:\n%s", env)
 	}
-	manifest, err := os.ReadFile(filepath.Join(root, "alpha", "scale.yaml"))
+	compose, err := os.ReadFile(filepath.Join(root, "alpha", "compose.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(manifest), "resource_tier: large") || !strings.Contains(string(manifest), `cpus: "4.0"`) {
-		t.Fatalf("expected large scale manifest, got:\n%s", manifest)
+	for _, service := range []string{"db", "kong", "auth", "edge-runtime", "analytics", "vector"} {
+		assertComposeServiceHasLimits(t, compose, service)
 	}
+	if strings.Contains(composeServiceBlock(t, compose, "db"), `cpus: "6"`) || strings.Contains(composeServiceBlock(t, compose, "db"), "memory: 12288M") {
+		t.Fatalf("expected db to receive a per-service share rather than the full project budget:\n%s", composeServiceBlock(t, compose, "db"))
+	}
+}
+
+func assertComposeServiceHasLimits(t *testing.T, payload []byte, service string) {
+	t.Helper()
+	block := composeServiceBlock(t, payload, service)
+	for _, expected := range []string{"deploy:", "resources:", "limits:", "cpus:", "memory:"} {
+		if !strings.Contains(block, expected) {
+			t.Fatalf("expected %s block to include %q, got:\n%s", service, expected, block)
+		}
+	}
+}
+
+func composeServiceBlock(t *testing.T, payload []byte, service string) string {
+	t.Helper()
+	lines := strings.Split(string(payload), "\n")
+	header := "  " + service + ":"
+	start := -1
+	for index, line := range lines {
+		if line == header {
+			start = index
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("expected compose service %s in:\n%s", service, payload)
+	}
+	end := len(lines)
+	for index := start + 1; index < len(lines); index++ {
+		line := lines[index]
+		if line != "" && !strings.HasPrefix(line, " ") {
+			end = index
+			break
+		}
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && strings.HasSuffix(strings.TrimSpace(line), ":") {
+			end = index
+			break
+		}
+	}
+	return strings.Join(lines[start:end], "\n")
 }
 
 func TestParseComposeStatsAggregatesContainers(t *testing.T) {

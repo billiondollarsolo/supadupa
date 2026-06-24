@@ -335,7 +335,6 @@ go run ./cmd/supadupa-cli settings defaults set \
   --domain supadupa.test \
   --stack-version latest \
   --profile full \
-  --tier small \
   --backup-schedule daily \
   --smtp-enabled \
   --smtp-host smtp.example.com \
@@ -748,7 +747,7 @@ resource "supadupa_platform_defaults" "defaults" {
   domain               = "supadupa.test"
   stack_version        = "latest"
   profile              = "full"
-  resource_tier        = "small"
+  resource_tier        = "custom"
   backup_schedule      = "daily"
   smtp_enabled         = true
   smtp_host            = "smtp.example.com"
@@ -816,7 +815,11 @@ resource "supadupa_project" "alpha" {
   host_id       = supadupa_host.east_1a.id
   domain        = "supadupa.test"
   profile       = "full"
-  resource_tier = "small"
+  resource_tier = "custom"
+  cpu           = 5
+  ram_mb        = 8448
+  disk_gb       = 60
+  enforce_limits = true
 }
 
 resource "supadupa_project_access_grant" "platform_engineering_alpha" {

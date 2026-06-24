@@ -97,7 +97,9 @@
       "additionalProperties": false,
       "properties": {
         "create": { "type": "boolean" },
-        "name": { "type": "string" }
+        "name": { "type": "string" },
+        "controlPlaneName": { "type": "string" },
+        "operatorName": { "type": "string" }
       }
     },
     "controlPlane": {

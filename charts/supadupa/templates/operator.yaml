@@ -18,7 +18,7 @@ spec:
         {{- include "supadupa.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: operator
     spec:
-      serviceAccountName: {{ include "supadupa.serviceAccountName" . }}
+      serviceAccountName: {{ include "supadupa.operatorServiceAccountName" . }}
       securityContext:
         {{- toYaml .Values.operator.podSecurityContext | nindent 8 }}
       containers:

@@ -34,7 +34,7 @@ spec:
         {{- include "supadupa.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: control-plane
     spec:
-      serviceAccountName: {{ include "supadupa.serviceAccountName" . }}
+      serviceAccountName: {{ include "supadupa.controlPlaneServiceAccountName" . }}
       securityContext:
         {{- toYaml .Values.controlPlane.podSecurityContext | nindent 8 }}
       containers:

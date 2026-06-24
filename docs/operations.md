@@ -104,6 +104,8 @@ Static requested resources and live usage are different. Requested resources des
 
 The current MVP includes lightweight metrics/log surfaces in the admin UI. For production-grade observability, plan to add external log and metrics storage such as Prometheus/Grafana, OpenTelemetry, or another long-retention backend.
 
+Project telemetry history is retained inside the control-plane checkpoint for 30 days. Raw samples are kept for 24 hours, then compacted into five-minute rollups. Project viewers can read this history through the UI, API, CLI, and MCP tools, so treat CPU, memory, disk, and network counters as retained operational metadata when planning backups, exports, and access reviews. The built-in project telemetry collector is currently implemented for Docker Compose deployments; Kubernetes deployments need an external metrics path or a future Kubernetes collector for project history to populate.
+
 Useful places in the UI:
 
 - Dashboard.

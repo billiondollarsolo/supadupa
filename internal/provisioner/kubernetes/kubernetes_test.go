@@ -50,6 +50,18 @@ func hasRenderedDependency(dependencies []kubernetesRenderedDependency, service 
 	return false
 }
 
+func assertKubernetesServiceHasResources(t *testing.T, services map[string]kubernetesRenderedService, name string) {
+	t.Helper()
+	service, ok := services[name]
+	if !ok {
+		t.Fatalf("expected rendered service %s in %#v", name, services)
+	}
+	if service.Resources == nil || service.Resources.Requests["cpu"] == "" || service.Resources.Requests["memory"] == "" ||
+		service.Resources.Limits["cpu"] == "" || service.Resources.Limits["memory"] == "" {
+		t.Fatalf("expected %s to have CPU/memory requests and limits, got %#v", name, service.Resources)
+	}
+}
+
 func TestCreateRendersProjectCRD(t *testing.T) {
 	root := t.TempDir()
 	provisioner := NewWithOptions(Options{RootDir: root, Namespace: "platform"})
@@ -924,7 +936,16 @@ func TestLifecycleMutatesProjectCRD(t *testing.T) {
 	if err := provisioner.Upgrade(context.Background(), "alpha", "new"); err != nil {
 		t.Fatalf("upgrade failed: %v", err)
 	}
-	if err := provisioner.Scale(context.Background(), "alpha", control.ResourceTierLarge); err != nil {
+	if err := provisioner.Scale(context.Background(), "alpha", control.ProjectSpec{
+		Ref:           "alpha",
+		Domain:        "supadupa.test",
+		StackVersion:  "new",
+		ResourceTier:  control.ResourceTierCustom,
+		CPU:           6,
+		RAMMB:         12288,
+		DiskGB:        120,
+		EnforceLimits: true,
+	}); err != nil {
 		t.Fatalf("scale failed: %v", err)
 	}
 	if err := provisioner.Pause(context.Background(), "alpha"); err != nil {
@@ -956,8 +977,17 @@ func TestLifecycleMutatesProjectCRD(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifest := decodeRenderedProjectManifest(t, payload)
-	if manifest.Spec.StackVersion != "new" || manifest.Spec.ResourceTier != "large" || manifest.Spec.DesiredState != "paused" {
+	if manifest.Spec.StackVersion != "new" || manifest.Spec.ResourceTier != "custom" || manifest.Spec.DesiredState != "paused" || manifest.Spec.CPU != 6 || manifest.Spec.RAMMB != 12288 || manifest.Spec.DiskGB != 120 || !manifest.Spec.EnforceLimits {
 		t.Fatalf("unexpected project lifecycle state: %#v\n%s", manifest.Spec, payload)
+	}
+	for _, service := range []string{"db", "kong", "meta", "auth", "functions", "analytics", "vector"} {
+		assertKubernetesServiceHasResources(t, manifest.Spec.Services, service)
+	}
+	if manifest.Spec.Services["graphql"].Resources != nil {
+		t.Fatalf("expected graphql extension to avoid standalone container resources, got %#v", manifest.Spec.Services["graphql"].Resources)
+	}
+	if manifest.Spec.Services["db"].Resources.Limits["cpu"] == "6" || manifest.Spec.Services["db"].Resources.Limits["memory"] == "12288Mi" {
+		t.Fatalf("expected db to receive a per-service share rather than the full project budget, got %#v", manifest.Spec.Services["db"].Resources)
 	}
 }
 
@@ -984,7 +1014,15 @@ spec:
 	if err := provisioner.Upgrade(context.Background(), "alpha", "new"); err != nil {
 		t.Fatalf("upgrade failed: %v", err)
 	}
-	if err := provisioner.Scale(context.Background(), "alpha", control.ResourceTierLarge); err != nil {
+	if err := provisioner.Scale(context.Background(), "alpha", control.ProjectSpec{
+		Ref:           "alpha",
+		StackVersion:  "new",
+		ResourceTier:  control.ResourceTierCustom,
+		CPU:           6,
+		RAMMB:         12288,
+		DiskGB:        120,
+		EnforceLimits: true,
+	}); err != nil {
 		t.Fatalf("scale failed: %v", err)
 	}
 	if err := provisioner.Pause(context.Background(), "alpha"); err != nil {
@@ -998,7 +1036,7 @@ spec:
 	for key, expected := range map[string]string{
 		"desiredState": "paused",
 		"stackVersion": "new",
-		"resourceTier": "large",
+		"resourceTier": "custom",
 	} {
 		actual, err := projectSpecScalar(payload, key)
 		if err != nil {

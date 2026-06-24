@@ -389,7 +389,7 @@ export const projectSettingsSections: Array<ProjectSubnavItem<ProjectSettingsSec
 
 export const platformSettingsSections: Array<ProjectSubnavItem<PlatformSettingsSection>> = [
   { id: "overview", label: "Overview", description: "Platform defaults and enterprise configuration summary." },
-  { id: "defaults", label: "Defaults", description: "New project domain, version, profile, tier, and backup defaults." },
+  { id: "defaults", label: "Defaults", description: "New project domain, version, profile, and backup defaults." },
   { id: "features", label: "Feature Flags", description: "Local, Compose, and enterprise feature availability." },
   { id: "db-ingress", label: "Database Ingress", description: "Trusted client networks for direct Postgres and pooler access." },
   { id: "backups", label: "Backups", description: "S3-compatible backup targets for project and control-plane recovery." },

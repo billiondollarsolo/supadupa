@@ -99,7 +99,7 @@ func authStateHandler(store control.Store, auth *control.AuthService, authRequir
 		if auth != nil {
 			if token := tokenFromRequest(r); token != "" {
 				if claims, err := auth.Verify(token); err == nil {
-					if user, err := store.GetUserByID(r.Context(), claims.Subject); err == nil {
+					if user, err := currentUserForClaims(r.Context(), store, claims); err == nil {
 						response["authenticated"] = true
 						response["user"] = user
 					}

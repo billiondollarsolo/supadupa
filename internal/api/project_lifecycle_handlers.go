@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"supadupa2026/internal/env"
+	"unicode"
 
 	"supadupa2026/internal/control"
 )
@@ -39,7 +41,10 @@ type upgradeProjectFailureResponse struct {
 }
 
 type scaleProjectRequest struct {
-	ResourceTier control.ResourceTier `json:"resource_tier"`
+	CPU           int  `json:"cpu"`
+	RAMMB         int  `json:"ram_mb"`
+	DiskGB        int  `json:"disk_gb"`
+	EnforceLimits bool `json:"enforce_limits"`
 }
 
 func lifecycleHandler(store control.Store, provisioner control.Provisioner, nextStatus control.ProjectPhase) http.HandlerFunc {
@@ -312,6 +317,9 @@ func validateUpgradeTarget(currentVersion string, targetVersion string) error {
 	}
 	for _, version := range supportedUpgradeVersions() {
 		if targetVersion == version {
+			if compareStackVersions(targetVersion, currentVersion) <= 0 {
+				return fmt.Errorf("target version %s is not newer than installed version %s", targetVersion, currentVersion)
+			}
 			return nil
 		}
 	}
@@ -320,6 +328,51 @@ func validateUpgradeTarget(currentVersion string, targetVersion string) error {
 
 func supportedUpgradeVersions() []string {
 	return control.SupportedStackReleaseVersionsFromEnv(os.Getenv)
+}
+
+func compareStackVersions(left string, right string) int {
+	leftParts := stackVersionParts(left)
+	rightParts := stackVersionParts(right)
+	count := len(leftParts)
+	if len(rightParts) > count {
+		count = len(rightParts)
+	}
+	for index := 0; index < count; index++ {
+		leftPart := 0
+		if index < len(leftParts) {
+			leftPart = leftParts[index]
+		}
+		rightPart := 0
+		if index < len(rightParts) {
+			rightPart = rightParts[index]
+		}
+		if leftPart > rightPart {
+			return 1
+		}
+		if leftPart < rightPart {
+			return -1
+		}
+	}
+	return strings.Compare(strings.TrimSpace(left), strings.TrimSpace(right))
+}
+
+func stackVersionParts(version string) []int {
+	fields := strings.FieldsFunc(strings.TrimSpace(version), func(r rune) bool {
+		return r == '.' || r == '-' || r == '_'
+	})
+	parts := make([]int, 0, len(fields))
+	for _, field := range fields {
+		digits := strings.Builder{}
+		for _, r := range field {
+			if !unicode.IsDigit(r) {
+				break
+			}
+			digits.WriteRune(r)
+		}
+		value, _ := strconv.Atoi(digits.String())
+		parts = append(parts, value)
+	}
+	return parts
 }
 
 func scaleProjectHandler(store control.Store, provisioner control.Provisioner) http.HandlerFunc {
@@ -337,22 +390,27 @@ func scaleProjectHandler(store control.Store, provisioner control.Provisioner) h
 			writeDecodeError(w, err)
 			return
 		}
-		project, err := store.UpdateProjectResourceTier(r.Context(), ref, payload.ResourceTier)
+		project, err := store.UpdateProjectResources(r.Context(), ref, control.ProjectResourcesInput{
+			CPU:           payload.CPU,
+			RAMMB:         payload.RAMMB,
+			DiskGB:        payload.DiskGB,
+			EnforceLimits: payload.EnforceLimits,
+		})
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
 		pctx, cancel := detachedProvisionContext(r)
 		defer cancel()
-		if err := provisioner.Scale(pctx, ref, payload.ResourceTier); err != nil {
+		if err := provisioner.Scale(pctx, ref, control.ProjectSpecWithSecrets(project.Spec, nil)); err != nil {
 			project, _ = store.UpdateProjectStatus(r.Context(), ref, control.ProjectError, err.Error())
-			control.LogProject(r.Context(), store, ref, "error", "Resource tier scale failed", map[string]string{"resource_tier": string(payload.ResourceTier), "error": err.Error()})
-			control.Audit(r.Context(), store, "project.scale_failed", "project:"+ref, map[string]string{"resource_tier": string(payload.ResourceTier), "error": err.Error()})
+			control.LogProject(r.Context(), store, ref, "error", "Resource sizing update failed", map[string]string{"cpu": strconv.Itoa(payload.CPU), "ram_mb": strconv.Itoa(payload.RAMMB), "disk_gb": strconv.Itoa(payload.DiskGB), "error": err.Error()})
+			control.Audit(r.Context(), store, "project.scale_failed", "project:"+ref, map[string]string{"cpu": strconv.Itoa(payload.CPU), "ram_mb": strconv.Itoa(payload.RAMMB), "disk_gb": strconv.Itoa(payload.DiskGB), "error": err.Error()})
 			writeJSON(w, http.StatusAccepted, sanitizeProjectForResponse(project))
 			return
 		}
-		control.LogProject(r.Context(), store, ref, "info", "Resource tier scaled", map[string]string{"resource_tier": string(payload.ResourceTier)})
-		control.Audit(r.Context(), store, "project.scale", "project:"+ref, map[string]string{"resource_tier": string(payload.ResourceTier)})
+		control.LogProject(r.Context(), store, ref, "info", "Resource sizing updated", map[string]string{"cpu": strconv.Itoa(payload.CPU), "ram_mb": strconv.Itoa(payload.RAMMB), "disk_gb": strconv.Itoa(payload.DiskGB), "enforce_limits": strconv.FormatBool(payload.EnforceLimits)})
+		control.Audit(r.Context(), store, "project.scale", "project:"+ref, map[string]string{"cpu": strconv.Itoa(payload.CPU), "ram_mb": strconv.Itoa(payload.RAMMB), "disk_gb": strconv.Itoa(payload.DiskGB), "enforce_limits": strconv.FormatBool(payload.EnforceLimits)})
 		writeJSON(w, http.StatusOK, sanitizeProjectForResponse(project))
 	}
 }

@@ -281,6 +281,39 @@ func TestReconcileProjectIsolationCreatesNamespaceAndPolicies(t *testing.T) {
 	}
 }
 
+func TestReconcileProjectRejectsUnownedRuntimeNamespace(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	client := &fakeClient{}
+	reconciler := Reconciler{
+		Client:                 client,
+		Now:                    func() time.Time { return now },
+		IsolationEnabled:       true,
+		RuntimeNamespacePrefix: "supadupa-proj-",
+	}
+
+	err := reconciler.ReconcileProject(context.Background(), "supadupa", Project{
+		Metadata: ObjectMeta{Name: "alpha", Generation: 1},
+		Spec: ProjectSpec{
+			Ref:              "alpha",
+			DesiredState:     "running",
+			RuntimeNamespace: "kube-system",
+			Services:         map[string]ServiceSpec{"auth": {Enabled: true, Image: "example/auth:v1"}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), `runtimeNamespace "kube-system" is not owned`) {
+		t.Fatalf("expected unowned runtime namespace error, got %v", err)
+	}
+	if len(client.ensureNamespaces) != 0 || len(client.deleteNamespaces) != 0 || client.applyNamespace != "" || client.deleteNamespace != "" {
+		t.Fatalf("unowned namespace must not be touched, ensure=%#v deleteNS=%#v apply=%q deleteResources=%q", client.ensureNamespaces, client.deleteNamespaces, client.applyNamespace, client.deleteNamespace)
+	}
+	if client.patchNamespace != "supadupa" || client.patchName != "alpha" {
+		t.Fatalf("expected degraded status in control namespace, got %s/%s", client.patchNamespace, client.patchName)
+	}
+	if client.status.Phase != "Degraded" || client.status.Conditions[0].Reason != "InvalidRuntimeNamespace" {
+		t.Fatalf("expected InvalidRuntimeNamespace status, got %#v", client.status)
+	}
+}
+
 func TestReconcileProjectLegacyModeUnchanged(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	client := &fakeClient{}

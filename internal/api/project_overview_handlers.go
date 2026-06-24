@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"supadupa2026/internal/control"
@@ -133,6 +134,26 @@ func getProjectMetricsHandler(store control.Store) http.HandlerFunc {
 	}
 }
 
+func getProjectTelemetryHistoryHandler(store control.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ref := r.PathValue("ref")
+		if _, ok := requireProjectRole(w, r, store, ref, roleViewer); !ok {
+			return
+		}
+		query, err := telemetryHistoryQueryFromRequest(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		history, err := store.GetProjectTelemetryHistory(r.Context(), ref, query)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, history)
+	}
+}
+
 func recordProjectTelemetryHandler(store control.Store) http.HandlerFunc {
 	type payload struct {
 		Source           string    `json:"source"`
@@ -171,6 +192,52 @@ func recordProjectTelemetryHandler(store control.Store) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusCreated, sample)
 	}
+}
+
+func telemetryHistoryQueryFromRequest(r *http.Request) (control.TelemetryHistoryQuery, error) {
+	values := r.URL.Query()
+	query := control.TelemetryHistoryQuery{}
+	if raw := strings.TrimSpace(values.Get("range")); raw != "" {
+		duration, err := parseTelemetryDuration(raw)
+		if err != nil {
+			return query, err
+		}
+		query.To = time.Now().UTC()
+		query.From = query.To.Add(-duration)
+	}
+	if raw := strings.TrimSpace(values.Get("from")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return query, err
+		}
+		query.From = parsed.UTC()
+	}
+	if raw := strings.TrimSpace(values.Get("to")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return query, err
+		}
+		query.To = parsed.UTC()
+	}
+	if raw := strings.TrimSpace(values.Get("step")); raw != "" {
+		duration, err := parseTelemetryDuration(raw)
+		if err != nil {
+			return query, err
+		}
+		query.Step = duration
+	}
+	return query, nil
+}
+
+func parseTelemetryDuration(raw string) (time.Duration, error) {
+	if strings.HasSuffix(raw, "d") {
+		days, err := time.ParseDuration(strings.TrimSuffix(raw, "d") + "h")
+		if err != nil {
+			return 0, err
+		}
+		return days * 24, nil
+	}
+	return time.ParseDuration(raw)
 }
 
 func getConnectHandler(store control.Store) http.HandlerFunc {

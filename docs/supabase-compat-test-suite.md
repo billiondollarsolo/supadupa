@@ -259,8 +259,7 @@ supadupa-cli --api "$SUPADUPA_API_URL" --token "$SUPADUPA_TOKEN" projects create
   --ref "$SUPADUPA_TEST_REF" \
   --name "$SUPADUPA_TEST_NAME" \
   --domain "$SUPADUPA_APPS_DOMAIN" \
-  --profile full \
-  --tier small
+  --profile full
 ```
 
 Expected:

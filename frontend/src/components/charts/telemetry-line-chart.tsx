@@ -7,7 +7,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { formatTime } from "../../lib/format";
+import { formatDateTime, formatTime } from "../../lib/format";
 
 export type TelemetryLineChartPoint = {
   sampledAt: string;
@@ -33,11 +33,13 @@ export function TelemetryLineChart({
   const latest = points[points.length - 1];
   const first = points[0];
   const [domainMin, domainMax] = domain;
+  const spanMs = first && latest ? Math.abs(new Date(latest.sampledAt).getTime() - new Date(first.sampledAt).getTime()) : 0;
+  const formatTimeLabel = spanMs >= 24 * 60 * 60 * 1000 ? formatDateTime : formatTime;
   const formatYTick = (value: number) => `${value}${unit}`;
   const formatXTick = (value: string) => {
     // Only label the first and last samples to stay compact.
     if (value === first?.sampledAt || value === latest?.sampledAt) {
-      return formatTime(value);
+      return formatTimeLabel(value);
     }
     return "";
   };
@@ -51,7 +53,7 @@ export function TelemetryLineChart({
         <div className="flex flex-wrap justify-end gap-2 text-xs text-muted">
           <span className="trend-legend cpu">CPU</span>
           <span className="trend-legend memory">RAM</span>
-          {latest ? <span>{formatTime(latest.sampledAt)}</span> : null}
+          {latest ? <span>{formatTimeLabel(latest.sampledAt)}</span> : null}
         </div>
       </div>
       <div aria-label={ariaLabel} className="telemetry-chart mt-3" role="img">
@@ -103,7 +105,7 @@ function TelemetryTooltip({ active, label, payload, unit = "%" }: { active?: boo
   }
   return (
     <div className="chart-tooltip">
-      <p className="text-xs text-faint">{formatTime(label)}</p>
+      <p className="text-xs text-faint">{formatDateTime(label)}</p>
       {payload.map((item) => (
         <p className="text-xs" key={item.dataKey}>
           <span style={{ color: item.color }}>{item.name}</span>: {formatMeasure(Number(item.value ?? 0), unit)}

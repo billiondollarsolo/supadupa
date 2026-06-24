@@ -112,6 +112,10 @@ func TestProjectChildResourceInventoryMatchesManualSurfaces(t *testing.T) {
 			projectChildSurfaceMCP:       "telemetry is exposed through project metrics tools rather than a telemetry mutation tool",
 			projectChildSurfaceTerraform: "telemetry is observed runtime state, not Terraform-managed desired state",
 		},
+		"telemetry_history": {
+			projectChildSurfaceTable:     "telemetry history is checkpointed and compacted as transient runtime observation state",
+			projectChildSurfaceTerraform: "telemetry history is observed runtime state, not Terraform-managed desired state",
+		},
 	}
 
 	apiRoutes := readProjectChildSource(t, "..", "api", "routes.go")

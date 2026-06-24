@@ -108,7 +108,7 @@ export function SettingsPanel({
     domain: "supadupa.test",
     stack_version: "latest",
     profile: "full",
-    resource_tier: "small",
+    resource_tier: "custom",
     backup_schedule: "daily",
     feature_flags: {} as Record<string, boolean>,
     database_ingress_allowed_cidrs: "",
@@ -548,14 +548,13 @@ export function SettingsPanel({
 
   function submitDefaults(event: FormEvent) {
     event.preventDefault();
-    mutation.mutate({
-      ...persistedDefaultsPayload(),
-      domain: form.domain,
-      stack_version: form.stack_version,
-      profile: form.profile,
-      resource_tier: form.resource_tier,
-      backup_schedule: form.backup_schedule,
-    });
+	    mutation.mutate({
+	      ...persistedDefaultsPayload(),
+	      domain: form.domain,
+	      stack_version: form.stack_version,
+	      profile: form.profile,
+	      backup_schedule: form.backup_schedule,
+	    });
   }
 
   function submitFeatureFlags(event: FormEvent) {
@@ -751,7 +750,7 @@ export function SettingsPanel({
                 />
               </>
             ) : null}
-            <SummaryCard label="Defaults" title={`${form.profile} / ${form.resource_tier}`} detail={`${form.domain} · ${form.stack_version} · ${form.backup_schedule} backups`} onClick={() => openSection("defaults")} />
+	            <SummaryCard label="Defaults" title={form.profile} detail={`${form.domain} · ${form.stack_version} · ${form.backup_schedule} backups`} onClick={() => openSection("defaults")} />
             <SummaryCard label="Feature flags" title={`${enabledFeatures} of ${Object.keys(form.feature_flags).length || enabledFeatures} enabled`} detail={provisionerMode} onClick={() => openSection("features")} />
         </div>
       ) : null}
@@ -787,23 +786,15 @@ export function SettingsPanel({
                 <option value="orioledb">OrioleDB</option>
               </NativeSelect>
             </label>
-            <label className="grid gap-1">
-              <span className="label">Tier</span>
-              <NativeSelect value={form.resource_tier} onChange={(event) => setForm({ ...form, resource_tier: event.target.value })}>
-                <option value="small">Small</option>
-                <option value="medium">Medium</option>
-                <option value="large">Large</option>
-              </NativeSelect>
-            </label>
-            <label className="grid gap-1">
-              <span className="label">Backup schedule</span>
+	            <label className="grid gap-1">
+	              <span className="label">Backup schedule</span>
               <NativeSelect value={form.backup_schedule} onChange={(event) => setForm({ ...form, backup_schedule: event.target.value })}>
                 <option value="daily">Daily</option>
                 <option value="hourly">Hourly</option>
               </NativeSelect>
             </label>
           </div>
-          <SaveRow disabled={!canSave || mutation.isPending} detail={`${form.stack_version} · ${form.profile} · ${form.resource_tier} · ${form.backup_schedule}`} title="New project defaults" />
+	          <SaveRow disabled={!canSave || mutation.isPending} detail={`${form.stack_version} · ${form.profile} · ${form.backup_schedule}`} title="New project defaults" />
           {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
         </form>
       ) : null}
@@ -1429,4 +1420,3 @@ function SCIMGroups({ groups }: { groups: SCIMGroup[] }) {
     </div>
   );
 }
-

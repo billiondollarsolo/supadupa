@@ -9,11 +9,11 @@ type ProjectSpec struct {
 	StackVersion string       `json:"stack_version"`
 	Profile      StackProfile `json:"profile"`
 	ResourceTier ResourceTier `json:"resource_tier"`
-	// Exact resource sizing. When any of these is > 0 it overrides the
-	// tier-derived default for that dimension, so a preset (tier) sets sensible
-	// numbers and advanced users can dial in exact CPU cores / RAM (MB) / disk
-	// (GB). EnforceLimits, when true, applies real container CPU/memory limits to
-	// the project's database service; otherwise sizing is placement/quota only.
+	// Exact resource sizing. New projects use explicit CPU cores / RAM (MB) /
+	// disk (GB) instead of user-facing size tiers. EnforceLimits, when true,
+	// applies real per-container CPU/memory limits across enabled runtime
+	// services; otherwise sizing is placement/quota accounting and disk
+	// allocation only.
 	CPU           int                    `json:"cpu,omitempty"`
 	RAMMB         int                    `json:"ram_mb,omitempty"`
 	DiskGB        int                    `json:"disk_gb,omitempty"`
@@ -63,18 +63,24 @@ const (
 type ResourceTier string
 
 const (
+	// These tier values are retained for replica/pooler sizing and imported
+	// legacy records. Main project create/resize uses ResourceTierCustom with
+	// explicit CPU/RAM/disk values.
 	ResourceTierSmall  ResourceTier = "small"
 	ResourceTierMedium ResourceTier = "medium"
 	ResourceTierLarge  ResourceTier = "large"
-	// ResourceTierCustom denotes a project sized by explicit CPU/RAM/disk
-	// overrides rather than a preset. Its reservation comes entirely from the
-	// spec's exact values (falling back to the small preset if any are unset).
+	// ResourceTierCustom denotes a project sized by explicit CPU/RAM/disk values.
 	ResourceTierCustom ResourceTier = "custom"
 )
 
 type ServiceSpec struct {
 	Enabled bool              `json:"enabled"`
 	Config  map[string]string `json:"config"`
+}
+
+type ProjectServiceResourceAllocation struct {
+	CPUMilli int `json:"cpu_milli"`
+	RAMMB    int `json:"ram_mb"`
 }
 
 type ReplicaOpts struct {

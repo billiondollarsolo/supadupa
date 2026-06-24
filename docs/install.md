@@ -27,32 +27,34 @@ VPS:
 
 ## Resource Requirements
 
-Each project runs its **own** full Supabase stack (Postgres, Auth, REST, GraphQL, Realtime, Storage, Studio, Kong, Edge Functions, and — on the `full` profile — Logflare analytics). Size the host for the control plane **plus** every project you intend to run concurrently.
+Each project runs its **own** Supabase-style stack. Size the host for the control plane **plus** every project you intend to run concurrently.
 
 | Component | RAM | Notes |
 |-----------|-----|-------|
 | Control plane | ~0.5 GB | Control API, admin UI, metadata Postgres, Traefik, Docker proxy. |
-| Project on the `full` profile | ~3–4 GB | Includes Logflare (analytics) — an Elixir/BEAM service that is the single heaviest container. |
-| Project with analytics disabled | ~1.5–2 GB | Dropping analytics roughly halves the per-project footprint. |
+| Project on the `essential` profile | Recommended 6.25 GiB | Lean app-serving stack without GraphQL, Imgproxy, analytics, or log shipping. |
+| Project on the `full` profile | Recommended 8.25 GiB | Complete service set including Logflare analytics, the heaviest container. |
+| Project on the `orioledb` profile | Recommended 9.375 GiB | Same service set as `full`, with the OrioleDB preview engine. |
 
-The size **tiers** are sized to those realities — `small` starts at 4 GB because that is the floor for a full-profile project, not a 2 GB number that can't run the full stack:
+The project wizard calculates a bare minimum from the selected profile and enabled services, then pre-fills a recommended size with operating headroom. Main project create/resize uses exact CPU/RAM/disk values, not user-facing `small`, `medium`, or `large` presets.
 
-| Tier | CPU | RAM | Disk |
-|------|-----|-----|------|
-| small | 2 vCPU | 4 GB | 40 GB |
-| medium | 4 vCPU | 8 GB | 80 GB |
-| large | 8 vCPU | 16 GB | 160 GB |
-| custom | — | exact | exact |
+| Profile seed | Minimum | Recommended default |
+| --- | --- | --- |
+| `essential` | 3 vCPU, 5 GiB RAM, 40 GB disk | 4 vCPU, 6.25 GiB RAM, 50 GB disk |
+| `full` | 4 vCPU, 6.5 GiB RAM, 50 GB disk | 5 vCPU, 8.25 GiB RAM, 60 GB disk |
+| `orioledb` | 4 vCPU, 7.5 GiB RAM, 70 GB disk | 5 vCPU, 9.375 GiB RAM, 85 GB disk |
 
-Tier sizes are **reservations** for placement + quota; they are not hard container caps unless you enable limit enforcement (today: database container only). Host RAM should cover the control plane (~0.5 GB) **plus** the reserved size of every project you run concurrently.
+The recommended default adds 20% CPU headroom, 25% RAM headroom, and 20% disk headroom, with RAM and disk rounded upward. Custom service selections change both the minimum and recommended values.
+
+Project sizes are **reservations** for placement + quota. When you enable limit enforcement, Supadupa distributes the selected CPU/RAM budget across enabled service containers and writes per-container Docker Compose limits or Kubernetes requests/limits. Docker Compose does not provide a true project-wide aggregate cap. Host RAM should cover the control plane (~0.5 GB) **plus** the reserved size of every project you run concurrently.
 
 Guidance:
 
-- **Minimum for the `full` profile with one project is ~4 GB RAM.** On a 2 GB host the Logflare/analytics container is OOM-killed during startup (exit code 137), and the project reports `degraded` with `analytics: expected service is missing from Docker Compose state`. That is a host-memory limit, not a bug — give the host more RAM, or disable analytics.
+- **Minimum for the `full` profile with one project is 6.5 GiB RAM, and the recommended default is 8.25 GiB RAM.** On smaller hosts, Logflare/analytics can be OOM-killed during startup (exit code 137), and the project reports `degraded` with `analytics: expected service is missing from Docker Compose state`. That is a host-memory limit, not a bug - give the host more RAM, choose `essential`, or disable analytics.
 - Add roughly the per-project figure above for **each additional concurrent project**.
-- Provision **swap** (2–4 GB) as a cushion for startup memory spikes, but treat it as a backstop only — BEAM on swap is slow and is not a substitute for RAM.
+- Provision **swap** (2-4 GB) as a cushion for startup memory spikes, but treat it as a backstop only - BEAM on swap is slow and is not a substitute for RAM.
 - **Disk:** budget ~5–10 GB for platform images plus each project's volumes and backups.
-- **CPU:** 2 vCPU is workable for evaluation; 4+ vCPU for multiple active projects.
+- **CPU:** 4 vCPU is the startup floor for a default `full` profile; 5+ vCPU is the recommended default with headroom.
 
 On a small node, disable the analytics service (or choose a lighter profile) to fit the smaller footprint. You lose the Logs Explorer backend in Studio, but every other surface (Auth, REST, GraphQL, Realtime, Storage, Edge Functions) is unaffected.
 
@@ -238,11 +240,11 @@ When external DB access is enabled, restrict `5432` and `6543` to trusted client
 After login:
 
 1. Open `Settings -> Defaults`.
-2. Confirm project domain, stack version, stack profile, resource tier, and backup schedule.
+2. Confirm project domain, stack version, stack profile, custom sizing mode, and backup schedule.
 3. Open `Settings -> Backups`.
 4. Add and test an off-host S3/R2 target for production-like recovery.
 5. Create an organization if one does not already exist.
-6. Create a project.
+6. Create a project, accept or override the recommended CPU/RAM/disk reservation, and choose whether to enforce runtime limits.
 7. Use the project `Connect` page for keys and URLs.
 8. Open Studio from the project page.
 

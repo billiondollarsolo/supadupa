@@ -122,8 +122,14 @@ create_isolation_project() {
   if [[ -n "${SUPADUPA_ISOLATION_STACK_PROFILE:-${SUPADUPA_STACK_PROFILE:-full}}" ]]; then
     create_args+=(--profile "${SUPADUPA_ISOLATION_STACK_PROFILE:-${SUPADUPA_STACK_PROFILE:-full}}")
   fi
-  if [[ -n "${SUPADUPA_ISOLATION_RESOURCE_TIER:-${SUPADUPA_RESOURCE_TIER:-small}}" ]]; then
-    create_args+=(--tier "${SUPADUPA_ISOLATION_RESOURCE_TIER:-${SUPADUPA_RESOURCE_TIER:-small}}")
+  if [[ -n "${SUPADUPA_ISOLATION_CPU:-${SUPADUPA_CPU:-}}" ]]; then
+    create_args+=(--cpu "${SUPADUPA_ISOLATION_CPU:-${SUPADUPA_CPU:-}}")
+  fi
+  if [[ -n "${SUPADUPA_ISOLATION_RAM_MB:-${SUPADUPA_RAM_MB:-}}" ]]; then
+    create_args+=(--ram-mb "${SUPADUPA_ISOLATION_RAM_MB:-${SUPADUPA_RAM_MB:-}}")
+  fi
+  if [[ -n "${SUPADUPA_ISOLATION_DISK_GB:-${SUPADUPA_DISK_GB:-}}" ]]; then
+    create_args+=(--disk-gb "${SUPADUPA_ISOLATION_DISK_GB:-${SUPADUPA_DISK_GB:-}}")
   fi
   if [[ -n "${SUPADUPA_ISOLATION_HOST_ID:-${SUPADUPA_HOST_ID:-}}" ]]; then
     create_args+=(--host-id "${SUPADUPA_ISOLATION_HOST_ID:-${SUPADUPA_HOST_ID:-}}")

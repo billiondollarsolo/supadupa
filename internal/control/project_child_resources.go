@@ -540,6 +540,24 @@ var projectChildResourceRegistry = []projectChildResource{
 			},
 		},
 	),
+	withProjectChildInventory(
+		projectChildSliceResource("telemetry_history", func(s *MemoryStore) map[string][]TelemetryHistorySample { return s.telemetryHistory },
+			nil,
+			nil,
+			nil,
+		),
+		projectChildResourceInventory{
+			memoryField:    "telemetryHistory",
+			snapshotField:  "TelemetryHistory",
+			apiRoutePrefix: "/v1/projects/{ref}/telemetry/history",
+			cliCommand:     "metrics",
+			mcpTool:        "supadupa_get_project_telemetry_history",
+			omittedSurfaces: map[projectChildResourceSurface]string{
+				projectChildSurfaceTable:     "telemetry history is checkpointed and compacted as transient runtime observation state",
+				projectChildSurfaceTerraform: "telemetry history is observed runtime state, not Terraform-managed desired state",
+			},
+		},
+	),
 }
 
 func (s *MemoryStore) cleanupRegisteredProjectChildrenLocked(ref string) {

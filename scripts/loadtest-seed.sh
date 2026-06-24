@@ -50,7 +50,7 @@ for e in "${PROJECTS[@]}"; do
 try: print(json.load(sys.stdin).get("ref",""))
 except: print("")' 2>/dev/null)
   if [ "$exists" = "$ref" ]; then echo "  $ref already exists, skip create"; continue; fi
-  body=$(python3 -c "import json;print(json.dumps({'ref':'$ref','name':'$name','host_id':'$HOST_ID','domain':'$APPS','profile':'full','resource_tier':'small','stack_version':'latest'}))")
+  body=$(python3 -c "import json;print(json.dumps({'ref':'$ref','name':'$name','host_id':'$HOST_ID','domain':'$APPS','profile':'full','stack_version':'latest'}))")
   code=$(curl -s -o /tmp/seed_create_$ref.json -w '%{http_code}' --max-time 900 -H "authorization: Bearer $TOK" \
     -X POST "$API/v1/orgs/$ORG/projects" -H 'content-type: application/json' -d "$body")
   echo "  create $ref -> HTTP $code ($(head -c 120 /tmp/seed_create_$ref.json))"

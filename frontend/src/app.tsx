@@ -127,6 +127,15 @@ function pageTitleForPathname(pathname: string, activeProject: Project | undefin
   return "Dashboard";
 }
 
+function projectResourceSummary(project: Project) {
+  const cpu = project.spec.cpu ?? 0;
+  const ramMB = project.spec.ram_mb ?? 0;
+  if (cpu > 0 && ramMB > 0) {
+    return `${cpu} vCPU · ${formatBytes(ramMB * 1024 * 1024)}`;
+  }
+  return project.spec.enforce_limits ? "limits on" : "no limits";
+}
+
 export function App() {
   const user = useAuthSession((state) => state.user);
   const setAuthenticated = useAuthSession((state) => state.setAuthenticated);
@@ -597,7 +606,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       actions.push({
         id: `project-${project.ref}`,
         title: project.name,
-        subtitle: `${project.ref} · ${project.status} · ${project.spec.resource_tier}`,
+        subtitle: `${project.ref} · ${project.status} · ${projectResourceSummary(project)}`,
         group: "Projects",
         icon: Database,
         keywords: [project.ref, project.status, project.spec.profile, project.spec.stack_version],
@@ -1358,7 +1367,7 @@ function Sidebar({ projectMode }: { projectMode: boolean }) {
           <p className="mt-1 truncate font-mono text-xs text-muted">{ref}</p>
           <div className="mt-3 flex flex-wrap gap-1">
             <StatusPill status={activeProject?.status ?? "loading"} />
-            {activeProject ? <Badge variant="muted">{activeProject.spec.resource_tier}</Badge> : null}
+	            {activeProject ? <Badge variant="muted">{activeProject.spec.enforce_limits ? "limits on" : "no limits"}</Badge> : null}
             {activeProject ? <Badge variant="muted">{activeProject.spec.profile}</Badge> : null}
           </div>
         </div>

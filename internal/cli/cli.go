@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -46,12 +47,20 @@ func (r Runner) Run(ctx context.Context, args []string) int {
 	apiURL := global.String("api", r.env("SUPADUPA_API_URL", "http://localhost:8080"), "Management API base URL")
 	token := global.String("token", r.env("SUPADUPA_TOKEN", ""), "Bearer token")
 	if err := global.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			r.printUsage()
+			return 0
+		}
 		return 2
 	}
 	rest := global.Args()
 	if len(rest) == 0 {
 		r.printUsage()
 		return 2
+	}
+	if rest[0] == "help" {
+		r.printUsage()
+		return 0
 	}
 	base, err := normalizeBaseURL(*apiURL)
 	if err != nil {
@@ -195,7 +204,6 @@ func (r Runner) settings(ctx context.Context, c apiClient, args []string) error 
 			domain := fs.String("domain", "", "Default base domain")
 			stackVersion := fs.String("stack-version", "", "Default stack version")
 			profile := fs.String("profile", "", "Default stack profile")
-			tier := fs.String("tier", "", "Default resource tier")
 			backupSchedule := fs.String("backup-schedule", "", "Default backup schedule")
 			smtpEnabled := fs.Bool("smtp-enabled", false, "Enable platform SMTP defaults")
 			smtpHost := fs.String("smtp-host", "", "Platform SMTP host")
@@ -212,7 +220,6 @@ func (r Runner) settings(ctx context.Context, c apiClient, args []string) error 
 				"domain":          *domain,
 				"stack_version":   *stackVersion,
 				"profile":         *profile,
-				"resource_tier":   *tier,
 				"backup_schedule": *backupSchedule,
 				"smtp": map[string]any{
 					"enabled":         *smtpEnabled,
@@ -930,11 +937,10 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 		stackVersion := fs.String("stack-version", "", "Stack version")
 		hostID := fs.String("host-id", "", "Host ID")
 		profile := fs.String("profile", "", "Stack profile")
-		tier := fs.String("tier", "", "Resource tier preset (small|medium|large)")
-		cpu := fs.Int("cpu", 0, "Exact CPU cores (0 = use tier preset)")
-		ramMB := fs.Int("ram-mb", 0, "Exact RAM in MB (0 = use tier preset)")
-		diskGB := fs.Int("disk-gb", 0, "Exact disk in GB (0 = use tier preset)")
-		enforceLimits := fs.Bool("enforce-limits", false, "Apply hard CPU/memory limits to the database container")
+		cpu := fs.Int("cpu", 0, "Exact CPU cores (0 = recommended size)")
+		ramMB := fs.Int("ram-mb", 0, "Exact RAM in MB (0 = recommended size)")
+		diskGB := fs.Int("disk-gb", 0, "Exact disk in GB (0 = recommended size)")
+		enforceLimits := fs.Bool("enforce-limits", false, "Apply hard CPU/memory limits across enabled service containers")
 		disableService := fs.String("disable-service", "", "Comma-separated services to disable (e.g. analytics,vector,imgproxy)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -946,7 +952,6 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 			"stack_version": *stackVersion,
 			"host_id":       *hostID,
 			"profile":       *profile,
-			"resource_tier": *tier,
 		}
 		if *cpu > 0 {
 			payload["cpu"] = *cpu
@@ -1039,11 +1044,14 @@ func (r Runner) projects(ctx context.Context, c apiClient, args []string) error 
 	case "scale":
 		fs := newFlagSet("projects scale", r.Stderr)
 		ref := fs.String("ref", "", "Project ref")
-		tier := fs.String("tier", "", "Resource tier")
+		cpu := fs.Int("cpu", 0, "CPU cores")
+		ramMB := fs.Int("ram-mb", 0, "RAM in MB")
+		diskGB := fs.Int("disk-gb", 0, "Disk in GB")
+		enforceLimits := fs.Bool("enforce-limits", false, "Apply hard CPU/memory limits across enabled service containers")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(*ref)+"/scale", map[string]string{"resource_tier": *tier}, false))
+		return r.printResponse(c.do(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(*ref)+"/scale", map[string]any{"cpu": *cpu, "ram_mb": *ramMB, "disk_gb": *diskGB, "enforce_limits": *enforceLimits}, false))
 	default:
 		return fmt.Errorf("unknown projects subcommand %q", args[0])
 	}
@@ -3099,6 +3107,9 @@ func (r Runner) metrics(ctx context.Context, c apiClient, args []string) error {
 	fs := newFlagSet("metrics", r.Stderr)
 	prometheus := fs.Bool("prometheus", false, "Print Prometheus text format")
 	ref := fs.String("ref", "", "Project ref for project-scoped metrics")
+	history := fs.Bool("history", false, "Print retained project telemetry history for --ref")
+	historyRange := fs.String("range", "6h", "Telemetry history range, e.g. 1h, 24h, 7d, 30d")
+	historyStep := fs.String("step", "", "Telemetry history bucket step, e.g. 15s, 5m")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3106,7 +3117,24 @@ func (r Runner) metrics(ctx context.Context, c apiClient, args []string) error {
 		return r.printResponse(c.do(ctx, http.MethodGet, "/metrics", nil, true))
 	}
 	if strings.TrimSpace(*ref) != "" {
+		if *history {
+			query := url.Values{}
+			if strings.TrimSpace(*historyRange) != "" {
+				query.Set("range", strings.TrimSpace(*historyRange))
+			}
+			if strings.TrimSpace(*historyStep) != "" {
+				query.Set("step", strings.TrimSpace(*historyStep))
+			}
+			path := "/v1/projects/" + url.PathEscape(*ref) + "/telemetry/history"
+			if encoded := query.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			return r.printResponse(c.do(ctx, http.MethodGet, path, nil, false))
+		}
 		return r.printResponse(c.do(ctx, http.MethodGet, "/v1/projects/"+url.PathEscape(*ref)+"/metrics", nil, false))
+	}
+	if *history {
+		return fmt.Errorf("metrics --history requires --ref")
 	}
 	return r.printResponse(c.do(ctx, http.MethodGet, "/v1/metrics", nil, false))
 }

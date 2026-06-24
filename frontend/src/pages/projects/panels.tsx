@@ -26,13 +26,10 @@ type CreateProjectForm = {
   domain: string;
   stack_version: string;
   profile: StackProfile;
-  resource_tier: "small" | "medium" | "large" | "custom";
-  // Exact-size overrides. 0 means "use the tier preset" for that dimension
-  // (presets send 0; only "custom" carries concrete numbers).
   cpu: number;
   ram_mb: number;
   disk_gb: number;
-  // Opt-in: apply real container CPU/memory limits to the database service.
+  // Applies real per-container CPU/memory limits across enabled services.
   enforce_limits: boolean;
   // Per-service enable map (keys = ALL_SERVICES). The profile seeds this; the
   // user can then toggle any service individually.
@@ -41,6 +38,7 @@ type CreateProjectForm = {
 
 // Platform sizing bounds (must mirror the control-plane validateResourceSizing).
 const SIZING_BOUNDS = { maxCpu: 64, minRamMB: 256, maxRamMB: 262144, maxDiskGB: 16384 } as const;
+const RECOMMENDATION_HEADROOM = { cpuPercent: 20, ramPercent: 25, diskPercent: 20, ramStepMB: 256, diskStepGB: 5 } as const;
 
 // The full Supabase service set the control plane can render per project. Each is
 // individually gated in the rendered compose file, so any combination is valid.
@@ -285,12 +283,12 @@ function ResourceSummary({ host, reservation }: { host?: Host; reservation: Host
         </div>
       </div>
       <div className="grid gap-2">
-        <ResourceBar label={host ? "CPU reserved / host" : "CPU"} value={reservation.cpu} total={host?.capacity.cpu} reference={LARGE_PRESET.cpu} suffix="vCPU" />
-        <ResourceBar label={host ? "RAM reserved / host" : "RAM"} value={reservation.ram_mb} total={host?.capacity.ram_mb} reference={LARGE_PRESET.ram_mb} format={(value) => formatBytes(value * 1024 * 1024)} />
-        <ResourceBar label={host ? "Disk reserved / host" : "Disk"} value={reservation.disk_gb} total={host?.capacity.disk_gb} reference={LARGE_PRESET.disk_gb} suffix="GB" />
+        <ResourceBar label={host ? "CPU reserved / host" : "CPU"} value={reservation.cpu} total={host?.capacity.cpu} reference={RESOURCE_REFERENCE.cpu} suffix="vCPU" />
+        <ResourceBar label={host ? "RAM reserved / host" : "RAM"} value={reservation.ram_mb} total={host?.capacity.ram_mb} reference={RESOURCE_REFERENCE.ram_mb} format={(value) => formatBytes(value * 1024 * 1024)} />
+        <ResourceBar label={host ? "Disk reserved / host" : "Disk"} value={reservation.disk_gb} total={host?.capacity.disk_gb} reference={RESOURCE_REFERENCE.disk_gb} suffix="GB" />
       </div>
       <p className="mt-2 truncate text-xs text-faint">
-        {host ? `Host total reserved: ${host.used.cpu}/${host.capacity.cpu || "-"} vCPU · ${formatBytes(host.used.ram_mb * 1024 * 1024)} RAM` : "No host selected; bars are scaled to the large preset for comparison."}
+        {host ? `Host total reserved: ${host.used.cpu}/${host.capacity.cpu || "-"} vCPU · ${formatBytes(host.used.ram_mb * 1024 * 1024)} RAM` : "No host selected; bars are scaled to a reference allocation for comparison."}
       </p>
     </div>
   );
@@ -308,7 +306,7 @@ function ResourceBar({
   value: number;
   total?: number;
   // Fallback scale used when no host total is known, so the bar still reflects
-  // the chosen size (scaled against the largest preset for comparison).
+  // the chosen size (scaled against a reference allocation for comparison).
   reference?: number;
   suffix?: string;
   format?: (value: number) => string;
@@ -330,25 +328,101 @@ function ResourceBar({
   );
 }
 
-// Largest tier preset — used as the comparison scale for the plan-panel bars
-// when no host is selected, so different sizes render at visibly different fills.
-const LARGE_PRESET = reservationForTier("large");
+// Comparison scale for plan-panel bars when no host is selected.
+const RESOURCE_REFERENCE: HostCapacity = { cpu: 8, ram_mb: 16384, disk_gb: 160, projects: 1 };
 
-function reservationForTier(tier: string): HostCapacity {
-  if (tier === "large") return { cpu: 8, ram_mb: 16384, disk_gb: 160, projects: 1 };
-  if (tier === "medium") return { cpu: 4, ram_mb: 8192, disk_gb: 80, projects: 1 };
-  return { cpu: 2, ram_mb: 4096, disk_gb: 40, projects: 1 };
+function minimumReservation(profile: StackProfile, services: Record<string, boolean>): HostCapacity {
+  let ramMB = 2048;
+  let cpuUnits = 100;
+  let diskGB = 20;
+  if (services.auth) {
+    ramMB += 256;
+    cpuUnits += 20;
+  }
+  if (services.rest) {
+    ramMB += 256;
+    cpuUnits += 20;
+  }
+  if (services.realtime) {
+    ramMB += 512;
+    cpuUnits += 30;
+  }
+  if (services.storage) {
+    ramMB += 512;
+    cpuUnits += 30;
+    diskGB += 20;
+  }
+  if (services.imgproxy) {
+    ramMB += 256;
+    cpuUnits += 20;
+  }
+  if (services.functions) {
+    ramMB += 512;
+    cpuUnits += 20;
+  }
+  if (services.pooler) {
+    ramMB += 256;
+    cpuUnits += 10;
+  }
+  if (services.studio) {
+    ramMB += 512;
+    cpuUnits += 10;
+  }
+  if (services.analytics) {
+    ramMB += 1024;
+    cpuUnits += 30;
+    diskGB += 10;
+  }
+  if (services.vector) {
+    ramMB += 256;
+    cpuUnits += 10;
+  }
+  if (services.graphql) {
+    ramMB += 128;
+    cpuUnits += 10;
+  }
+  if (profile === "orioledb") {
+    ramMB += 1024;
+    cpuUnits += 50;
+    diskGB += 20;
+  }
+  if (ramMB % 512 !== 0) {
+    ramMB = (Math.floor(ramMB / 512) + 1) * 512;
+  }
+  return { cpu: Math.max(1, Math.ceil(cpuUnits / 100)), ram_mb: ramMB, disk_gb: Math.max(20, diskGB), projects: 1 };
 }
 
-// effectiveReservation mirrors the control plane: start from the tier preset and
-// apply any exact per-dimension override (> 0). This is what will actually be
-// reserved and, when enforcement is on, limited on the container.
-function effectiveReservation(form: CreateProjectForm): HostCapacity {
-  const preset = reservationForTier(form.resource_tier);
+function recommendedReservation(profile: StackProfile, services: Record<string, boolean>): HostCapacity {
+  const minimum = minimumReservation(profile, services);
   return {
-    cpu: form.cpu > 0 ? form.cpu : preset.cpu,
-    ram_mb: form.ram_mb > 0 ? form.ram_mb : preset.ram_mb,
-    disk_gb: form.disk_gb > 0 ? form.disk_gb : preset.disk_gb,
+    cpu: clampNumber(addPercentRoundUp(minimum.cpu, RECOMMENDATION_HEADROOM.cpuPercent), 1, SIZING_BOUNDS.maxCpu),
+    ram_mb: clampNumber(roundUpNumber(addPercentRoundUp(minimum.ram_mb, RECOMMENDATION_HEADROOM.ramPercent), RECOMMENDATION_HEADROOM.ramStepMB), SIZING_BOUNDS.minRamMB, SIZING_BOUNDS.maxRamMB),
+    disk_gb: clampNumber(roundUpNumber(addPercentRoundUp(minimum.disk_gb, RECOMMENDATION_HEADROOM.diskPercent), RECOMMENDATION_HEADROOM.diskStepGB), 1, SIZING_BOUNDS.maxDiskGB),
+    projects: minimum.projects,
+  };
+}
+
+function addPercentRoundUp(value: number, percent: number) {
+  return Math.ceil(value * (100 + percent) / 100);
+}
+
+function roundUpNumber(value: number, step: number) {
+  return Math.ceil(value / step) * step;
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function applyReservation(form: CreateProjectForm, reservation: HostCapacity): CreateProjectForm {
+  return { ...form, cpu: reservation.cpu, ram_mb: reservation.ram_mb, disk_gb: reservation.disk_gb };
+}
+
+function effectiveReservation(form: CreateProjectForm): HostCapacity {
+  return {
+    cpu: form.cpu,
+    ram_mb: form.ram_mb,
+    disk_gb: form.disk_gb,
     projects: 1,
   };
 }
@@ -372,35 +446,38 @@ export function CreateProjectPanel({
 }) {
   const wizardSteps = ["Identity", "Org & placement", "Stack"];
   const [step, setStep] = useState(0);
-  const [form, setForm] = useState<CreateProjectForm>({
-    ref: "",
-    name: "",
-    host_id: "",
-    domain: "supadupa.test",
-    stack_version: "latest",
-    profile: "full",
-    resource_tier: "small",
-    // Presets carry 0 (use the tier preset); only "custom" sets concrete numbers.
-    cpu: 0,
-    ram_mb: 0,
-    disk_gb: 0,
-    enforce_limits: false,
-    services: servicesForProfile("full"),
+  const [form, setForm] = useState<CreateProjectForm>(() => {
+    const profile: StackProfile = "full";
+    const services = servicesForProfile(profile);
+    const recommendation = recommendedReservation(profile, services);
+    return {
+      ref: "",
+      name: "",
+      host_id: "",
+      domain: "supadupa.test",
+      stack_version: "latest",
+      profile,
+      cpu: recommendation.cpu,
+      ram_mb: recommendation.ram_mb,
+      disk_gb: recommendation.disk_gb,
+      enforce_limits: true,
+      services,
+    };
   });
   useEffect(() => {
     if (!defaults) return;
-    const tier = defaults.resource_tier === "medium" || defaults.resource_tier === "large" ? defaults.resource_tier : "small";
     const profile: StackProfile = defaults.profile === "essential" || defaults.profile === "orioledb" ? defaults.profile : "full";
+    const services = servicesForProfile(profile);
+    const recommendation = recommendedReservation(profile, services);
     setForm((current) => ({
       ...current,
       domain: defaults.domain || current.domain,
       stack_version: defaults.stack_version || current.stack_version,
       profile,
-      resource_tier: tier,
-      cpu: 0,
-      ram_mb: 0,
-      disk_gb: 0,
-      services: servicesForProfile(profile),
+      cpu: recommendation.cpu,
+      ram_mb: recommendation.ram_mb,
+      disk_gb: recommendation.disk_gb,
+      services,
     }));
   }, [defaults]);
   const mutation = useMutation({
@@ -411,7 +488,10 @@ export function CreateProjectPanel({
   // Picking a profile re-seeds the service selection from that profile's
   // template; the user can still toggle individual services afterward.
   function chooseProfile(profile: StackProfile) {
-    setForm((current) => ({ ...current, profile, services: servicesForProfile(profile) }));
+    setForm((current) => {
+      const services = servicesForProfile(profile);
+      return applyReservation({ ...current, profile, services }, recommendedReservation(profile, services));
+    });
   }
 
   function toggleService(key: string) {
@@ -420,20 +500,7 @@ export function CreateProjectPanel({
       // Hard dependency: Imgproxy only transforms Storage objects, so it can't
       // run without Storage. Turning Storage off also turns Imgproxy off.
       if (key === "storage" && !services.storage) services.imgproxy = false;
-      return { ...current, services };
-    });
-  }
-
-  // Presets clear the exact-size overrides (0 = use the preset). Switching to
-  // "custom" reveals the editor, prefilled with the size you were on so it
-  // starts from a sensible point.
-  function chooseTier(tier: CreateProjectForm["resource_tier"]) {
-    setForm((current) => {
-      if (tier === "custom") {
-        const base = effectiveReservation(current);
-        return { ...current, resource_tier: "custom", cpu: base.cpu, ram_mb: base.ram_mb, disk_gb: base.disk_gb };
-      }
-      return { ...current, resource_tier: tier, cpu: 0, ram_mb: 0, disk_gb: 0 };
+      return applyReservation({ ...current, services }, recommendedReservation(current.profile, services));
     });
   }
 
@@ -459,10 +526,12 @@ export function CreateProjectPanel({
   const identityValid = form.name.trim().length > 0 && form.ref.trim().length > 0 && form.domain.trim().length > 0;
   const placementValid = orgId.length > 0 && !hostCapacityProblem;
   const sizingValid =
-    form.resource_tier !== "custom" ||
-    (form.cpu >= 1 && form.cpu <= SIZING_BOUNDS.maxCpu &&
-      form.ram_mb >= SIZING_BOUNDS.minRamMB && form.ram_mb <= SIZING_BOUNDS.maxRamMB &&
-      form.disk_gb >= 1 && form.disk_gb <= SIZING_BOUNDS.maxDiskGB);
+    form.cpu >= 1 && form.cpu <= SIZING_BOUNDS.maxCpu &&
+    form.ram_mb >= SIZING_BOUNDS.minRamMB && form.ram_mb <= SIZING_BOUNDS.maxRamMB &&
+    form.disk_gb >= 1 && form.disk_gb <= SIZING_BOUNDS.maxDiskGB;
+  const minimum = minimumReservation(form.profile, form.services);
+  const recommendation = recommendedReservation(form.profile, form.services);
+  const belowRecommendation = form.cpu < recommendation.cpu || form.ram_mb < recommendation.ram_mb || form.disk_gb < recommendation.disk_gb;
   // Every step now validates before Next, so users can't skip past required input.
   const currentValid =
     step === 0 ? identityValid :
@@ -473,11 +542,11 @@ export function CreateProjectPanel({
   const previousStep = () => setStep((current) => Math.max(current - 1, 0));
 
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6 max-xl:grid-cols-1">
-      <AppPanel
-        eyebrow="Create project"
-        title="Provision isolated Supabase stack"
-        actions={<StatusPill tone="neutral" label={`${form.profile} · ${form.resource_tier}`} />}
+	    <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6 max-xl:grid-cols-1">
+	      <AppPanel
+	        eyebrow="Create project"
+	        title="Provision isolated Supabase stack"
+	        actions={<StatusPill tone="neutral" label={`${form.profile} · ${reservation.cpu} vCPU`} />}
       >
         <p className="mt-2 max-w-2xl text-sm text-muted">
           Name the project, place it on a host, and pick the stack profile and size. supadupa provisions an isolated Supabase stack with its own Postgres volume, network, JWT keys, and routing.
@@ -536,7 +605,7 @@ export function CreateProjectPanel({
                 </NativeSelect>
               </Field>
               {selectedHost ? <HostFitPanel host={selectedHost} reservation={reservation} /> : <PlacementDefaultPanel />}
-              {hostCapacityProblem ? <p className="text-sm text-danger">Selected host does not have enough registered capacity for this tier.</p> : null}
+	              {hostCapacityProblem ? <p className="text-sm text-danger">Selected host does not have enough registered capacity for these resources.</p> : null}
             </div>
           ) : null}
 
@@ -598,52 +667,50 @@ export function CreateProjectPanel({
                   </ul>
                 ) : null}
               </div>
-              <div>
-                <p className="label">Size</p>
-                <p className="mt-1 text-xs text-faint">Pick a preset, or choose Custom to set an exact CPU / RAM / disk size.</p>
-                <div className="mt-2 grid grid-cols-4 gap-2 max-lg:grid-cols-2">
-                  {(["small", "medium", "large"] as const).map((resourceTier) => {
-                    const tierReservation = reservationForTier(resourceTier);
-                    return (
-                      <button className={form.resource_tier === resourceTier ? "choice active" : "choice"} key={resourceTier} onClick={() => chooseTier(resourceTier)} type="button">
-                        <span className="text-sm font-medium capitalize">{resourceTier}</span>
-                        <span className="text-xs text-faint">{tierReservation.cpu} vCPU · {formatBytes(tierReservation.ram_mb * 1024 * 1024)} · {tierReservation.disk_gb} GB</span>
-                      </button>
-                    );
-                  })}
-                  <button className={form.resource_tier === "custom" ? "choice active" : "choice"} onClick={() => chooseTier("custom")} type="button">
-                    <span className="text-sm font-medium">Custom</span>
-                    <span className="text-xs text-faint">set CPU / RAM / disk</span>
-                  </button>
-                </div>
-              </div>
-              {form.resource_tier === "custom" ? (
-                <div className="rounded-md border border-border bg-bg p-3">
-                  <p className="label">Custom size</p>
-                  <p className="mt-1 text-xs leading-5 text-muted">Exact CPU / RAM / disk reserved for this project.</p>
-                  <div className="mt-3 grid grid-cols-3 gap-2 max-md:grid-cols-1">
-                    <Field label="CPU (cores)" hint={`1 – ${SIZING_BOUNDS.maxCpu}`}>
-                      <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxCpu} aria-label="CPU cores" value={form.cpu} onChange={(event) => setForm({ ...form, cpu: Number(event.target.value) })} />
-                    </Field>
-                    <Field label="RAM (MB)" hint={`${SIZING_BOUNDS.minRamMB} – ${SIZING_BOUNDS.maxRamMB}`}>
-                      <Input className="font-mono" type="number" min={SIZING_BOUNDS.minRamMB} max={SIZING_BOUNDS.maxRamMB} step={256} aria-label="RAM in MB" value={form.ram_mb} onChange={(event) => setForm({ ...form, ram_mb: Number(event.target.value) })} />
-                    </Field>
-                    <Field label="Disk (GB)" hint={`1 – ${SIZING_BOUNDS.maxDiskGB}`}>
-                      <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxDiskGB} aria-label="Disk in GB" value={form.disk_gb} onChange={(event) => setForm({ ...form, disk_gb: Number(event.target.value) })} />
-                    </Field>
-                  </div>
-                  {!sizingValid ? <p className="mt-2 text-xs text-danger">Sizing is out of range. CPU 1–{SIZING_BOUNDS.maxCpu} cores, RAM {SIZING_BOUNDS.minRamMB}–{SIZING_BOUNDS.maxRamMB} MB, disk 1–{SIZING_BOUNDS.maxDiskGB} GB.</p> : null}
-                </div>
-              ) : null}
-              <div className="rounded-md border border-border bg-bg p-3">
-                <label className="flex cursor-pointer items-start gap-3">
-                  <input type="checkbox" className="mt-1" checked={form.enforce_limits} onChange={(event) => setForm({ ...form, enforce_limits: event.target.checked })} aria-label="Enforce runtime limits" />
-                  <span className="grid gap-1">
-                    <span className="text-sm font-medium">Enforce limits on the database container</span>
-                    <span className="text-xs leading-5 text-muted">When on, the project's Postgres container gets hard CPU/memory limits ({reservation.cpu} vCPU · {formatBytes(reservation.ram_mb * 1024 * 1024)}). When off, the size is used for placement and quota accounting only.</span>
-                  </span>
-                </label>
-              </div>
+	              <div className="rounded-md border border-border bg-bg p-3">
+	                <div className="flex items-start justify-between gap-3">
+	                  <div>
+		                    <p className="label">Recommended size</p>
+		                    <p className="mt-1 text-xs leading-5 text-muted">{recommendation.cpu} vCPU · {formatBytes(recommendation.ram_mb * 1024 * 1024)} RAM · {recommendation.disk_gb} GB disk with operating headroom.</p>
+		                    <p className="mt-1 text-xs leading-5 text-faint">Minimum: {minimum.cpu} vCPU · {formatBytes(minimum.ram_mb * 1024 * 1024)} RAM · {minimum.disk_gb} GB disk.</p>
+		                  </div>
+		                  <div className="flex shrink-0 gap-2 max-sm:flex-col">
+		                    <Button size="sm" type="button" variant="secondary" onClick={() => setForm((current) => applyReservation(current, recommendation))}>
+		                      Use recommended
+		                    </Button>
+		                    <Button size="sm" type="button" variant="secondary" onClick={() => setForm((current) => applyReservation(current, minimum))}>
+		                      Use minimum
+		                    </Button>
+		                  </div>
+	                </div>
+	                <div className="mt-3 grid grid-cols-3 gap-2 max-md:grid-cols-1">
+	                  <Field label="CPU (cores)" hint={`1 – ${SIZING_BOUNDS.maxCpu}`}>
+                    <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxCpu} aria-label="CPU cores" value={form.cpu} onChange={(event) => setForm({ ...form, cpu: Number(event.target.value) })} />
+	                  </Field>
+	                  <Field label="RAM (MB)" hint={`${SIZING_BOUNDS.minRamMB} – ${SIZING_BOUNDS.maxRamMB}`}>
+                    <Input className="font-mono" type="number" min={SIZING_BOUNDS.minRamMB} max={SIZING_BOUNDS.maxRamMB} step={256} aria-label="RAM in MB" value={form.ram_mb} onChange={(event) => setForm({ ...form, ram_mb: Number(event.target.value) })} />
+	                  </Field>
+	                  <Field label="Disk (GB)" hint={`1 – ${SIZING_BOUNDS.maxDiskGB}`}>
+                    <Input className="font-mono" type="number" min={1} max={SIZING_BOUNDS.maxDiskGB} aria-label="Disk in GB" value={form.disk_gb} onChange={(event) => setForm({ ...form, disk_gb: Number(event.target.value) })} />
+	                  </Field>
+	                </div>
+	                {!sizingValid ? <p className="mt-2 text-xs text-danger">Sizing is out of range. CPU 1–{SIZING_BOUNDS.maxCpu} cores, RAM {SIZING_BOUNDS.minRamMB}–{SIZING_BOUNDS.maxRamMB} MB, disk 1–{SIZING_BOUNDS.maxDiskGB} GB.</p> : null}
+		                {belowRecommendation ? <p className="mt-2 text-xs text-warning">Below the recommended size. The minimum is a startup floor; enforced limits can become unstable under real traffic.</p> : null}
+	              </div>
+	              <div className="rounded-md border border-border bg-bg p-3">
+	                <p className="label">CPU / RAM limits</p>
+	                <div className="mt-2 grid grid-cols-2 gap-2 max-md:grid-cols-1">
+	                  <button className={form.enforce_limits ? "choice active" : "choice"} type="button" onClick={() => setForm({ ...form, enforce_limits: true })}>
+	                    <span className="text-sm font-medium">Enforce limits</span>
+	                    <span className="text-xs leading-5 text-muted">Distribute {reservation.cpu} vCPU and {formatBytes(reservation.ram_mb * 1024 * 1024)} RAM limits across enabled service containers.</span>
+	                  </button>
+	                  <button className={!form.enforce_limits ? "choice active" : "choice"} type="button" onClick={() => setForm({ ...form, enforce_limits: false })}>
+	                    <span className="text-sm font-medium">No limits</span>
+	                    <span className="text-xs leading-5 text-muted">Allow project containers to grow past the selected CPU/RAM and contend for all host resources.</span>
+	                  </button>
+	                </div>
+	                {!form.enforce_limits ? <p className="mt-2 text-xs text-warning">No limits is your choice: this can improve burst behavior, but a busy project can consume the host and affect other local workloads.</p> : null}
+	              </div>
             </div>
           ) : null}
 
@@ -690,7 +757,7 @@ function CreatePlanPanel({
       <AppPanel
         eyebrow="Provisioning plan"
         title={form.name || "New project"}
-        actions={<StatusPill tone="neutral" label={form.resource_tier} />}
+        actions={<StatusPill tone={form.enforce_limits ? "neutral" : "warning"} label={form.enforce_limits ? "limits on" : "no limits"} />}
       >
         <div className="mt-4 grid gap-3">
           <div className="grid grid-cols-2 gap-2">

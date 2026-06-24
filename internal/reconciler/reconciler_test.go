@@ -427,7 +427,7 @@ func (p fakeProvisioner) Pause(ctx context.Context, ref string) error { return n
 
 func (p fakeProvisioner) Resume(ctx context.Context, ref string) error { return nil }
 
-func (p fakeProvisioner) Scale(ctx context.Context, ref string, tier control.ResourceTier) error {
+func (p fakeProvisioner) Scale(ctx context.Context, ref string, spec control.ProjectSpec) error {
 	return nil
 }
 

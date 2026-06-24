@@ -1181,6 +1181,7 @@ func TestProjectRecoverabilityReportsLocalOnlyAndRestoreToTimeGaps(t *testing.T)
 }
 
 func TestProjectRecoverabilityRejectsLoopbackBackupTargetAsOffHost(t *testing.T) {
+	t.Setenv("SUPADUPA_ALLOW_UNSAFE_BACKUP_ENDPOINTS", "true")
 	ctx := context.Background()
 	store := NewMemoryStore()
 	project := createBackupTestProject(t, ctx, store, "recoverability-loopback")
@@ -1351,6 +1352,56 @@ func TestBackupStorageTargetNetworkWarnings(t *testing.T) {
 	}
 	if warnings := backupStorageTargetNetworkWarnings(BackupStorageTarget{Endpoint: "https://remote.example.test"}); len(warnings) != 0 {
 		t.Fatalf("expected no warnings for remote endpoint, got %#v", warnings)
+	}
+}
+
+func TestBackupStorageTargetCreationRejectsUnsafeSignedEgressEndpoint(t *testing.T) {
+	previousResolver := resolveBackupTargetHostIPs
+	t.Cleanup(func() {
+		resolveBackupTargetHostIPs = previousResolver
+	})
+	resolveBackupTargetHostIPs = func(host string) []net.IP {
+		if host == "private.example.test" {
+			return []net.IP{net.ParseIP("10.20.30.40")}
+		}
+		return nil
+	}
+
+	store := NewMemoryStore()
+	for _, endpoint := range []string{
+		"http://127.0.0.1:9000",
+		"http://169.254.169.254/latest/meta-data",
+		"https://private.example.test",
+	} {
+		_, err := store.CreateBackupStorageTarget(context.Background(), BackupStorageTargetInput{
+			Name:            "Unsafe",
+			Type:            "s3",
+			Endpoint:        endpoint,
+			Region:          "auto",
+			Bucket:          "backups",
+			AccessKeyID:     "access",
+			SecretAccessKey: "secret",
+		})
+		if err == nil || !strings.Contains(err.Error(), "not allowed for signed egress") {
+			t.Fatalf("expected unsafe endpoint %s to be rejected before signed egress, got %v", endpoint, err)
+		}
+	}
+
+	t.Setenv("SUPADUPA_ALLOW_UNSAFE_BACKUP_ENDPOINTS", "true")
+	target, err := store.CreateBackupStorageTarget(context.Background(), BackupStorageTargetInput{
+		Name:            "Unsafe allowed",
+		Type:            "s3",
+		Endpoint:        "http://127.0.0.1:9000",
+		Region:          "auto",
+		Bucket:          "backups",
+		AccessKeyID:     "access",
+		SecretAccessKey: "secret",
+	})
+	if err != nil {
+		t.Fatalf("expected explicit unsafe endpoint opt-in to allow local fixture target: %v", err)
+	}
+	if target.ID == "" {
+		t.Fatalf("expected created target with unsafe opt-in")
 	}
 }
 

@@ -17,7 +17,7 @@ func TestPlatformDefaultsApplyToProjectCreation(t *testing.T) {
 		Domain:         "apps.example.com",
 		StackVersion:   "15.8.1.060",
 		Profile:        StackProfileEssential,
-		ResourceTier:   ResourceTierMedium,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "hourly",
 		FeatureFlags: map[string]bool{
 			"single_org_mode":     false,
@@ -57,7 +57,7 @@ func TestPlatformDefaultsApplyToProjectCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if project.Spec.Domain != "apps.example.com" || project.Spec.StackVersion != "15.8.1.060" || project.Spec.Profile != StackProfileEssential || project.Spec.ResourceTier != ResourceTierMedium {
+	if project.Spec.Domain != "apps.example.com" || project.Spec.StackVersion != "15.8.1.060" || project.Spec.Profile != StackProfileEssential || project.Spec.ResourceTier != ResourceTierCustom || project.Spec.CPU <= 0 || project.Spec.RAMMB <= 0 || project.Spec.DiskGB <= 0 {
 		t.Fatalf("expected project spec to use platform defaults, got %#v", project.Spec)
 	}
 	policy, err := store.GetBackupPolicy(ctx, project.Ref)
@@ -75,7 +75,7 @@ func TestPlatformDefaultsValidateSupportedValues(t *testing.T) {
 		Domain:         "apps.example.com",
 		StackVersion:   "latest",
 		Profile:        StackProfileOrioleDB,
-		ResourceTier:   ResourceTierSmall,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "daily",
 	})
 	if err != nil {
@@ -88,7 +88,7 @@ func TestPlatformDefaultsValidateSupportedValues(t *testing.T) {
 		Domain:         "apps.example.com",
 		StackVersion:   "2026.06.05",
 		Profile:        StackProfileFull,
-		ResourceTier:   ResourceTierSmall,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "daily",
 	})
 	if err == nil {
@@ -98,7 +98,7 @@ func TestPlatformDefaultsValidateSupportedValues(t *testing.T) {
 		Domain:         "apps.example.com",
 		StackVersion:   "latest",
 		Profile:        "tiny",
-		ResourceTier:   ResourceTierSmall,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "daily",
 	})
 	if err == nil {
@@ -108,7 +108,7 @@ func TestPlatformDefaultsValidateSupportedValues(t *testing.T) {
 		Domain:         "apps.example.com",
 		StackVersion:   "latest",
 		Profile:        StackProfileFull,
-		ResourceTier:   ResourceTierSmall,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "daily",
 		SMTP:           PlatformSMTP{Enabled: true, Host: "smtp.example.com", Port: 587, PasswordHandle: "raw-secret", TLSMode: "starttls"},
 	})
@@ -119,7 +119,7 @@ func TestPlatformDefaultsValidateSupportedValues(t *testing.T) {
 		Domain:         "apps.example.com",
 		StackVersion:   "latest",
 		Profile:        StackProfileFull,
-		ResourceTier:   ResourceTierSmall,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "daily",
 		FeatureFlags:   map[string]bool{"unknown": true},
 	})
@@ -130,7 +130,7 @@ func TestPlatformDefaultsValidateSupportedValues(t *testing.T) {
 		Domain:         strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63),
 		StackVersion:   "latest",
 		Profile:        StackProfileFull,
-		ResourceTier:   ResourceTierSmall,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "daily",
 	})
 	if err == nil || !strings.Contains(err.Error(), "253-character DNS name limit") {
@@ -153,7 +153,7 @@ func TestProjectCreationValidatesStackVersion(t *testing.T) {
 		Domain:       "apps.example.com",
 		StackVersion: "latest",
 		Profile:      StackProfileFull,
-		ResourceTier: ResourceTierSmall,
+		ResourceTier: ResourceTierCustom,
 	})
 	if err != nil {
 		t.Fatalf("expected latest stack version to create project: %v", err)
@@ -169,7 +169,7 @@ func TestProjectCreationValidatesStackVersion(t *testing.T) {
 		Domain:       "apps.example.com",
 		StackVersion: "2026.06.05",
 		Profile:      StackProfileFull,
-		ResourceTier: ResourceTierSmall,
+		ResourceTier: ResourceTierCustom,
 	})
 	if err == nil {
 		t.Fatal("expected unsupported project stack version to fail")
@@ -187,7 +187,7 @@ func TestOrgFeatureFlagsInheritPlatformDefaultsAndOverride(t *testing.T) {
 		Domain:         "apps.example.com",
 		StackVersion:   "latest",
 		Profile:        StackProfileFull,
-		ResourceTier:   ResourceTierSmall,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "daily",
 		FeatureFlags: map[string]bool{
 			"billing":       true,

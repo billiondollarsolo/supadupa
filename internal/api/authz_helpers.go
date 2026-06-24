@@ -3,10 +3,16 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"supadupa2026/internal/control"
+)
+
+var (
+	errInvalidBearerToken = fmt.Errorf("invalid bearer token")
+	errStaleBearerToken   = fmt.Errorf("stale bearer token")
 )
 
 func sanitizeProjectForResponse(project control.Project) control.Project {
@@ -155,28 +161,49 @@ func requireSCIMOrPlatformAdmin(w http.ResponseWriter, r *http.Request, store co
 }
 
 func requireCurrentPlatformAdminClaims(w http.ResponseWriter, r *http.Request, store control.Store, claims control.TokenClaims) bool {
-	if store == nil {
-		writeError(w, http.StatusUnauthorized, "invalid bearer token")
-		return false
-	}
-	user, err := store.GetUserByID(r.Context(), claims.Subject)
-	if err != nil {
-		if errors.Is(err, control.ErrNotFound) {
-			writeError(w, http.StatusUnauthorized, "invalid bearer token")
-			return false
-		}
-		writeStoreError(w, err)
+	user, ok := requireCurrentUserClaims(w, r, store, claims)
+	if !ok {
 		return false
 	}
 	if !strings.EqualFold(user.Role, "admin") {
 		writeError(w, http.StatusForbidden, "forbidden: platform admin role required")
 		return false
 	}
-	if !tokenVersionMatches(user.TokenVersion, claims.TokenVersion) {
-		writeError(w, http.StatusUnauthorized, "stale bearer token")
-		return false
-	}
 	return true
+}
+
+func requireCurrentUserClaims(w http.ResponseWriter, r *http.Request, store control.Store, claims control.TokenClaims) (control.User, bool) {
+	user, err := currentUserForClaims(r.Context(), store, claims)
+	if err == nil {
+		return user, true
+	}
+	if errors.Is(err, errInvalidBearerToken) {
+		writeError(w, http.StatusUnauthorized, "invalid bearer token")
+		return control.User{}, false
+	}
+	if errors.Is(err, errStaleBearerToken) {
+		writeError(w, http.StatusUnauthorized, "stale bearer token")
+		return control.User{}, false
+	}
+	writeStoreError(w, err)
+	return control.User{}, false
+}
+
+func currentUserForClaims(ctx context.Context, store control.Store, claims control.TokenClaims) (control.User, error) {
+	if store == nil || strings.TrimSpace(claims.Subject) == "" {
+		return control.User{}, errInvalidBearerToken
+	}
+	user, err := store.GetUserByID(ctx, claims.Subject)
+	if err != nil {
+		if errors.Is(err, control.ErrNotFound) {
+			return control.User{}, errInvalidBearerToken
+		}
+		return control.User{}, err
+	}
+	if !tokenVersionMatches(user.TokenVersion, claims.TokenVersion) {
+		return control.User{}, errStaleBearerToken
+	}
+	return user, nil
 }
 
 func tokenVersionMatches(userVersion int64, claimVersion int64) bool {
@@ -195,7 +222,11 @@ func requireOrgRole(w http.ResponseWriter, r *http.Request, store control.Store,
 		writeError(w, http.StatusUnauthorized, "missing bearer token")
 		return false
 	}
-	role, err := orgRoleForEmail(r.Context(), store, orgID, claims.Email)
+	user, ok := requireCurrentUserClaims(w, r, store, claims)
+	if !ok {
+		return false
+	}
+	role, err := orgRoleForEmail(r.Context(), store, orgID, user.Email)
 	if err != nil {
 		writeStoreError(w, err)
 		return false
@@ -221,7 +252,11 @@ func requireProjectRole(w http.ResponseWriter, r *http.Request, store control.St
 		writeError(w, http.StatusUnauthorized, "missing bearer token")
 		return control.Project{}, false
 	}
-	orgRole, err := orgRoleForEmail(r.Context(), store, project.OrgID, claims.Email)
+	user, ok := requireCurrentUserClaims(w, r, store, claims)
+	if !ok {
+		return control.Project{}, false
+	}
+	orgRole, err := orgRoleForEmail(r.Context(), store, project.OrgID, user.Email)
 	if err != nil {
 		writeStoreError(w, err)
 		return control.Project{}, false
@@ -229,7 +264,7 @@ func requireProjectRole(w http.ResponseWriter, r *http.Request, store control.St
 	if roleRank(orgRole) >= minimum {
 		return project, true
 	}
-	projectRole, err := store.ResolveProjectRole(r.Context(), project.Ref, claims.Email)
+	projectRole, err := store.ResolveProjectRole(r.Context(), project.Ref, user.Email)
 	if err == nil && roleRank(projectRole) >= minimum {
 		return project, true
 	}

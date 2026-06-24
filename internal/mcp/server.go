@@ -50,6 +50,7 @@ func (r Runner) Run(ctx context.Context, args []string) int {
 	flags.SetOutput(r.Stderr)
 	apiURL := flags.String("api", r.env("SUPADUPA_API_URL", "http://localhost:8080"), "Management API base URL")
 	token := flags.String("token", r.env("SUPADUPA_TOKEN", ""), "Bearer token")
+	allowSecretReveal := flags.Bool("allow-secret-reveal", r.envBool("SUPADUPA_MCP_ALLOW_SECRET_REVEAL", false), "Allow MCP tools to return live project secret values")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -58,7 +59,7 @@ func (r Runner) Run(ctx context.Context, args []string) int {
 		fmt.Fprintf(r.Stderr, "invalid --api: %v\n", err)
 		return 2
 	}
-	server := server{api: apiClient{baseURL: base, token: *token, client: client}}
+	server := server{api: apiClient{baseURL: base, token: *token, client: client}, allowSecretReveal: *allowSecretReveal}
 	if err := server.serve(ctx, r.Stdin, r.Stdout); err != nil && !errors.Is(err, io.EOF) {
 		fmt.Fprintln(r.Stderr, err)
 		return 1
@@ -78,8 +79,27 @@ func (r Runner) env(key string, fallback string) string {
 	return fallback
 }
 
+func (r Runner) envBool(key string, fallback bool) bool {
+	value := ""
+	if r.Env != nil {
+		value = r.Env[key]
+	}
+	if value == "" {
+		value = os.Getenv(key)
+	}
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 type server struct {
-	api apiClient
+	api               apiClient
+	allowSecretReveal bool
 }
 
 type rpcRequest struct {
@@ -269,7 +289,18 @@ type projectLifecycleArgs struct {
 	Ref           string `json:"ref"`
 	Version       string `json:"version"`
 	Tier          string `json:"tier"`
+	CPU           int    `json:"cpu"`
+	RAMMB         int    `json:"ram_mb"`
+	DiskGB        int    `json:"disk_gb"`
+	EnforceLimits bool   `json:"enforce_limits"`
 	RetainVolumes bool   `json:"retain_volumes"`
+	Confirmation  string `json:"confirmation"`
+}
+
+type projectTelemetryHistoryArgs struct {
+	Ref   string `json:"ref"`
+	Range string `json:"range"`
+	Step  string `json:"step"`
 }
 
 type projectBackupRestoreArgs struct {
@@ -604,7 +635,7 @@ func (s server) handle(ctx context.Context, request rpcRequest) rpcResponse {
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 		}
 	case "tools/list":
-		response.Result = map[string]any{"tools": tools()}
+		response.Result = map[string]any{"tools": tools(s.allowSecretReveal)}
 	case "tools/call":
 		result, err := s.callTool(ctx, request.Params)
 		if err != nil {
@@ -1031,6 +1062,23 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 			return nil, err
 		}
 		method, path = http.MethodGet, "/v1/projects/"+url.PathEscape(ref)+"/metrics"
+	case "supadupa_get_project_telemetry_history":
+		args, err := decodeProjectTelemetryHistoryArgs(params.Arguments)
+		if err != nil {
+			return nil, err
+		}
+		query := url.Values{}
+		if args.Range != "" {
+			query.Set("range", args.Range)
+		}
+		if args.Step != "" {
+			query.Set("step", args.Step)
+		}
+		path = "/v1/projects/" + url.PathEscape(args.Ref) + "/telemetry/history"
+		if encoded := query.Encode(); encoded != "" {
+			path += "?" + encoded
+		}
+		method = http.MethodGet
 	case "supadupa_get_project_config":
 		args, err := decodeProjectConfigArgs(params.Arguments)
 		if err != nil {
@@ -1319,6 +1367,9 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 		}
 		method, path = http.MethodGet, "/v1/projects/"+url.PathEscape(ref)+"/secrets"
 	case "supadupa_reveal_project_secret":
+		if !s.allowSecretReveal {
+			return nil, fmt.Errorf("supadupa_reveal_project_secret is disabled; use supadupa_record_project_secret_copy or start MCP with --allow-secret-reveal")
+		}
 		args, err := decodeProjectSecretArgs(params.Arguments)
 		if err != nil {
 			return nil, err
@@ -1821,7 +1872,7 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 			return nil, err
 		}
 		method, path = http.MethodPost, "/v1/projects/"+url.PathEscape(args.Ref)+"/scale"
-		body = map[string]string{"resource_tier": args.Tier}
+		body = map[string]any{"cpu": args.CPU, "ram_mb": args.RAMMB, "disk_gb": args.DiskGB, "enforce_limits": args.EnforceLimits}
 	case "supadupa_destroy_project":
 		args, err := decodeProjectLifecycleArgs(params.Arguments, "destroy")
 		if err != nil {
@@ -1850,11 +1901,20 @@ func (s server) callTool(ctx context.Context, payload json.RawMessage) (any, err
 	return toolJSONResult(payload), nil
 }
 
-func tools() []map[string]any {
+func tools(allowSecretReveal bool) []map[string]any {
 	refSchema := map[string]any{
 		"type":       "object",
 		"properties": map[string]any{"ref": map[string]string{"type": "string", "description": "Project ref"}},
 		"required":   []string{"ref"},
+	}
+	telemetryHistorySchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"ref":   map[string]string{"type": "string", "description": "Project ref"},
+			"range": map[string]string{"type": "string", "description": "History range, e.g. 1h, 24h, 7d, 30d"},
+			"step":  map[string]string{"type": "string", "description": "Optional bucket step, e.g. 15s, 5m"},
+		},
+		"required": []string{"ref"},
 	}
 	configSchema := map[string]any{
 		"type": "object",
@@ -1941,18 +2001,22 @@ func tools() []map[string]any {
 	projectScaleSchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"ref":  map[string]string{"type": "string", "description": "Project ref"},
-			"tier": map[string]string{"type": "string", "description": "Target resource tier: small, medium, or large"},
+			"ref":            map[string]string{"type": "string", "description": "Project ref"},
+			"cpu":            map[string]string{"type": "integer", "description": "Target CPU cores"},
+			"ram_mb":         map[string]string{"type": "integer", "description": "Target RAM in MB"},
+			"disk_gb":        map[string]string{"type": "integer", "description": "Target disk in GB"},
+			"enforce_limits": map[string]string{"type": "boolean", "description": "Apply hard CPU/memory limits across enabled service containers"},
 		},
-		"required": []string{"ref", "tier"},
+		"required": []string{"ref", "cpu", "ram_mb", "disk_gb"},
 	}
 	projectDestroySchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"ref":            map[string]string{"type": "string", "description": "Project ref"},
 			"retain_volumes": map[string]string{"type": "boolean", "description": "Retain data volumes/PVCs while deleting control-plane metadata"},
+			"confirmation":   map[string]string{"type": "string", "description": "Exact destructive confirmation, for example: destroy project <ref>"},
 		},
-		"required": []string{"ref"},
+		"required": []string{"ref", "confirmation"},
 	}
 	backupRestoreSchema := map[string]any{
 		"type": "object",
@@ -2509,11 +2573,11 @@ func tools() []map[string]any {
 			"domain":         map[string]string{"type": "string", "description": "Base domain for project routing"},
 			"stack_version":  map[string]string{"type": "string", "description": "Upstream Supabase stack version"},
 			"profile":        map[string]string{"type": "string", "description": "Stack profile: full, essential, or orioledb"},
-			"resource_tier":  map[string]string{"type": "string", "description": "Resource tier preset: small, medium, or large"},
-			"cpu":            map[string]string{"type": "integer", "description": "Exact CPU cores (0 = use tier preset)"},
-			"ram_mb":         map[string]string{"type": "integer", "description": "Exact RAM in MB (0 = use tier preset)"},
-			"disk_gb":        map[string]string{"type": "integer", "description": "Exact disk in GB (0 = use tier preset)"},
-			"enforce_limits": map[string]string{"type": "boolean", "description": "Apply hard CPU/memory limits to the database container"},
+			"resource_tier":  map[string]string{"type": "string", "description": "Resource sizing mode. Use custom for exact CPU/RAM/disk sizing"},
+			"cpu":            map[string]string{"type": "integer", "description": "Exact CPU cores (0 = recommended size)"},
+			"ram_mb":         map[string]string{"type": "integer", "description": "Exact RAM in MB (0 = recommended size)"},
+			"disk_gb":        map[string]string{"type": "integer", "description": "Exact disk in GB (0 = recommended size)"},
+			"enforce_limits": map[string]string{"type": "boolean", "description": "Apply hard CPU/memory limits across enabled service containers"},
 			"services": map[string]any{
 				"type":                 "object",
 				"description":          "Per-service enablement map",
@@ -2533,7 +2597,7 @@ func tools() []map[string]any {
 			"domain":               map[string]string{"type": "string", "description": "Default base domain for new projects"},
 			"stack_version":        map[string]string{"type": "string", "description": "Default upstream Supabase stack version"},
 			"profile":              map[string]string{"type": "string", "description": "Default stack profile: full, essential, or orioledb"},
-			"resource_tier":        map[string]string{"type": "string", "description": "Default resource tier: small, medium, or large"},
+			"resource_tier":        map[string]string{"type": "string", "description": "Default resource sizing mode. Use custom for exact CPU/RAM/disk sizing"},
 			"backup_schedule":      map[string]string{"type": "string", "description": "Default backup schedule: daily or hourly"},
 			"smtp_enabled":         map[string]string{"type": "boolean", "description": "Whether platform SMTP defaults are enabled"},
 			"smtp_host":            map[string]string{"type": "string", "description": "Platform SMTP host"},
@@ -2569,7 +2633,7 @@ func tools() []map[string]any {
 		},
 		"required": []string{"ref", "subject_id"},
 	}
-	return []map[string]any{
+	tools := []map[string]any{
 		{"name": "supadupa_list_users", "description": "List platform users.", "inputSchema": noArgs},
 		{"name": "supadupa_create_user", "description": "Create a platform user.", "inputSchema": userCreateSchema},
 		{"name": "supadupa_get_provisioner", "description": "Get the active orchestration provisioner backend.", "inputSchema": noArgs},
@@ -2630,6 +2694,7 @@ func tools() []map[string]any {
 		{"name": "supadupa_get_project", "description": "Get a project by ref.", "inputSchema": refSchema},
 		{"name": "supadupa_project_connect", "description": "Get the full project Connect payload.", "inputSchema": refSchema},
 		{"name": "supadupa_get_project_metrics", "description": "Get per-project metrics.", "inputSchema": refSchema},
+		{"name": "supadupa_get_project_telemetry_history", "description": "Get retained project telemetry history.", "inputSchema": telemetryHistorySchema},
 		{"name": "supadupa_get_project_config", "description": "Get one project config area.", "inputSchema": configSchema},
 		{"name": "supadupa_set_project_config", "description": "Update one project config area.", "inputSchema": configWriteSchema},
 		{"name": "supadupa_get_project_services", "description": "Get project enabled-service state.", "inputSchema": refSchema},
@@ -2664,7 +2729,6 @@ func tools() []map[string]any {
 		{"name": "supadupa_list_project_logs", "description": "List project logs.", "inputSchema": refSchema},
 		{"name": "supadupa_list_project_backups", "description": "List project backups.", "inputSchema": refSchema},
 		{"name": "supadupa_list_project_secrets", "description": "List masked project secret metadata.", "inputSchema": refSchema},
-		{"name": "supadupa_reveal_project_secret", "description": "Reveal a project secret through the audited reveal endpoint.", "inputSchema": secretSchema},
 		{"name": "supadupa_record_project_secret_copy", "description": "Record an audited project secret copy action without returning the secret value.", "inputSchema": secretSchema},
 		{"name": "supadupa_rotate_project_secret", "description": "Rotate a project secret or signing key.", "inputSchema": secretSchema},
 		{"name": "supadupa_get_project_backup_policy", "description": "Get project backup policy.", "inputSchema": refSchema},
@@ -2731,6 +2795,10 @@ func tools() []map[string]any {
 		{"name": "supadupa_destroy_project", "description": "Destroy a project, optionally retaining data volumes.", "inputSchema": projectDestroySchema},
 		{"name": "supadupa_trigger_backup", "description": "Trigger a logical backup for a project.", "inputSchema": refSchema},
 	}
+	if allowSecretReveal {
+		tools = append(tools, map[string]any{"name": "supadupa_reveal_project_secret", "description": "Reveal a project secret through the audited reveal endpoint.", "inputSchema": secretSchema})
+	}
+	return tools
 }
 
 func decodeRef(payload json.RawMessage) (string, error) {
@@ -2743,6 +2811,20 @@ func decodeRef(payload json.RawMessage) (string, error) {
 		return "", fmt.Errorf("ref is required")
 	}
 	return args.Ref, nil
+}
+
+func decodeProjectTelemetryHistoryArgs(payload json.RawMessage) (projectTelemetryHistoryArgs, error) {
+	var args projectTelemetryHistoryArgs
+	if err := json.Unmarshal(payload, &args); err != nil {
+		return projectTelemetryHistoryArgs{}, err
+	}
+	args.Ref = strings.TrimSpace(args.Ref)
+	args.Range = strings.TrimSpace(args.Range)
+	args.Step = strings.TrimSpace(args.Step)
+	if args.Ref == "" {
+		return projectTelemetryHistoryArgs{}, fmt.Errorf("ref is required")
+	}
+	return args, nil
 }
 
 func decodeUserCreateArgs(payload json.RawMessage) (userCreateArgs, error) {
@@ -3049,7 +3131,7 @@ func decodePlatformDefaultsArgs(payload json.RawMessage) (platformDefaultsArgs, 
 		args.Profile = "full"
 	}
 	if args.ResourceTier == "" {
-		args.ResourceTier = "small"
+		args.ResourceTier = "custom"
 	}
 	if args.BackupSchedule == "" {
 		args.BackupSchedule = "daily"
@@ -3252,8 +3334,19 @@ func decodeProjectLifecycleArgs(payload json.RawMessage, action string) (project
 			return projectLifecycleArgs{}, fmt.Errorf("version is required")
 		}
 	case "scale":
-		if args.Tier == "" {
-			return projectLifecycleArgs{}, fmt.Errorf("tier is required")
+		if args.CPU <= 0 {
+			return projectLifecycleArgs{}, fmt.Errorf("cpu is required")
+		}
+		if args.RAMMB <= 0 {
+			return projectLifecycleArgs{}, fmt.Errorf("ram_mb is required")
+		}
+		if args.DiskGB <= 0 {
+			return projectLifecycleArgs{}, fmt.Errorf("disk_gb is required")
+		}
+	case "destroy":
+		expected := "destroy project " + args.Ref
+		if strings.TrimSpace(args.Confirmation) != expected {
+			return projectLifecycleArgs{}, fmt.Errorf("confirmation must be exactly %q", expected)
 		}
 	}
 	return args, nil

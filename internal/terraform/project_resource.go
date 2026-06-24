@@ -101,31 +101,31 @@ func (r *projectResource) Schema(ctx context.Context, req resource.SchemaRequest
 			"resource_tier": resourceschema.StringAttribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Resource tier preset, such as small, medium, or large. Platform defaults apply when omitted.",
+				Description:   "Resource sizing mode. New projects use custom exact sizing; legacy tier values may appear on imported records.",
 				PlanModifiers: replace,
 			},
 			"cpu": resourceschema.Int64Attribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Exact CPU cores. 0 (or omitted) uses the tier preset.",
+				Description:   "Exact CPU cores. 0 (or omitted) uses the recommended size.",
 				PlanModifiers: replaceInt,
 			},
 			"ram_mb": resourceschema.Int64Attribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Exact RAM in MB. 0 (or omitted) uses the tier preset.",
+				Description:   "Exact RAM in MB. 0 (or omitted) uses the recommended size.",
 				PlanModifiers: replaceInt,
 			},
 			"disk_gb": resourceschema.Int64Attribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Exact disk in GB. 0 (or omitted) uses the tier preset.",
+				Description:   "Exact disk in GB. 0 (or omitted) uses the recommended size.",
 				PlanModifiers: replaceInt,
 			},
 			"enforce_limits": resourceschema.BoolAttribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Apply hard CPU/memory limits to the database container.",
+				Description:   "Apply hard CPU/memory limits across enabled service containers.",
 				PlanModifiers: replaceBool,
 			},
 			"services": resourceschema.MapAttribute{

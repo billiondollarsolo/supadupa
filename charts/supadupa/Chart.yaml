@@ -2,6 +2,6 @@ apiVersion: v2
 name: supadupa
 description: Supadupa control plane, admin UI, and Kubernetes CRDs
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.3.0
+appVersion: "0.3.0"
 kubeVersion: ">=1.27.0-0"

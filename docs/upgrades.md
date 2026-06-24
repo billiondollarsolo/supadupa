@@ -76,6 +76,25 @@ Recommended checklist:
 
 ## Operator Notes
 
+### 0.3.0 — Exact sizing, telemetry history, and automation surface refresh
+
+This release completes the local security/resource refresh and changes project
+resource management from size presets to exact CPU/RAM/disk sizing.
+
+- **Externally observable behavior:** new projects and resizes use custom CPU,
+  RAM, and disk values with optional per-service container limits. Project
+  telemetry history is retained for 30 days and is visible through the UI, API,
+  CLI, and MCP tools.
+- **Who is affected:** Compose operators, CLI/MCP/Terraform automation, and any
+  scripts that still pass project `small`, `medium`, or `large` tiers.
+- **Required action:** update project-create scripts to use exact sizing or the
+  default recommendation flow, keep replica tiers as `small`, `medium`, or
+  `large`, and restart rebuilt control-plane/admin images.
+- **Validation:** verify API health, project resize, telemetry history ranges,
+  secret rotation, CLI `help`, CLI `metrics --history`, and MCP telemetry
+  history reads before pushing production traffic through the updated control
+  plane.
+
 ### 0.2.0 — Security hardening and public edge redeploy
 
 This release includes security, persistence, deployment, and validation changes

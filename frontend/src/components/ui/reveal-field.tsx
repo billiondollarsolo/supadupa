@@ -1,17 +1,17 @@
 import { useState } from "react";
-import { Check, Copy, Eye, EyeOff } from "lucide-react";
+import { Check, Copy, Eye, EyeOff, LoaderCircle } from "lucide-react";
 import { cn } from "../../lib/cn";
 
 // A copyable value that is masked by default when `sensitive`. Reveal is an
 // explicit, deliberate action, and copy runs an optional `onCopy` hook first so
-// callers can record an audit event for high-value credentials before the value
-// hits the clipboard.
+// callers can record an audit event for high-value credentials.
 export function RevealField({
   label,
   value,
   hint,
   sensitive = true,
   monospace = true,
+  onReveal,
   onCopy,
   className,
 }: {
@@ -20,21 +20,63 @@ export function RevealField({
   hint?: string;
   sensitive?: boolean;
   monospace?: boolean;
+  onReveal?: () => Promise<string> | string;
   onCopy?: () => void | Promise<void>;
   className?: string;
 }) {
   const [revealed, setRevealed] = useState(!sensitive);
+  const [resolvedValue, setResolvedValue] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   const shown = revealed || !sensitive;
-  const display = shown ? value : mask(value);
+  const currentValue = resolvedValue ?? value;
+  const display = shown ? currentValue : mask(currentValue);
+
+  async function materializeValue() {
+    if (!onReveal || resolvedValue !== null) {
+      return resolvedValue ?? value;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const next = await onReveal();
+      setResolvedValue(next);
+      return next;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to reveal value");
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleReveal() {
+    if (revealed) {
+      setRevealed(false);
+      return;
+    }
+    try {
+      await materializeValue();
+      setRevealed(true);
+    } catch {
+      // Error text is rendered below the field.
+    }
+  }
 
   async function copy() {
     // The clipboard write is the user's intent and must always happen — never
     // let a best-effort audit call (which can fail, e.g. for non-managed kinds)
     // block it.
+    let copyValue = currentValue;
     try {
-      await navigator.clipboard?.writeText(value);
+      copyValue = await materializeValue();
+    } catch {
+      return;
+    }
+    try {
+      await navigator.clipboard?.writeText(copyValue);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -55,15 +97,16 @@ export function RevealField({
           {sensitive ? (
             <button
               className="icon-button h-7 min-h-7 min-w-7"
-              onClick={() => setRevealed((v) => !v)}
+              disabled={busy}
+              onClick={() => void toggleReveal()}
               title={revealed ? "Hide value" : "Reveal value"}
               type="button"
             >
-              {revealed ? <EyeOff size={13} /> : <Eye size={13} />}
+              {busy ? <LoaderCircle className="animate-spin" size={13} /> : revealed ? <EyeOff size={13} /> : <Eye size={13} />}
             </button>
           ) : null}
-          <button className="icon-button h-7 min-h-7 min-w-7" onClick={() => void copy()} title="Copy value" type="button">
-            {copied ? <Check size={13} /> : <Copy size={13} />}
+          <button className="icon-button h-7 min-h-7 min-w-7" disabled={busy} onClick={() => void copy()} title="Copy value" type="button">
+            {busy ? <LoaderCircle className="animate-spin" size={13} /> : copied ? <Check size={13} /> : <Copy size={13} />}
           </button>
         </div>
       </div>
@@ -71,6 +114,7 @@ export function RevealField({
         {display}
       </code>
       {hint ? <span className="text-xs text-faint">{hint}</span> : null}
+      {error ? <span className="text-xs text-danger">{error}</span> : null}
     </div>
   );
 }

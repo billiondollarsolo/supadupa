@@ -311,6 +311,7 @@ func TestBootstrapDefaultBackupStorageTargetAutoTestRecordsFailure(t *testing.T)
 	t.Setenv("SUPADUPA_BACKUP_S3_FORCE_PATH_STYLE", "true")
 	t.Setenv("SUPADUPA_BACKUP_TARGET_AUTO_TEST", "true")
 	t.Setenv("SUPADUPA_BACKUP_TARGET_AUTO_TEST_TIMEOUT", "250ms")
+	t.Setenv("SUPADUPA_ALLOW_UNSAFE_BACKUP_ENDPOINTS", "true")
 	store := control.NewMemoryStore()
 	ctx := context.Background()
 
@@ -713,7 +714,7 @@ func (p *startupSecretProvisioner) Pause(ctx context.Context, ref string) error 
 
 func (p *startupSecretProvisioner) Resume(ctx context.Context, ref string) error { return nil }
 
-func (p *startupSecretProvisioner) Scale(ctx context.Context, ref string, tier control.ResourceTier) error {
+func (p *startupSecretProvisioner) Scale(ctx context.Context, ref string, spec control.ProjectSpec) error {
 	return nil
 }
 

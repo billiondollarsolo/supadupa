@@ -11,7 +11,7 @@ ORG=$(A -X POST $API/v1/orgs -H 'content-type: application/json' -d '{"name":"Fo
 echo "host=$HOST org=$ORG"
 for ref in acme-prod acme-staging forge-alpha forge-beta; do
   TOK=$(login)
-  body=$(python3 -c "import json;print(json.dumps({'ref':'$ref','name':'$ref','host_id':'$HOST','domain':'$APPS','profile':'full','resource_tier':'small','stack_version':'latest'}))")
+  body=$(python3 -c "import json;print(json.dumps({'ref':'$ref','name':'$ref','host_id':'$HOST','domain':'$APPS','profile':'full','stack_version':'latest'}))")
   code=$(curl -s -o /tmp/ex_$ref.json -w '%{http_code}' --max-time 900 -H "authorization: Bearer $TOK" -X POST $API/v1/orgs/$ORG/projects -H 'content-type: application/json' -d "$body")
   echo "create $ref -> HTTP $code"
 done

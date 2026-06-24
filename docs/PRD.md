@@ -83,7 +83,7 @@ supadupa-alpha-studio-1
        Pause(ctx context.Context, ref string) error
        Resume(ctx context.Context, ref string) error
        // Phase 2+
-       Scale(ctx context.Context, ref string, tier ResourceTier) error
+       Scale(ctx context.Context, ref string, spec ProjectSpec) error
        AddReplica(ctx context.Context, ref string, opts ReplicaOpts) error // Phase 3
    }
    ```

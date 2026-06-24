@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,6 +93,163 @@ func TestProjectMetricsIncludesObservedTelemetry(t *testing.T) {
 	}
 	if fleet.Observed.ProjectsSampled != 1 || fleet.Observed.CPUPercent != 12.5 || fleet.Observed.MemoryBytes != 512*1024*1024 {
 		t.Fatalf("unexpected fleet observed rollup %#v", fleet.Observed)
+	}
+}
+
+func TestProjectTelemetryHistoryTracksReservationRelativeUsage(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "history-observed", Name: "History Observed", CPU: 4, RAMMB: 4096, DiskGB: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampledAt := time.Now().UTC().Add(-1 * time.Minute)
+	if _, err := store.RecordProjectTelemetry(ctx, project.Ref, TelemetrySampleInput{
+		Source:           "compose",
+		CPUPercent:       200,
+		MemoryBytes:      1024 * 1024 * 1024,
+		MemoryLimitBytes: 2 * 1024 * 1024 * 1024,
+		DiskUsedBytes:    5 * 1024 * 1024 * 1024,
+		DiskLimitBytes:   50 * 1024 * 1024 * 1024,
+		SampledAt:        sampledAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	history, err := store.GetProjectTelemetryHistory(ctx, project.Ref, TelemetryHistoryQuery{
+		From: sampledAt.Add(-time.Minute),
+		To:   sampledAt.Add(time.Minute),
+		Step: 15 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Points) != 1 {
+		t.Fatalf("expected one history point, got %#v", history.Points)
+	}
+	point := history.Points[0]
+	if point.ReservedCPU != 4 || point.ReservedRAMMB != 4096 || point.ReservedDiskGB != 50 {
+		t.Fatalf("expected reservation snapshot, got %#v", point)
+	}
+	if point.CPUReservationPercent != 50 || point.MemoryReservationPercent != 25 || point.DiskReservationPercent != 10 {
+		t.Fatalf("unexpected reservation-relative percentages %#v", point)
+	}
+}
+
+func TestProjectTelemetryHistoryCompactsOlderRawSamples(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "history-compact", Name: "History Compact", CPU: 4, RAMMB: 4096, DiskGB: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Hour)
+	for _, sample := range []struct {
+		at  time.Time
+		cpu float64
+	}{
+		{at: now.Add(-25 * time.Hour), cpu: 100},
+		{at: now.Add(-25*time.Hour + time.Minute), cpu: 300},
+		{at: now, cpu: 25},
+	} {
+		if _, err := store.RecordProjectTelemetry(ctx, project.Ref, TelemetrySampleInput{
+			Source:      "compose",
+			CPUPercent:  sample.cpu,
+			MemoryBytes: 1024 * 1024 * 1024,
+			SampledAt:   sample.at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	history, err := store.GetProjectTelemetryHistory(ctx, project.Ref, TelemetryHistoryQuery{
+		From: now.Add(-26 * time.Hour),
+		To:   now.Add(-24 * time.Hour),
+		Step: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Points) != 1 {
+		t.Fatalf("expected one compacted point, got %#v", history.Points)
+	}
+	point := history.Points[0]
+	if point.Samples != 2 {
+		t.Fatalf("expected compacted point to represent two samples, got %#v", point)
+	}
+	if point.CPUPercent != 200 || point.CPUReservationPercent != 50 {
+		t.Fatalf("unexpected compacted CPU values %#v", point)
+	}
+}
+
+func TestProjectTelemetryHistoryUsesWallClockRetentionAndRejectsFutureSkew(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	org, err := store.CreateOrg(ctx, "Platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, CreateProjectRequest{OrgID: org.ID, Ref: "history-retention", Name: "History Retention", CPU: 4, RAMMB: 4096, DiskGB: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldAt := time.Now().UTC().Add(-telemetryHistoryRetention - time.Hour)
+	if _, err := store.RecordProjectTelemetry(ctx, project.Ref, TelemetrySampleInput{
+		Source:      "compose",
+		CPUPercent:  100,
+		MemoryBytes: 1024,
+		SampledAt:   oldAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldHistory, err := store.GetProjectTelemetryHistory(ctx, project.Ref, TelemetryHistoryQuery{
+		From: oldAt.Add(-time.Minute),
+		To:   oldAt.Add(time.Minute),
+		Step: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldHistory.Points) != 0 {
+		t.Fatalf("expected old backfilled sample to be outside retained history, got %#v", oldHistory.Points)
+	}
+
+	recentAt := time.Now().UTC().Add(-time.Minute)
+	if _, err := store.RecordProjectTelemetry(ctx, project.Ref, TelemetrySampleInput{
+		Source:      "compose",
+		CPUPercent:  200,
+		MemoryBytes: 2048,
+		SampledAt:   recentAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordProjectTelemetry(ctx, project.Ref, TelemetrySampleInput{
+		Source:      "compose",
+		CPUPercent:  300,
+		MemoryBytes: 4096,
+		SampledAt:   time.Now().UTC().Add(telemetryMaxFutureSkew + time.Minute),
+	}); err == nil || !strings.Contains(err.Error(), "sampled_at cannot be more than") {
+		t.Fatalf("expected future skew rejection, got %v", err)
+	}
+	history, err := store.GetProjectTelemetryHistory(ctx, project.Ref, TelemetryHistoryQuery{
+		From: recentAt.Add(-time.Minute),
+		To:   recentAt.Add(time.Minute),
+		Step: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Points) != 1 || history.Points[0].CPUPercent != 200 {
+		t.Fatalf("expected retained recent sample only, got %#v", history.Points)
 	}
 }
 

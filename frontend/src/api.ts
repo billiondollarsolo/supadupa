@@ -1,4 +1,4 @@
-import type { AdvisorFinding, AuditEvent, AuditEventPage, AuditIntegrity, AuthResponse, AuthState, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, CreateBranchResponse, FleetMetrics, Host, HostCapacity, LogDrain, MFAEnrollment, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, PlatformSSOInitiation, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectRouteManifest, ProjectSecret, ProjectSecretReveal, ProjectServices, ProjectStats, ProjectTraffic, FleetTraffic, ProjectStudioSession, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RestoreToTimeResponse, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest, Team, TeamMember, UpgradeProjectResponse, UsageSnapshot, User, WALArchive } from "./types";
+import type { AdvisorFinding, AuditEvent, AuditEventPage, AuditIntegrity, AuthResponse, AuthState, Backup, BackupPolicy, BackupStorageTarget, BillingInvoice, CDNInvalidation, ComplianceReport, ConnectPayload, CreateBranchResponse, FleetMetrics, Host, HostCapacity, LogDrain, MFAEnrollment, MFAStatus, Membership, Org, OrgAccessReview, OrgFeatureFlags, OrgQuota, OrgUsage, PITRPolicy, PlatformBackup, PlatformDefaults, PlatformSSOConfig, PlatformSSOInitiation, Project, ProjectAccessGrant, ProjectAnalyticsBucket, ProjectAuthClient, ProjectAuthHook, ProjectBranch, ProjectCDNPolicy, ProjectCLIProfile, ProjectConfig, ProjectDatabaseCronJob, ProjectDatabaseExtension, ProjectDatabaseQueue, ProjectDatabaseRole, ProjectDatabaseSchema, ProjectDatabaseWebhook, ProjectDomain, ProjectEmbeddingJob, ProjectFunction, ProjectFunctionRegion, ProjectFunctionStorageMount, ProjectLog, ProjectMetrics, ProjectNetworkConnection, ProjectNetworkPolicy, ProjectRecoverabilityStatus, ProjectReplica, ProjectReplicaRouting, ProjectReplicationPipeline, ProjectRoute, ProjectRouteManifest, ProjectSecret, ProjectSecretReveal, ProjectServices, ProjectStats, ProjectTelemetryHistory, ProjectTraffic, FleetTraffic, ProjectStudioSession, ProjectStorageBucket, ProjectVectorBucket, ProvisionerStatus, RestoreToTimeResponse, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest, Team, TeamMember, UpgradeProjectResponse, UsageSnapshot, User, WALArchive } from "./types";
 
 const apiBase = resolveApiBase();
 
@@ -262,6 +262,10 @@ export function getProjectMetrics(ref: string) {
   return request<ProjectMetrics>(`/v1/projects/${segment(ref)}/metrics`);
 }
 
+export function getProjectTelemetryHistory(ref: string, range: string, step?: string) {
+  return request<ProjectTelemetryHistory>(`/v1/projects/${segment(ref)}/telemetry/history${queryString({ range, step })}`);
+}
+
 export function getProjectStats(ref: string) {
   return request<ProjectStats>(`/v1/projects/${segment(ref)}/stats`);
 }
@@ -486,15 +490,19 @@ export type CreateProjectInput = {
   domain: string;
   stack_version: string;
   profile: "essential" | "full" | "orioledb";
-  resource_tier: "small" | "medium" | "large" | "custom";
-  // Optional exact-size overrides. 0/undefined means "use the tier preset".
-  cpu?: number;
-  ram_mb?: number;
-  disk_gb?: number;
-  // Opt-in: apply real container CPU/memory limits to the database service.
+  cpu: number;
+  ram_mb: number;
+  disk_gb: number;
   enforce_limits?: boolean;
   // Per-service enable map (subset of the supported Supabase services).
   services?: Record<string, boolean>;
+};
+
+export type ProjectResourcesInput = {
+  cpu: number;
+  ram_mb: number;
+  disk_gb: number;
+  enforce_limits: boolean;
 };
 
 export function createProject(input: CreateProjectInput) {
@@ -1308,10 +1316,10 @@ export function upgradeProject(ref: string, version: string) {
   });
 }
 
-export function scaleProject(ref: string, resourceTier: "small" | "medium" | "large" | string) {
+export function scaleProject(ref: string, input: ProjectResourcesInput) {
   return request<Project>(`/v1/projects/${segment(ref)}/scale`, {
     method: "POST",
-    body: JSON.stringify({ resource_tier: resourceTier }),
+    body: JSON.stringify(input),
   });
 }
 

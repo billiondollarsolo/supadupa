@@ -101,6 +101,10 @@ type projectManifestSpec struct {
 	StackVersion            string                               `yaml:"stackVersion"`
 	Profile                 string                               `yaml:"profile"`
 	ResourceTier            string                               `yaml:"resourceTier"`
+	CPU                     int                                  `yaml:"cpu,omitempty"`
+	RAMMB                   int                                  `yaml:"ramMB,omitempty"`
+	DiskGB                  int                                  `yaml:"diskGB,omitempty"`
+	EnforceLimits           bool                                 `yaml:"enforceLimits,omitempty"`
 	HostID                  string                               `yaml:"hostId,omitempty"`
 	RuntimeNamespace        string                               `yaml:"runtimeNamespace,omitempty"`
 	RuntimeSecurityDefaults kubernetesRuntimeSecurityDefaults    `yaml:"runtimeSecurityDefaults"`
@@ -517,12 +521,27 @@ func (p *Provisioner) Resume(ctx context.Context, ref string) error {
 	})
 }
 
-func (p *Provisioner) Scale(ctx context.Context, ref string, tier control.ResourceTier) error {
-	if tier != control.ResourceTierSmall && tier != control.ResourceTierMedium && tier != control.ResourceTierLarge {
-		return fmt.Errorf("unsupported resource tier %q", tier)
-	}
+func (p *Provisioner) Scale(ctx context.Context, ref string, spec control.ProjectSpec) error {
+	spec.Ref = ref
+	spec.ResourceTier = control.ResourceTierCustom
 	return p.updateProjectManifest(ctx, ref, func(payload []byte) ([]byte, error) {
-		return replaceProjectSpecScalar(payload, "resourceTier", string(tier))
+		next, err := replaceProjectSpecScalar(payload, "resourceTier", string(control.ResourceTierCustom))
+		if err != nil {
+			return nil, err
+		}
+		if next, err = replaceProjectSpecValue(next, "cpu", spec.CPU); err != nil {
+			return nil, err
+		}
+		if next, err = replaceProjectSpecValue(next, "ramMB", spec.RAMMB); err != nil {
+			return nil, err
+		}
+		if next, err = replaceProjectSpecValue(next, "diskGB", spec.DiskGB); err != nil {
+			return nil, err
+		}
+		if next, err = replaceProjectSpecValue(next, "enforceLimits", spec.EnforceLimits); err != nil {
+			return nil, err
+		}
+		return replaceProjectSpecValue(next, "services", kubernetesRenderedServiceMap(spec))
 	})
 }
 
@@ -826,6 +845,10 @@ func projectOpenAPIV3Schema() map[string]any {
 					"stackVersion":            map[string]any{"type": "string"},
 					"profile":                 map[string]any{"type": "string"},
 					"resourceTier":            map[string]any{"type": "string"},
+					"cpu":                     map[string]any{"type": "integer", "minimum": 0},
+					"ramMB":                   map[string]any{"type": "integer", "minimum": 0},
+					"diskGB":                  map[string]any{"type": "integer", "minimum": 0},
+					"enforceLimits":           map[string]any{"type": "boolean"},
 					"hostId":                  map[string]any{"type": "string"},
 					"runtimeNamespace":        map[string]any{"type": "string"},
 					"runtimeNetwork":          runtimeNetworkSchema(),
@@ -926,6 +949,7 @@ func serviceSchema() map[string]any {
 			"ports":       arraySchema(servicePortSchema()),
 			"serviceType": map[string]any{"type": "string", "enum": []string{"ClusterIP", "NodePort", "LoadBalancer", "ExternalName"}},
 			"env":         stringMapSchema(),
+			"resources":   serviceResourceRequirementsSchema(),
 			"volumes":     arraySchema(serviceVolumeSchema()),
 			"configFiles": arraySchema(serviceConfigFileSchema()),
 			"writablePaths": arraySchema(map[string]any{
@@ -943,6 +967,16 @@ func serviceSchema() map[string]any {
 			"readinessProbe":           serviceProbeSchema(),
 			"livenessProbe":            serviceProbeSchema(),
 			"ingress":                  serviceIngressSchema(),
+		},
+	}
+}
+
+func serviceResourceRequirementsSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"requests": stringMapSchema(),
+			"limits":   stringMapSchema(),
 		},
 	}
 }
@@ -1107,7 +1141,11 @@ func projectManifestForSpec(spec control.ProjectSpec, namespace string, desiredS
 			Domain:           domain,
 			StackVersion:     defaultString(spec.StackVersion, "latest"),
 			Profile:          defaultString(string(spec.Profile), string(control.StackProfileFull)),
-			ResourceTier:     defaultString(string(spec.ResourceTier), string(control.ResourceTierSmall)),
+			ResourceTier:     defaultString(string(spec.ResourceTier), string(control.ResourceTierCustom)),
+			CPU:              spec.CPU,
+			RAMMB:            spec.RAMMB,
+			DiskGB:           spec.DiskGB,
+			EnforceLimits:    spec.EnforceLimits,
 			HostID:           strings.TrimSpace(spec.HostID),
 			RuntimeNamespace: strings.TrimSpace(runtimeNamespace),
 			RuntimeSecurityDefaults: kubernetesRuntimeSecurityDefaults{
@@ -1277,6 +1315,7 @@ type kubernetesRenderedService struct {
 	ServiceType              string                         `yaml:"serviceType,omitempty"`
 	Config                   map[string]string              `yaml:"config"`
 	Env                      map[string]string              `yaml:"env"`
+	Resources                *kubernetesRenderedResources   `yaml:"resources,omitempty"`
 	Volumes                  []kubernetesRenderedVolume     `yaml:"volumes"`
 	ConfigFiles              []kubernetesRenderedConfigFile `yaml:"configFiles,omitempty"`
 	WritablePaths            []kubernetesRenderedWritable   `yaml:"writablePaths,omitempty"`
@@ -1299,6 +1338,11 @@ type kubernetesRenderedPort struct {
 type kubernetesRenderedDependency struct {
 	Service string `yaml:"service"`
 	Port    int    `yaml:"port"`
+}
+
+type kubernetesRenderedResources struct {
+	Requests map[string]string `yaml:"requests,omitempty"`
+	Limits   map[string]string `yaml:"limits,omitempty"`
 }
 
 type kubernetesRenderedVolume struct {
@@ -1398,7 +1442,14 @@ func kubernetesRenderedServices(spec control.ProjectSpec) []kubernetesRenderedSe
 	dbDropCapabilities := []string{"NET_RAW"}
 	dbLiveness := tcpProbe(5432)
 	dbLiveness.InitialDelaySeconds = 120
-	db := withContainerSecurity(kubernetesServiceFromControlSpec("db", control.ServiceSpec{Enabled: true, Config: map[string]string{"readOnlyRootFilesystem": "false"}}, "supabase/postgres:"+release.Postgres, []kubernetesRenderedPort{{Name: "postgres", Port: 5432, TargetPort: 5432, Protocol: "TCP"}}, []kubernetesRenderedVolume{{Name: "data", MountPath: "/var/lib/postgresql/data", Size: "10Gi"}}, dbKubernetesConfigFiles(), nil, dbKubernetesEnv(), nil, tcpProbe(5432), dbLiveness, []kubernetesRenderedWritable{{Name: "tmp", MountPath: "/tmp"}}), &dbRunAsNonRoot, nil, dbDropCapabilities)
+	dbDiskGB := spec.DiskGB
+	if dbDiskGB <= 0 {
+		_, _, dbDiskGB = control.EffectiveResourceSizing(spec)
+	}
+	if dbDiskGB <= 0 {
+		dbDiskGB = 40
+	}
+	db := withContainerSecurity(kubernetesServiceFromControlSpec("db", control.ServiceSpec{Enabled: true, Config: map[string]string{"readOnlyRootFilesystem": "false"}}, "supabase/postgres:"+release.Postgres, []kubernetesRenderedPort{{Name: "postgres", Port: 5432, TargetPort: 5432, Protocol: "TCP"}}, []kubernetesRenderedVolume{{Name: "data", MountPath: "/var/lib/postgresql/data", Size: fmt.Sprintf("%dGi", dbDiskGB)}}, dbKubernetesConfigFiles(), nil, dbKubernetesEnv(), nil, tcpProbe(5432), dbLiveness, []kubernetesRenderedWritable{{Name: "tmp", MountPath: "/tmp"}}), &dbRunAsNonRoot, nil, dbDropCapabilities)
 	db.Command = []string{"bash", "-lc"}
 	db.Args = []string{dbKubernetesStartupScript()}
 	services := []kubernetesRenderedService{
@@ -1439,7 +1490,7 @@ func kubernetesRenderedServices(spec control.ProjectSpec) []kubernetesRenderedSe
 	for _, key := range keys {
 		services = append(services, kubernetesServiceFromControlSpec(key, spec.Services[key], "", nil, nil, nil, nil, nil, nil, nil, nil, nil))
 	}
-	return services
+	return applyKubernetesResourceAllocations(services, control.ProjectServiceResourceAllocations(spec))
 }
 
 func kubernetesRenderedServiceMap(spec control.ProjectSpec) map[string]kubernetesRenderedService {
@@ -1449,6 +1500,35 @@ func kubernetesRenderedServiceMap(spec control.ProjectSpec) map[string]kubernete
 		out[service.Name] = service
 	}
 	return out
+}
+
+func applyKubernetesResourceAllocations(services []kubernetesRenderedService, allocations map[string]control.ProjectServiceResourceAllocation) []kubernetesRenderedService {
+	for index := range services {
+		allocation, ok := allocations[services[index].Name]
+		if !ok || allocation.CPUMilli <= 0 || allocation.RAMMB <= 0 {
+			continue
+		}
+		resources := kubernetesResourcesFromAllocation(allocation)
+		services[index].Resources = &resources
+	}
+	return services
+}
+
+func kubernetesResourcesFromAllocation(allocation control.ProjectServiceResourceAllocation) kubernetesRenderedResources {
+	return kubernetesRenderedResources{
+		Requests: map[string]string{"cpu": kubernetesCPULimit(allocation.CPUMilli), "memory": fmt.Sprintf("%dMi", allocation.RAMMB)},
+		Limits:   map[string]string{"cpu": kubernetesCPULimit(allocation.CPUMilli), "memory": fmt.Sprintf("%dMi", allocation.RAMMB)},
+	}
+}
+
+func kubernetesCPULimit(milli int) string {
+	if milli <= 0 {
+		return "0"
+	}
+	if milli%1000 == 0 {
+		return strconv.Itoa(milli / 1000)
+	}
+	return fmt.Sprintf("%dm", milli)
 }
 
 func withRunAsNonRoot(service kubernetesRenderedService, value *bool) kubernetesRenderedService {

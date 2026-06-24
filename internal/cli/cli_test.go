@@ -33,6 +33,17 @@ func TestParseKeyValuesPreservesInlineJSONAndEmptyValues(t *testing.T) {
 	}
 }
 
+func TestHelpCommandPrintsUsage(t *testing.T) {
+	var stdout, stderr strings.Builder
+	exitCode := Runner{Stdout: &stdout, Stderr: &stderr}.Run(context.Background(), []string{"help"})
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "commands:") || !strings.Contains(stderr.String(), "metrics") {
+		t.Fatalf("expected command usage, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestLoginPostsCredentialsAndPrintsJSON(t *testing.T) {
 	var got map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -309,7 +320,7 @@ func TestProjectsCreatePostsVersionAndPlacementPayload(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got["ref"] != "alpha" || got["name"] != "Alpha" || got["domain"] != "apps.example.test" || got["stack_version"] != "15.8.1.060" || got["host_id"] != "host_1" || got["profile"] != "full" || got["resource_tier"] != "small" {
+		if got["ref"] != "alpha" || got["name"] != "Alpha" || got["domain"] != "apps.example.test" || got["stack_version"] != "15.8.1.060" || got["host_id"] != "host_1" || got["profile"] != "full" {
 			t.Fatalf("unexpected project create payload %#v", got)
 		}
 		_, _ = w.Write([]byte(`{"ref":"alpha","name":"Alpha","spec":{"stack_version":"15.8.1.060"}}`))
@@ -321,7 +332,7 @@ func TestProjectsCreatePostsVersionAndPlacementPayload(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
-	}.Run(context.Background(), []string{"projects", "create", "--org-id", "org_1", "--ref", "alpha", "--name", "Alpha", "--domain", "apps.example.test", "--stack-version", "15.8.1.060", "--host-id", "host_1", "--profile", "full", "--tier", "small"})
+	}.Run(context.Background(), []string{"projects", "create", "--org-id", "org_1", "--ref", "alpha", "--name", "Alpha", "--domain", "apps.example.test", "--stack-version", "15.8.1.060", "--host-id", "host_1", "--profile", "full"})
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
@@ -902,7 +913,7 @@ func TestSettingsDefaultsSetPostsPayload(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got["domain"] != "apps.example.com" || got["stack_version"] != "2026.06.05" || got["profile"] != "essential" || got["resource_tier"] != "medium" || got["backup_schedule"] != "hourly" {
+		if got["domain"] != "apps.example.com" || got["stack_version"] != "2026.06.05" || got["profile"] != "essential" || got["backup_schedule"] != "hourly" {
 			t.Fatalf("unexpected settings payload %#v", got)
 		}
 		smtp, ok := got["smtp"].(map[string]any)
@@ -912,7 +923,7 @@ func TestSettingsDefaultsSetPostsPayload(t *testing.T) {
 		if smtp["enabled"] != true || smtp["host"] != "smtp.example.com" || smtp["port"] != float64(2525) || smtp["password_handle"] != "secret://platform/smtp-password" || smtp["tls_mode"] != "implicit" {
 			t.Fatalf("unexpected smtp payload %#v", smtp)
 		}
-		_, _ = w.Write([]byte(`{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"essential","resource_tier":"medium","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"}}`))
+		_, _ = w.Write([]byte(`{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"essential","resource_tier":"custom","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"}}`))
 	}))
 	defer server.Close()
 
@@ -921,7 +932,7 @@ func TestSettingsDefaultsSetPostsPayload(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
-	}.Run(context.Background(), []string{"settings", "defaults", "set", "--domain", "apps.example.com", "--stack-version", "2026.06.05", "--profile", "essential", "--tier", "medium", "--backup-schedule", "hourly", "--smtp-enabled", "--smtp-host", "smtp.example.com", "--smtp-port", "2525", "--smtp-sender-name", "supadupa", "--smtp-sender-email", "noreply@example.com", "--smtp-username", "apikey", "--smtp-password-handle", "secret://platform/smtp-password", "--smtp-tls-mode", "implicit"})
+	}.Run(context.Background(), []string{"settings", "defaults", "set", "--domain", "apps.example.com", "--stack-version", "2026.06.05", "--profile", "essential", "--backup-schedule", "hourly", "--smtp-enabled", "--smtp-host", "smtp.example.com", "--smtp-port", "2525", "--smtp-sender-name", "supadupa", "--smtp-sender-email", "noreply@example.com", "--smtp-username", "apikey", "--smtp-password-handle", "secret://platform/smtp-password", "--smtp-tls-mode", "implicit"})
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
@@ -1283,19 +1294,19 @@ func TestAccessReviewUsesOrgEndpoint(t *testing.T) {
 	}
 }
 
-func TestProjectsScalePostsTierPayload(t *testing.T) {
+func TestProjectsScalePostsResourcePayload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/projects/alpha/scale" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		var got map[string]string
+		var got map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got["resource_tier"] != "large" {
+		if got["cpu"] != float64(6) || got["ram_mb"] != float64(12288) || got["disk_gb"] != float64(120) || got["enforce_limits"] != true {
 			t.Fatalf("unexpected scale payload %#v", got)
 		}
-		_, _ = w.Write([]byte(`{"ref":"alpha","spec":{"resource_tier":"large"}}`))
+		_, _ = w.Write([]byte(`{"ref":"alpha","spec":{"resource_tier":"custom","cpu":6,"ram_mb":12288,"disk_gb":120,"enforce_limits":true}}`))
 	}))
 	defer server.Close()
 
@@ -1304,12 +1315,39 @@ func TestProjectsScalePostsTierPayload(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
-	}.Run(context.Background(), []string{"projects", "scale", "--ref", "alpha", "--tier", "large"})
+	}.Run(context.Background(), []string{"projects", "scale", "--ref", "alpha", "--cpu", "6", "--ram-mb", "12288", "--disk-gb", "120", "--enforce-limits"})
 
 	if exitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"resource_tier": "large"`) {
+	if !strings.Contains(stdout.String(), `"cpu": 6`) || !strings.Contains(stdout.String(), `"enforce_limits": true`) {
+		t.Fatalf("unexpected stdout %q", stdout.String())
+	}
+}
+
+func TestMetricsHistoryUsesProjectTelemetryHistoryEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/projects/alpha/telemetry/history" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+		if r.URL.Query().Get("range") != "24h" || r.URL.Query().Get("step") != "5m" {
+			t.Fatalf("unexpected history query %q", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"project_ref":"alpha","step_seconds":300,"points":[]}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	exitCode := Runner{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Env:    map[string]string{"SUPADUPA_API_URL": server.URL},
+	}.Run(context.Background(), []string{"metrics", "--ref", "alpha", "--history", "--range", "24h", "--step", "5m"})
+
+	if exitCode != 0 {
+		t.Fatalf("exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"project_ref": "alpha"`) {
 		t.Fatalf("unexpected stdout %q", stdout.String())
 	}
 }

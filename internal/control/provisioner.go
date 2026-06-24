@@ -14,7 +14,7 @@ type Provisioner interface {
 	Upgrade(ctx context.Context, ref string, version string) error
 	Pause(ctx context.Context, ref string) error
 	Resume(ctx context.Context, ref string) error
-	Scale(ctx context.Context, ref string, tier ResourceTier) error
+	Scale(ctx context.Context, ref string, spec ProjectSpec) error
 	AddReplica(ctx context.Context, ref string, opts ReplicaOpts) error
 }
 

@@ -16,7 +16,7 @@ import { getFleetTraffic } from "../api";
 import { useDashboardContext } from "../lib/dashboard-context";
 import { formatBytes, formatTime } from "../lib/format";
 import { type Tone } from "../lib/status";
-import type { FleetMetrics } from "../types";
+import type { FleetMetrics, Project } from "../types";
 
 type FleetHistoryPoint = {
   sampledAt: string;
@@ -30,6 +30,15 @@ type FleetHistoryPoint = {
   nodeNetworkRxBytes: number;
   nodeNetworkTxBytes: number;
 };
+
+function projectResourceSummary(project: Project) {
+  const cpu = project.spec.cpu ?? 0;
+  const ramMB = project.spec.ram_mb ?? 0;
+  if (cpu > 0 && ramMB > 0) {
+    return `${cpu} vCPU / ${formatBytes(ramMB * 1024 * 1024)}`;
+  }
+  return project.spec.enforce_limits ? "limits on" : "no limits";
+}
 
 export function FleetDashboardPage() {
   const { projectList, hosts, fleetMetrics, advisorFindings, complianceReport, projects, provisionerStatus, routeToProject } = useDashboardContext();
@@ -213,7 +222,7 @@ export function FleetDashboardPage() {
                   <span className="truncate text-sm font-medium">{project.name}</span>
                   <StatusPill status={project.status} />
                 </span>
-                <span className="mt-1 block truncate font-mono text-xs text-muted">{project.ref} / {project.spec.domain} / {project.spec.resource_tier}</span>
+	                <span className="mt-1 block truncate font-mono text-xs text-muted">{project.ref} / {project.spec.domain} / {projectResourceSummary(project)}</span>
               </span>
               <span className="flex items-center gap-2 text-xs text-muted">
                 {project.runtime_status?.phase ? <span>{project.runtime_status.phase}</span> : null}

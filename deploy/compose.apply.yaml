@@ -16,7 +16,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.control-plane
     command: ["supadupa-docker-proxy"]
-    user: "${SUPADUPA_CONTROL_PLANE_USER:-10001:10001}"
+    user: "${SUPADUPA_DOCKER_PROXY_USER:-${SUPADUPA_CONTROL_PLANE_USER:-10001:10001}}"
     cap_drop:
       - ALL
     # security_opt (no-new-privileges) is inherited from the base compose.yaml.

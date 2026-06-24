@@ -82,6 +82,6 @@ func NewServer(cfg Config) *http.Server {
 
 	return &http.Server{
 		Addr:    cfg.Addr,
-		Handler: requestLogger(logger, withRequestBodyLimit(withCORS(withAuth(cfg.AuthRequired, auth, mux), cfg.CORSOrigins))),
+		Handler: requestLogger(logger, withRequestBodyLimit(withCORS(withAuth(cfg.AuthRequired, auth, store, mux), cfg.CORSOrigins))),
 	}
 }

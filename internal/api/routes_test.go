@@ -14,7 +14,7 @@ import (
 func TestAPIRouteRegistrationSnapshot(t *testing.T) {
 	file := parseAPIRoutesSource(t)
 
-	const expectedRegisteredRouteCount = 201
+	const expectedRegisteredRouteCount = 202
 	patterns := registeredRoutePatterns(t, file)
 	if got := len(patterns); got != expectedRegisteredRouteCount {
 		t.Fatalf("expected %d registered API route patterns, got %d", expectedRegisteredRouteCount, got)
@@ -89,6 +89,7 @@ func TestAPIRouteRegistrationSnapshot(t *testing.T) {
 		"GET /v1/projects/{ref}",
 		"DELETE /v1/projects/{ref}",
 		"GET /v1/projects/{ref}/metrics",
+		"GET /v1/projects/{ref}/telemetry/history",
 		"POST /v1/projects/{ref}/telemetry",
 		"GET /v1/projects/{ref}/connect",
 		"GET /v1/projects/{ref}/studio-session",

@@ -1,10 +1,11 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"supadupa2026/internal/control"
 )
@@ -64,7 +65,12 @@ func createSCIMUserHandler(store control.Store, auth *control.AuthService) http.
 		}
 		password := payload.Password
 		if password == "" {
-			password = fmt.Sprintf("scim-%d", time.Now().UTC().UnixNano())
+			var err error
+			password, err = generatedSCIMPassword()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "SCIM password generation failed")
+				return
+			}
 		}
 		role := strings.TrimSpace(payload.Extension.Role)
 		if role == "" {
@@ -87,6 +93,14 @@ func createSCIMUserHandler(store control.Store, auth *control.AuthService) http.
 		control.Audit(r.Context(), store, "scim.user_create", "user:"+user.ID, map[string]string{"email": user.Email, "role": user.Role})
 		writeJSON(w, http.StatusCreated, scimUserFromControl(r, user))
 	}
+}
+
+func generatedSCIMPassword() (string, error) {
+	data := make([]byte, 32)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate SCIM password: %w", err)
+	}
+	return "scim_" + base64.RawURLEncoding.EncodeToString(data), nil
 }
 
 func getSCIMUserHandler(store control.Store, auth *control.AuthService) http.HandlerFunc {

@@ -1250,22 +1250,28 @@ func (p *Provisioner) Resume(ctx context.Context, ref string) error {
 	return updateEnvValue(filepath.Join(projectDir, ".env"), "SUPADUPA_DESIRED_STATE", "running")
 }
 
-func (p *Provisioner) Scale(ctx context.Context, ref string, tier control.ResourceTier) error {
-	if _, ok := map[control.ResourceTier]struct{}{
-		control.ResourceTierSmall:  {},
-		control.ResourceTierMedium: {},
-		control.ResourceTierLarge:  {},
-	}[tier]; !ok {
-		return fmt.Errorf("unsupported resource tier %q", tier)
-	}
+func (p *Provisioner) Scale(ctx context.Context, ref string, spec control.ProjectSpec) error {
 	projectDir := filepath.Join(p.rootDir, ref)
 	if _, err := os.Stat(filepath.Join(projectDir, "compose.yaml")); err != nil {
 		return err
 	}
-	if err := updateEnvValue(filepath.Join(projectDir, ".env"), "RESOURCE_TIER", string(tier)); err != nil {
+	envPath := filepath.Join(projectDir, ".env")
+	values, err := readEnvFile(envPath)
+	if err != nil {
 		return err
 	}
-	if err := writeScaleManifest(filepath.Join(projectDir, "scale.yaml"), ref, tier); err != nil {
+	spec.Ref = ref
+	spec.ResourceTier = control.ResourceTierCustom
+	applyRuntimeDefaultEnvValues(values, spec)
+	values["RESOURCE_TIER"] = string(control.ResourceTierCustom)
+	values["SUPADUPA_RESOURCE_CPU"] = strconv.Itoa(spec.CPU)
+	values["SUPADUPA_RESOURCE_RAM_MB"] = strconv.Itoa(spec.RAMMB)
+	values["SUPADUPA_RESOURCE_DISK_GB"] = strconv.Itoa(spec.DiskGB)
+	values["SUPADUPA_ENFORCE_LIMITS"] = strconv.FormatBool(spec.EnforceLimits)
+	if err := writeEnvValues(envPath, values); err != nil {
+		return err
+	}
+	if err := writeComposeFile(filepath.Join(projectDir, "compose.yaml"), spec, p.projectDockerLogs, p.projectHostDir(ref)); err != nil {
 		return err
 	}
 	if !p.apply {
@@ -2106,7 +2112,7 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 	}
 	resourceTier := string(spec.ResourceTier)
 	if resourceTier == "" {
-		resourceTier = string(control.ResourceTierSmall)
+		resourceTier = string(control.ResourceTierCustom)
 	}
 	stackProfile := string(spec.Profile)
 	if stackProfile == "" {
@@ -2209,6 +2215,10 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 		"STUDIO_PG_META_URL":                "http://meta:8080",
 		"SUPABASE_PUBLIC_URL":               apiExternalURL,
 		"SUPADUPA_DESIRED_STATE":            "running",
+		"SUPADUPA_ENFORCE_LIMITS":           strconv.FormatBool(spec.EnforceLimits),
+		"SUPADUPA_RESOURCE_CPU":             strconv.Itoa(spec.CPU),
+		"SUPADUPA_RESOURCE_RAM_MB":          strconv.Itoa(spec.RAMMB),
+		"SUPADUPA_RESOURCE_DISK_GB":         strconv.Itoa(spec.DiskGB),
 		"SUPADUPA_ORIOLEDB_PROFILE":         orioleDBProfile,
 		"SUPADUPA_STACK_PROFILE":            stackProfile,
 		"SUPAVISOR_DB_HOST":                 "db",
@@ -2686,14 +2696,9 @@ func writeComposeFile(path string, spec control.ProjectSpec, projectDockerLogs b
 	vectorConfigMount := composeBindMount(projectHostDir, "vector.yml", "/etc/vector/vector.yml", true)
 	logDrainsMount := composeBindMount(projectHostDir, "log-drains", "/etc/vector/log-drains", true)
 
-	// When the project opts into runtime-limit enforcement, render real
-	// container CPU/memory limits on the database service (the dimension that
-	// matters most for noisy-neighbor isolation). Otherwise sizing stays
-	// placement/quota bookkeeping only and no limits are emitted.
-	dbDeploySection := ""
-	if spec.EnforceLimits {
-		cpu, ramMB, _ := control.EffectiveResourceSizing(spec)
-		dbDeploySection = fmt.Sprintf("    deploy:\n      resources:\n        limits:\n          cpus: \"%d\"\n          memory: %dM\n", cpu, ramMB)
+	resourceAllocations := control.ProjectServiceResourceAllocations(spec)
+	deploySection := func(service string) string {
+		return composeResourceLimitsSection(resourceAllocations, service)
 	}
 
 	var builder strings.Builder
@@ -2725,7 +2730,7 @@ services:
       - %s
   kong:
     image: kong/kong:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -2754,14 +2759,14 @@ services:
       - %s
       - %s
     depends_on:
-`, spec.Ref, release.Postgres, dbDeploySection, spec.Ref, pgHBAMount, dbInitMount, release.Kong, spec.Ref, kongConfigMount, kongEntrypointMount))
+`, spec.Ref, release.Postgres, deploySection("db"), spec.Ref, pgHBAMount, dbInitMount, release.Kong, deploySection("kong"), spec.Ref, kongConfigMount, kongEntrypointMount))
 	for _, dependency := range depends {
 		builder.WriteString(fmt.Sprintf("      - %s\n", dependency))
 	}
 	if services["studio"] {
 		builder.WriteString(fmt.Sprintf(`  studio:
     image: supabase/studio:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -2790,11 +2795,11 @@ services:
     volumes:
       - %s
     depends_on: [meta]
-`, release.Studio, studioProjectName(spec), spec.Ref, spec.Ref, composeBindMount(projectHostDir, "functions", "/home/deno/functions", true)))
+`, release.Studio, deploySection("studio"), studioProjectName(spec), spec.Ref, spec.Ref, composeBindMount(projectHostDir, "functions", "/home/deno/functions", true)))
 	}
 	builder.WriteString(fmt.Sprintf(`  meta:
     image: supabase/postgres-meta:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -2807,11 +2812,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.PostgresMeta))
+`, release.PostgresMeta, deploySection("meta")))
 	if services["auth"] {
 		builder.WriteString(fmt.Sprintf(`  auth:
     image: supabase/gotrue:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -2820,24 +2825,24 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.Auth))
+`, release.Auth, deploySection("auth")))
 	}
 	if services["rest"] {
 		builder.WriteString(fmt.Sprintf(`  rest:
     image: postgrest/postgrest:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     networks: [internal]
     depends_on:
       db:
         condition: service_healthy
-`, release.REST))
+`, release.REST, deploySection("rest")))
 	}
 	if services["realtime"] {
 		builder.WriteString(fmt.Sprintf(`  realtime:
     image: supabase/realtime:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -2867,12 +2872,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.Realtime, spec.Ref))
+`, release.Realtime, deploySection("realtime"), spec.Ref))
 	}
 	if services["storage"] {
 		builder.WriteString(fmt.Sprintf(`  storage:
     image: supabase/storage-api:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -2904,7 +2909,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.Storage))
+`, release.Storage, deploySection("storage")))
 		if services["rest"] {
 			builder.WriteString("      rest:\n        condition: service_started\n")
 		}
@@ -2915,7 +2920,7 @@ services:
 	if services["imgproxy"] {
 		builder.WriteString(fmt.Sprintf(`  imgproxy:
     image: darthsim/imgproxy:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -2923,12 +2928,12 @@ services:
     networks: [internal]
     volumes:
       - storage-data:/var/lib/storage:ro
-`, release.Imgproxy))
+`, release.Imgproxy, deploySection("imgproxy")))
 	}
 	if services["functions"] {
 		builder.WriteString(fmt.Sprintf(`  edge-runtime:
     image: supabase/edge-runtime:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -2947,12 +2952,12 @@ services:
       - %s
       - storage-data:/mnt/.supadupa-storage:ro
     command: ["start", "--main-service", "/home/deno/functions/main"]
-`, release.EdgeRuntime, functionsMount))
+`, release.EdgeRuntime, deploySection("functions"), functionsMount))
 	}
 	if services["pooler"] {
 		builder.WriteString(fmt.Sprintf(`  pooler:
     image: supabase/supavisor:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     restart: unless-stopped
     env_file: .env
@@ -2988,12 +2993,12 @@ services:
       db:
         condition: service_healthy
     command: ["/bin/sh", "-c", "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"]
-`, release.Pooler, spec.Ref, spec.Ref, spec.Ref, poolerConfigMount))
+`, release.Pooler, deploySection("pooler"), spec.Ref, spec.Ref, spec.Ref, poolerConfigMount))
 	}
 	if services["analytics"] {
 		builder.WriteString(fmt.Sprintf(`  analytics:
     image: supabase/logflare:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     environment:
@@ -3015,7 +3020,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.Analytics))
+`, release.Analytics, deploySection("analytics")))
 	}
 	if services["vector"] {
 		volumes := []string{
@@ -3027,14 +3032,14 @@ services:
 		}
 		builder.WriteString(fmt.Sprintf(`  vector:
     image: timberio/vector:%s
-    security_opt:
+%s    security_opt:
       - no-new-privileges:true
     env_file: .env
     networks: [internal, egress]
     volumes:
 %s
     command: ["--config", "/etc/vector/vector.yml", "--config-dir", "/etc/vector/log-drains"]
-`, release.Vector, strings.Join(volumes, "\n")))
+`, release.Vector, deploySection("vector"), strings.Join(volumes, "\n")))
 	}
 	builder.WriteString(fmt.Sprintf(`networks:
   internal:
@@ -3048,6 +3053,21 @@ volumes:
   storage-data:
 `, spec.Ref))
 	return artifact.WriteFile(path, []byte(builder.String()), bindMountFileMode)
+}
+
+func composeResourceLimitsSection(allocations map[string]control.ProjectServiceResourceAllocation, service string) string {
+	allocation, ok := allocations[service]
+	if !ok || allocation.CPUMilli <= 0 || allocation.RAMMB <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("    deploy:\n      resources:\n        limits:\n          cpus: %q\n          memory: %dM\n", composeCPULimit(allocation.CPUMilli), allocation.RAMMB)
+}
+
+func composeCPULimit(milli int) string {
+	if milli <= 0 {
+		return "0"
+	}
+	return strconv.FormatFloat(float64(milli)/1000, 'f', -1, 64)
 }
 
 func composeBindMount(projectHostDir string, source string, target string, readonly bool) string {

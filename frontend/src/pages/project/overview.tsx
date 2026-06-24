@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Database, Globe2, KeyRound, Play, RotateCcw } from "lucide-react";
 import { AppPanel } from "../../components/app/app-panel";
@@ -13,11 +13,11 @@ import { CollapsibleCard } from "../../components/ui/collapsible-card";
 import { RevealField } from "../../components/ui/reveal-field";
 import { RuntimeLink } from "../../components/runtime-link";
 import { StatusPill } from "../../components/ui/status-pill";
-import { auditProjectSecretCopy, getProjectStats, getProjectTraffic } from "../../api";
+import { auditProjectSecretCopy, getProjectStats, getProjectTelemetryHistory, getProjectTraffic, revealProjectSecret } from "../../api";
 import { useDashboardContext } from "../../lib/dashboard-context";
-import { formatBytes, formatTime } from "../../lib/format";
+import { formatBytes, formatDateTime, formatRelativeTime, formatTime } from "../../lib/format";
 import type { ProjectTab } from "../../lib/project-config";
-import type { ConnectPayload, Project, ProjectMetrics } from "../../types";
+import type { ConnectPayload, Project, ProjectMetrics, ProjectTelemetryHistory } from "../../types";
 import { ProjectPage } from "./layout";
 import { RuntimeStatusPanel } from "./side-panels";
 
@@ -26,34 +26,37 @@ type ProjectTelemetryPoint = {
   sampledAt: string;
   cpuPercent: number;
   memoryPercent: number;
+  diskPercent: number;
+  samples: number;
 };
+
+const TELEMETRY_HISTORY_RANGES = [
+  { label: "1h", value: "1h" },
+  { label: "6h", value: "6h" },
+  { label: "24h", value: "24h" },
+  { label: "7d", value: "7d" },
+  { label: "30d", value: "30d" },
+] as const;
+
+type TelemetryHistoryRange = (typeof TELEMETRY_HISTORY_RANGES)[number]["value"];
 
 export function ProjectOverviewPage() {
   const { activeProject, connect, projectMetrics, routeToProject } = useDashboardContext();
-  const [telemetryHistory, setTelemetryHistory] = useState<ProjectTelemetryPoint[]>([]);
+  const [telemetryRange, setTelemetryRange] = useState<TelemetryHistoryRange>("6h");
   const openTab = (tab: ProjectTab) => activeProject && routeToProject(activeProject.ref, tab);
-
-  useEffect(() => {
-    const point = telemetryPointFromMetrics(projectMetrics.data);
-    if (!point) {
-      return;
-    }
-    setTelemetryHistory((current) => {
-      if (current[0]?.projectRef && current[0].projectRef !== point.projectRef) {
-        return [point];
-      }
-      if (current[current.length - 1]?.sampledAt === point.sampledAt) {
-        return current;
-      }
-      return [...current.filter((item) => item.sampledAt !== point.sampledAt), point].slice(-24);
-    });
-  }, [projectMetrics.data]);
+  const activeRef = activeProject?.ref ?? "";
+  const telemetryHistory = useQuery({
+    queryKey: ["project-telemetry-history", activeRef, telemetryRange],
+    queryFn: () => getProjectTelemetryHistory(activeRef, telemetryRange),
+    enabled: activeRef.length > 0,
+    refetchInterval: telemetryHistoryRefreshInterval(telemetryRange),
+  });
 
   return (
     <ProjectPage>
       <ProjectStatusStrip project={activeProject} metrics={projectMetrics.data} loading={projectMetrics.isLoading} studioUrl={connect.data?.studio_url} />
       <NextStepsStrip project={activeProject} metrics={projectMetrics.data} onOpenTab={openTab} />
-      <ObservedMetricsPanel history={telemetryHistory} metrics={projectMetrics.data} loading={projectMetrics.isLoading} />
+      <ObservedMetricsPanel history={telemetryHistory.data} historyError={telemetryHistory.isError} historyLoading={telemetryHistory.isLoading} historyRange={telemetryRange} metrics={projectMetrics.data} loading={projectMetrics.isLoading} onHistoryRangeChange={setTelemetryRange} project={activeProject} />
       <OperationalSurfacePanel metrics={projectMetrics.data} loading={projectMetrics.isLoading} onOpenTab={openTab} />
       <DatabasePanel projectRef={activeProject?.ref} status={activeProject?.status} />
       <StoragePanel projectRef={activeProject?.ref} status={activeProject?.status} />
@@ -78,7 +81,7 @@ function ProjectStatusStrip({ loading, metrics, project, studioUrl }: { project?
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-xs text-muted">
           <StatusPill label={metrics?.status ?? project?.status ?? (loading ? "loading" : "-")} status={metrics?.status ?? project?.status} />
           <DbExposureBadge mode={project?.db_ingress_mode} />
-          {project ? <Badge variant="muted">{project.spec.resource_tier}</Badge> : null}
+          {project ? <Badge variant="muted">{project.spec.enforce_limits ? "limits on" : "no limits"}</Badge> : null}
           {project ? <Badge variant="muted">{project.spec.profile}</Badge> : null}
           {metrics ? <span className="font-mono text-faint">{metrics.resources.cpu} vCPU · {formatBytes(metrics.resources.ram_mb * 1024 * 1024)} RAM · {formatBytes(metrics.db_allocated_bytes)} disk</span> : null}
           {studioUrl && project ? (
@@ -127,35 +130,107 @@ function NextStepsStrip({ metrics, onOpenTab, project }: { project?: Project; me
   );
 }
 
-function ObservedMetricsPanel({ history, loading, metrics }: { history: ProjectTelemetryPoint[]; metrics?: ProjectMetrics; loading: boolean }) {
+function ObservedMetricsPanel({
+  history,
+  historyError,
+  historyLoading,
+  historyRange,
+  loading,
+  metrics,
+  onHistoryRangeChange,
+  project,
+}: {
+  history?: ProjectTelemetryHistory;
+  historyError: boolean;
+  historyLoading: boolean;
+  historyRange: TelemetryHistoryRange;
+  metrics?: ProjectMetrics;
+  loading: boolean;
+  onHistoryRangeChange: (range: TelemetryHistoryRange) => void;
+  project?: Project;
+}) {
   const observed = metrics?.observed;
-  // Measure usage against the project's RESERVED allocation (tier/size), not the
-  // host — a "small" project should read against 1 vCPU / 2 GB, not the whole
-  // box. Reservations are soft (containers can burst above them unless limit
-  // enforcement is on), so usage can exceed 100%.
-  const reservedCpu = metrics?.resources?.cpu ?? 0;
-  const reservedRamBytes = (metrics?.resources?.ram_mb ?? 0) * 1024 * 1024;
-  const reservedDiskBytes = (metrics?.resources?.disk_gb ?? 0) * 1024 * 1024 * 1024;
-  const usedCores = observed ? observed.cpu_percent / 100 : 0; // docker: 100% = 1 core
-  const cpuPercent = reservedCpu > 0 ? (usedCores / reservedCpu) * 100 : 0;
-  const memoryPercent = reservedRamBytes > 0 && observed ? (observed.memory_bytes / reservedRamBytes) * 100 : 0;
-  const diskUsed = observed?.disk_used_bytes ?? 0;
-  const diskPercent = reservedDiskBytes > 0 && diskUsed > 0 ? (diskUsed / reservedDiskBytes) * 100 : 0;
+  const observedStale = isTelemetrySampleStale(observed?.sampled_at);
+  const usage = telemetryUsageFromMetrics(metrics, project);
+  const historyPoints = telemetryPointsFromHistory(history);
+  const chartPoints = historyPoints;
   return (
-    <AppPanel actions={observed ? <time className="text-xs text-faint">{formatTime(observed.sampled_at)}</time> : null} eyebrow="Monitoring" title="Resource telemetry">
+    <AppPanel
+      actions={
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {observed ? (
+            <time className={observedStale ? "text-xs text-warning" : "text-xs text-faint"} dateTime={observed.sampled_at} title={formatDateTime(observed.sampled_at)}>
+              {observedStale ? "stale · " : ""}
+              {formatRelativeTime(observed.sampled_at)}
+            </time>
+          ) : null}
+          <TelemetryRangePicker onChange={onHistoryRangeChange} value={historyRange} />
+        </div>
+      }
+      eyebrow="Monitoring"
+      title="Resource telemetry"
+    >
       {loading ? <p className="mt-4 text-sm text-muted">Loading project metrics...</p> : null}
       <div className="mt-4 grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-        <ResourceMeter label="CPU" value={observed ? `${cpuPercent.toFixed(1)}%` : "No sample"} detail={observed ? `${usedCores.toFixed(2)} of ${reservedCpu} vCPU reserved` : `${reservedCpu} vCPU reserved`} footer="of reservation" percent={Math.min(100, cpuPercent)} />
-        <ResourceMeter label="Memory" value={observed ? `${memoryPercent.toFixed(1)}%` : "No sample"} detail={`${observed ? formatBytes(observed.memory_bytes) + " of " : ""}${formatBytes(reservedRamBytes)} reserved`} footer="of reservation" percent={Math.min(100, memoryPercent)} />
-        <ResourceMeter label="Disk" value={diskUsed > 0 ? `${diskPercent.toFixed(1)}%` : "No volume sample"} detail={`${diskUsed > 0 ? formatBytes(diskUsed) + " of " : ""}${formatBytes(reservedDiskBytes)} reserved`} footer="of reservation" percent={Math.min(100, diskPercent)} />
+        <ResourceMeter label="CPU" value={observed ? `${usage.cpuPercent.toFixed(1)}%` : "No sample"} detail={observed ? `${usage.usedCores.toFixed(2)} of ${usage.reservedCpu} vCPU reserved` : `${usage.reservedCpu} vCPU reserved`} footer="of reservation" percent={Math.min(100, usage.cpuPercent)} />
+        <ResourceMeter label="Memory" value={observed ? `${usage.memoryPercent.toFixed(1)}%` : "No sample"} detail={`${observed ? formatBytes(usage.memoryBytes) + " of " : ""}${formatBytes(usage.reservedRamBytes)} reserved`} footer="of reservation" percent={Math.min(100, usage.memoryPercent)} />
+        <ResourceMeter label="Disk" value={usage.diskUsedBytes > 0 ? `${usage.diskPercent.toFixed(1)}%` : "No volume sample"} detail={`${usage.diskUsedBytes > 0 ? formatBytes(usage.diskUsedBytes) + " of " : ""}${formatBytes(usage.reservedDiskBytes)} reserved`} footer="of reservation" percent={Math.min(100, usage.diskPercent)} />
       </div>
-      <TelemetryLineChart ariaLabel="Recent project CPU and memory utilization" points={history.map((point) => ({ sampledAt: point.sampledAt, cpu: point.cpuPercent, memory: point.memoryPercent }))} title="Recent telemetry" />
+      <TelemetryLineChart ariaLabel="Project CPU and memory utilization against reservation over selected history range" domain={telemetryHistoryDomain(chartPoints)} points={chartPoints.map((point) => ({ sampledAt: point.sampledAt, cpu: point.cpuPercent, memory: point.memoryPercent }))} title={`Usage vs reservation · ${historyRange}`} />
+      <TelemetryHistorySummary error={historyError} history={history} loading={historyLoading} points={chartPoints} />
       <p className="mt-3 text-xs text-faint">
-        {observed
-          ? "Usage is shown against this project's reserved size. Reservations are soft — containers can burst above them unless database limit enforcement is enabled, so a bar may read over 100%."
-          : "Showing reserved capacity until a Compose or Kubernetes telemetry collector records live samples."}
+        {observed && observedStale
+          ? "Latest telemetry is stale; live meters show the last recorded sample."
+          : observed
+          ? "Usage is shown against this project's reserved size. Without enforced limits, containers can burst above the reservation, so a bar may read over 100%."
+          : "Showing reserved capacity until a Compose telemetry collector records live samples."}
       </p>
     </AppPanel>
+  );
+}
+
+function TelemetryRangePicker({ onChange, value }: { value: TelemetryHistoryRange; onChange: (range: TelemetryHistoryRange) => void }) {
+  return (
+    <div aria-label="Telemetry history range" className="flex rounded-md border border-border bg-surface-2 p-0.5" role="group">
+      {TELEMETRY_HISTORY_RANGES.map((range) => (
+        <Button
+          aria-pressed={value === range.value}
+          className="h-7 px-2 text-xs"
+          key={range.value}
+          onClick={() => onChange(range.value)}
+          size="sm"
+          type="button"
+          variant={value === range.value ? "default" : "ghost"}
+        >
+          {range.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function TelemetryHistorySummary({ error, history, loading, points }: { error: boolean; history?: ProjectTelemetryHistory; loading: boolean; points: ProjectTelemetryPoint[] }) {
+  if (error) {
+    return <p className="mt-3 text-xs text-danger">Telemetry history unavailable.</p>;
+  }
+  if (loading && points.length === 0) {
+    return <p className="mt-3 text-xs text-muted">Loading telemetry history...</p>;
+  }
+  if (points.length === 0) {
+    return <p className="mt-3 text-xs text-faint">No retained history in this range yet.</p>;
+  }
+  const maxCPU = Math.max(...points.map((point) => point.cpuPercent));
+  const maxRAM = Math.max(...points.map((point) => point.memoryPercent));
+  const maxDisk = Math.max(...points.map((point) => point.diskPercent));
+  const sampleCount = points.reduce((sum, point) => sum + Math.max(1, point.samples), 0);
+  const bucketLabel = history ? `${history.step_seconds}s buckets` : "retained samples";
+  return (
+    <div className="mt-3 grid grid-cols-4 gap-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
+      <MetricCard label="Max CPU" value={`${maxCPU.toFixed(1)}%`} detail="of reservation" />
+      <MetricCard label="Max RAM" value={`${maxRAM.toFixed(1)}%`} detail="of reservation" />
+      <MetricCard label="Max disk" value={maxDisk > 0 ? `${maxDisk.toFixed(1)}%` : "No sample"} detail="of reservation" />
+      <MetricCard label="History" value={`${points.length}`} detail={`${sampleCount} samples · ${bucketLabel}`} />
+    </div>
   );
 }
 
@@ -179,7 +254,16 @@ function ConnectionBasicsPanel({ loading, onOpenConnect, payload, project }: { p
         {payload ? (
           <>
             {payload.api_url ? <RevealField label="API URL" sensitive={false} value={payload.api_url} /> : null}
-            {anonKey ? <RevealField hint="Public client key" label="anon / publishable key" onCopy={() => auditProjectSecretCopy(ref, "anon_key")} sensitive value={anonKey} /> : null}
+            {anonKey ? (
+              <RevealField
+                hint={anonKey.startsWith("secret://") ? anonKey : "Public client key"}
+                label="anon / publishable key"
+                onCopy={() => auditProjectSecretCopy(ref, "anon_key")}
+                onReveal={ref ? async () => (await revealProjectSecret(ref, "anon_key")).value : undefined}
+                sensitive
+                value={anonKey}
+              />
+            ) : null}
             {payload.studio_url ? <RevealField label="Studio" sensitive={false} value={payload.studio_url} /> : null}
           </>
         ) : null}
@@ -361,15 +445,65 @@ function SurfaceTile({ detail, icon: Icon, label, onClick, value }: { icon: type
   );
 }
 
-function telemetryPointFromMetrics(metrics?: ProjectMetrics): ProjectTelemetryPoint | null {
-  const observed = metrics?.observed;
-  if (!observed) {
-    return null;
+function telemetryPointsFromHistory(history?: ProjectTelemetryHistory): ProjectTelemetryPoint[] {
+  if (!history?.points?.length) {
+    return [];
   }
+  return history.points.map((point) => ({
+    projectRef: history.project_ref,
+    sampledAt: point.sampled_at,
+    cpuPercent: point.cpu_reservation_percent,
+    memoryPercent: point.memory_reservation_percent,
+    diskPercent: point.disk_reservation_percent,
+    samples: Math.max(1, point.samples),
+  }));
+}
+
+function telemetryHistoryRefreshInterval(range: TelemetryHistoryRange) {
+  return range === "1h" || range === "6h" || range === "24h" ? 15_000 : 60_000;
+}
+
+function telemetryUsageFromMetrics(metrics?: ProjectMetrics, project?: Project) {
+  const observed = metrics?.observed;
+  const reservation = projectTelemetryReservation(project, metrics);
+  const reservedCpu = reservation.cpu;
+  const reservedRamBytes = reservation.ramMB * 1024 * 1024;
+  const reservedDiskBytes = reservation.diskGB * 1024 * 1024 * 1024;
+  const usedCores = observed ? observed.cpu_percent / 100 : 0; // docker: 100% = 1 core
+  const memoryBytes = observed?.memory_bytes ?? 0;
+  const diskUsedBytes = observed?.disk_used_bytes ?? 0;
   return {
-    projectRef: metrics.project_ref,
-    sampledAt: observed.sampled_at,
-    cpuPercent: observed.cpu_percent,
-    memoryPercent: observed.memory_limit_bytes > 0 ? (observed.memory_bytes / observed.memory_limit_bytes) * 100 : 0,
+    reservedCpu,
+    reservedRamBytes,
+    reservedDiskBytes,
+    usedCores,
+    memoryBytes,
+    diskUsedBytes,
+    cpuPercent: reservedCpu > 0 ? (usedCores / reservedCpu) * 100 : 0,
+    memoryPercent: reservedRamBytes > 0 ? (memoryBytes / reservedRamBytes) * 100 : 0,
+    diskPercent: reservedDiskBytes > 0 && diskUsedBytes > 0 ? (diskUsedBytes / reservedDiskBytes) * 100 : 0,
   };
+}
+
+function projectTelemetryReservation(project?: Project, metrics?: ProjectMetrics) {
+  const cpu = project?.spec.cpu && project.spec.cpu > 0 ? project.spec.cpu : metrics?.resources?.cpu ?? 0;
+  const ramMB = project?.spec.ram_mb && project.spec.ram_mb > 0 ? project.spec.ram_mb : metrics?.resources?.ram_mb ?? 0;
+  const diskGB = project?.spec.disk_gb && project.spec.disk_gb > 0 ? project.spec.disk_gb : metrics?.resources?.disk_gb ?? 0;
+  return { cpu, ramMB, diskGB };
+}
+
+function isTelemetrySampleStale(sampledAt?: string) {
+  if (!sampledAt) {
+    return false;
+  }
+  const sampled = new Date(sampledAt).getTime();
+  if (Number.isNaN(sampled)) {
+    return false;
+  }
+  return Date.now() - sampled > 2 * 60 * 1000;
+}
+
+function telemetryHistoryDomain(history: ProjectTelemetryPoint[]): [number, number] {
+  const peak = history.reduce((max, point) => Math.max(max, point.cpuPercent, point.memoryPercent), 100);
+  return [0, Math.ceil(peak / 25) * 25];
 }

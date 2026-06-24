@@ -152,7 +152,7 @@ func addDerivedCORSOrigin(out map[string]bool, value string) {
 	out["https://"+strings.Trim(value, "/")] = true
 }
 
-func withAuth(required bool, auth *control.AuthService, next http.Handler) http.Handler {
+func withAuth(required bool, auth *control.AuthService, store control.Store, next http.Handler) http.Handler {
 	if !required {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := context.WithValue(r.Context(), authBypassKey, true)
@@ -172,6 +172,9 @@ func withAuth(required bool, auth *control.AuthService, next http.Handler) http.
 		claims, err := auth.Verify(token)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid bearer token")
+			return
+		}
+		if _, ok := requireCurrentUserClaims(w, r, store, claims); !ok {
 			return
 		}
 		// Carry the authenticated actor + client IP so every audited action

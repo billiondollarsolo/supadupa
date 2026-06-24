@@ -26,11 +26,9 @@ export function Modal({
   useEffect(() => {
     if (!open) return;
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const first = focusableElements(dialogRef.current)[0] ?? dialogRef.current;
+    first?.focus();
     const restoreBackground = makeBackgroundInert(backdropRef.current);
-    window.setTimeout(() => {
-      const first = focusableElements(dialogRef.current)[0] ?? dialogRef.current;
-      first?.focus();
-    }, 0);
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         onClose();

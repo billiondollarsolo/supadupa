@@ -43,8 +43,8 @@ func TestPlatformAdminTokenInvalidatedAfterDemotionAndDeletion(t *testing.T) {
 		t.Fatalf("expected demotion 200, got %d: %s", demotion.Code, demotion.Body.String())
 	}
 	staleAfterDemotion := performWithToken(server, http.MethodGet, "/v1/users", "", demotedToken)
-	if staleAfterDemotion.Code != http.StatusForbidden {
-		t.Fatalf("expected stale demoted admin token forbidden, got %d: %s", staleAfterDemotion.Code, staleAfterDemotion.Body.String())
+	if staleAfterDemotion.Code != http.StatusUnauthorized {
+		t.Fatalf("expected stale demoted admin token unauthorized, got %d: %s", staleAfterDemotion.Code, staleAfterDemotion.Body.String())
 	}
 
 	deletion := performWithToken(server, http.MethodDelete, "/v1/users/"+deletedAdminID, "", ownerToken)

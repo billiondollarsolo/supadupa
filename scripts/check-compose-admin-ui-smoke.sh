@@ -208,7 +208,7 @@ export SUPADUPA_META_DB_ADDR="127.0.0.1:$meta_port"
 export VITE_API_BASE_URL="$api_url"
 export SUPADUPA_CORS_ORIGINS="$admin_url,http://localhost:$admin_port"
 export SUPADUPA_DEFAULT_PROFILE="essential"
-export SUPADUPA_DEFAULT_RESOURCE_TIER="small"
+export SUPADUPA_DEFAULT_RESOURCE_TIER="custom"
 export SUPADUPA_DEFAULT_STACK_VERSION="15.8.1.060"
 
 platform_compose up -d --build

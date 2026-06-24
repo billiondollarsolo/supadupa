@@ -1297,6 +1297,17 @@ func requireRecoveryReadyBackupTargets() bool {
 	return env.Bool("SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS")
 }
 
+func validateBackupStorageTargetEndpointForSignedEgress(endpoint string) error {
+	if strings.TrimSpace(endpoint) == "" || env.Bool("SUPADUPA_ALLOW_UNSAFE_BACKUP_ENDPOINTS") {
+		return nil
+	}
+	warnings := backupStorageTargetNetworkWarnings(BackupStorageTarget{Endpoint: endpoint})
+	if len(warnings) == 0 {
+		return nil
+	}
+	return fmt.Errorf("backup storage target endpoint is not allowed for signed egress: %s", strings.Join(warnings, "; "))
+}
+
 func ensureRecoveryReadyBackupTarget(target BackupStorageTarget, hasTarget bool, purpose string) error {
 	if !requireRecoveryReadyBackupTargets() {
 		return nil
@@ -1350,6 +1361,9 @@ func backupStorageTargetNetworkWarnings(target BackupStorageTarget) []string {
 		return []string{"endpoint host is empty"}
 	}
 	warnings := []string{}
+	if strings.EqualFold(parsed.Scheme, "http") {
+		warnings = append(warnings, "endpoint uses unencrypted HTTP")
+	}
 	switch host {
 	case "localhost", "localhost.localdomain", "host.docker.internal", "host.containers.internal":
 		warnings = append(warnings, "endpoint host targets local container or host networking")

@@ -280,6 +280,56 @@ func TestAuthBootstrapLoginAndProtectedAPI(t *testing.T) {
 	}
 }
 
+func TestStaleBearerTokenRejectedAfterPasswordChange(t *testing.T) {
+	ctx := context.Background()
+	store := control.NewMemoryStore()
+	server := NewServer(Config{
+		Store:        store,
+		Provisioner:  fakeProvisioner{},
+		AuthRequired: true,
+	})
+
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	token := extractString(t, bootstrap.Body.String(), "token")
+	users, err := store.ListUsers(ctx)
+	if err != nil || len(users) != 1 {
+		t.Fatalf("expected bootstrap user, users=%d err=%v", len(users), err)
+	}
+	user := users[0]
+	org, err := store.CreateOrg(ctx, "Stale Token Org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertOrgMember(ctx, org.ID, control.MembershipInput{Email: user.Email, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateProject(ctx, control.CreateProjectRequest{OrgID: org.ID, Ref: "stale-token", Name: "Stale Token"}); err != nil {
+		t.Fatal(err)
+	}
+	seedProjectSecrets(t, store, "stale-token", "custom_secret")
+
+	allowed := performWithToken(server, http.MethodGet, "/v1/projects/stale-token/secrets/custom_secret/reveal", "", token)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("expected original token to reveal secret before password change, got %d: %s", allowed.Code, allowed.Body.String())
+	}
+
+	if _, err := store.UpdateUser(ctx, user.ID, control.UpdateUserRequest{Email: user.Email, Password: "new-super-secure", Role: user.Role}); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := performWithToken(server, http.MethodGet, "/v1/projects/stale-token/secrets/custom_secret/reveal", "", token)
+	if stale.Code != http.StatusUnauthorized || !strings.Contains(stale.Body.String(), "stale bearer token") {
+		t.Fatalf("expected stale token rejection after password change, got %d: %s", stale.Code, stale.Body.String())
+	}
+	authState := performWithToken(server, http.MethodGet, "/v1/auth/state", "", token)
+	if authState.Code != http.StatusOK || strings.Contains(authState.Body.String(), `"authenticated":true`) {
+		t.Fatalf("expected stale token to be unauthenticated in auth state, got %d: %s", authState.Code, authState.Body.String())
+	}
+}
+
 func TestAuthUsesPlatformSecretKeyFallback(t *testing.T) {
 	t.Setenv(control.AuthSecretEnv, "")
 	t.Setenv(control.PlatformSecretKeyEnv, "stable-platform-secret")
@@ -687,6 +737,10 @@ func TestPlatformMFAEnrollmentLoginAndDisable(t *testing.T) {
 	if verify.Code != http.StatusOK || !strings.Contains(verify.Body.String(), `"enabled":true`) || !strings.Contains(verify.Body.String(), `"pending":false`) {
 		t.Fatalf("expected mfa enabled: %d %s", verify.Code, verify.Body.String())
 	}
+	staleAfterVerify := performWithToken(server, http.MethodGet, "/v1/account/mfa", "", token)
+	if staleAfterVerify.Code != http.StatusUnauthorized || !strings.Contains(staleAfterVerify.Body.String(), "stale bearer token") {
+		t.Fatalf("expected original token to be stale after mfa verify, got %d: %s", staleAfterVerify.Code, staleAfterVerify.Body.String())
+	}
 
 	challenge := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
 	if challenge.Code != http.StatusAccepted || !strings.Contains(challenge.Body.String(), `"mfa_required":true`) || strings.Contains(challenge.Body.String(), `"token"`) {
@@ -710,6 +764,10 @@ func TestPlatformMFAEnrollmentLoginAndDisable(t *testing.T) {
 	disable := performWithToken(server, http.MethodDelete, "/v1/account/mfa", `{"code":"`+disableCode+`"}`, mfaToken)
 	if disable.Code != http.StatusOK || !strings.Contains(disable.Body.String(), `"enabled":false`) {
 		t.Fatalf("expected mfa disabled: %d %s", disable.Code, disable.Body.String())
+	}
+	staleAfterDisable := performWithToken(server, http.MethodGet, "/v1/account/mfa", "", mfaToken)
+	if staleAfterDisable.Code != http.StatusUnauthorized || !strings.Contains(staleAfterDisable.Body.String(), "stale bearer token") {
+		t.Fatalf("expected mfa login token to be stale after mfa disable, got %d: %s", staleAfterDisable.Code, staleAfterDisable.Body.String())
 	}
 
 	postDisableLogin := perform(server, http.MethodPost, "/v1/auth/login", `{"email":"admin@example.com","password":"super-secure"}`)
@@ -975,6 +1033,25 @@ func TestSCIMUsersAndGroupsProvisioning(t *testing.T) {
 	}
 }
 
+func TestSCIMGeneratedPasswordIsOpaqueRandom(t *testing.T) {
+	first, err := generatedSCIMPassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := generatedSCIMPassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("expected distinct SCIM placeholder passwords")
+	}
+	for _, password := range []string{first, second} {
+		if strings.HasPrefix(password, "scim-") || !strings.HasPrefix(password, "scim_") || len(password) < 48 {
+			t.Fatalf("expected opaque non-timestamp SCIM placeholder password, got %q", password)
+		}
+	}
+}
+
 func TestSCIMBearerTokenProvisioningIsSeparateFromPlatformAdminAuth(t *testing.T) {
 	store := control.NewMemoryStore()
 	serverAuth := control.NewAuthService("scim-test-secret")
@@ -1110,16 +1187,16 @@ func TestPlatformDefaultsAPIUpdatesAndAppliesToProjectCreate(t *testing.T) {
 	}
 	token := extractString(t, bootstrap.Body.String(), "token")
 
-	invalidStack := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"essential","resource_tier":"medium","backup_schedule":"hourly"}`, token)
+	invalidStack := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"essential","resource_tier":"custom","backup_schedule":"hourly"}`, token)
 	if invalidStack.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid stack defaults 400, got %d: %s", invalidStack.Code, invalidStack.Body.String())
 	}
 
-	update := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"15.8.1.060","profile":"essential","resource_tier":"medium","backup_schedule":"hourly","feature_flags":{"single_org_mode":false,"read_replicas":true,"kubernetes_operator":true},"smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"}}`, token)
+	update := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"15.8.1.060","profile":"essential","resource_tier":"custom","backup_schedule":"hourly","feature_flags":{"single_org_mode":false,"read_replicas":true,"kubernetes_operator":true},"smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"}}`, token)
 	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), `"domain":"apps.example.com"`) || !strings.Contains(update.Body.String(), `"backup_schedule":"hourly"`) || !strings.Contains(update.Body.String(), `"host":"smtp.example.com"`) || !strings.Contains(update.Body.String(), `"password_handle":"secret://platform/smtp-password"`) || !strings.Contains(update.Body.String(), `"single_org_mode":false`) || !strings.Contains(update.Body.String(), `"read_replicas":true`) || !strings.Contains(update.Body.String(), `"kubernetes_operator":true`) || !strings.Contains(update.Body.String(), `"supabase_cli_compat":true`) {
 		t.Fatalf("expected updated defaults: %d %s", update.Code, update.Body.String())
 	}
-	invalidSMTP := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"15.8.1.060","profile":"essential","resource_tier":"medium","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":587,"password_handle":"raw","tls_mode":"starttls"}}`, token)
+	invalidSMTP := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"15.8.1.060","profile":"essential","resource_tier":"custom","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":587,"password_handle":"raw","tls_mode":"starttls"}}`, token)
 	if invalidSMTP.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid smtp defaults 400, got %d: %s", invalidSMTP.Code, invalidSMTP.Body.String())
 	}
@@ -1133,7 +1210,7 @@ func TestPlatformDefaultsAPIUpdatesAndAppliesToProjectCreate(t *testing.T) {
 	if projectResponse.Code != http.StatusAccepted {
 		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
-	if provisioner.spec.Domain != "apps.example.com" || provisioner.spec.StackVersion != "15.8.1.060" || provisioner.spec.Profile != control.StackProfileEssential || provisioner.spec.ResourceTier != control.ResourceTierMedium {
+	if provisioner.spec.Domain != "apps.example.com" || provisioner.spec.StackVersion != "15.8.1.060" || provisioner.spec.Profile != control.StackProfileEssential || provisioner.spec.ResourceTier != control.ResourceTierCustom || provisioner.spec.CPU <= 0 || provisioner.spec.RAMMB <= 0 || provisioner.spec.DiskGB <= 0 {
 		t.Fatalf("expected provisioner spec from defaults, got %#v", provisioner.spec)
 	}
 	policy, err := store.GetBackupPolicy(context.Background(), "defaults-api")
@@ -1151,6 +1228,7 @@ func TestPlatformDefaultsAPIUpdatesAndAppliesToProjectCreate(t *testing.T) {
 }
 
 func TestBackupStorageTargetsAPIAndProjectPolicy(t *testing.T) {
+	t.Setenv("SUPADUPA_ALLOW_UNSAFE_BACKUP_ENDPOINTS", "true")
 	store := control.NewMemoryStore()
 	server := NewServer(Config{
 		Store:        store,
@@ -1410,7 +1488,7 @@ func TestOrgFeatureFlagsAPIInheritsOverridesAndAudits(t *testing.T) {
 
 	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"admin@example.com","password":"super-secure"}`)
 	token := extractString(t, bootstrap.Body.String(), "token")
-	defaults := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"latest","profile":"full","resource_tier":"small","backup_schedule":"daily","feature_flags":{"billing":true,"read_replicas":true}}`, token)
+	defaults := performWithToken(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.example.com","stack_version":"latest","profile":"full","resource_tier":"custom","backup_schedule":"daily","feature_flags":{"billing":true,"read_replicas":true}}`, token)
 	if defaults.Code != http.StatusOK {
 		t.Fatalf("expected defaults update 200, got %d: %s", defaults.Code, defaults.Body.String())
 	}
@@ -2285,7 +2363,7 @@ func TestProjectReplicasCreateListUsageAndAudit(t *testing.T) {
 	}
 }
 
-func TestProjectScaleUpdatesTierCapacityAndAudit(t *testing.T) {
+func TestProjectScaleUpdatesResourceCapacityLimitsAndAudit(t *testing.T) {
 	store := control.NewMemoryStore()
 	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}})
 	hostResponse := perform(server, http.MethodPost, "/v1/hosts", `{"name":"local","address":"localhost","capacity":{"cpu":8,"ram_mb":32768,"disk_gb":500,"projects":10}}`)
@@ -2301,33 +2379,33 @@ func TestProjectScaleUpdatesTierCapacityAndAudit(t *testing.T) {
 		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
 	}
 
-	invalidResponse := perform(server, http.MethodPost, "/v1/projects/scale-proj/scale", `{"resource_tier":"huge"}`)
+	invalidResponse := perform(server, http.MethodPost, "/v1/projects/scale-proj/scale", `{"cpu":0,"ram_mb":64,"disk_gb":0}`)
 	if invalidResponse.Code != http.StatusBadRequest {
-		t.Fatalf("expected invalid scale tier 400, got %d: %s", invalidResponse.Code, invalidResponse.Body.String())
+		t.Fatalf("expected invalid scale resources 400, got %d: %s", invalidResponse.Code, invalidResponse.Body.String())
 	}
 
-	scaleResponse := perform(server, http.MethodPost, "/v1/projects/scale-proj/scale", `{"resource_tier":"large"}`)
+	scaleResponse := perform(server, http.MethodPost, "/v1/projects/scale-proj/scale", `{"cpu":6,"ram_mb":12288,"disk_gb":120,"enforce_limits":true}`)
 	if scaleResponse.Code != http.StatusOK {
 		t.Fatalf("expected scale status 200, got %d: %s", scaleResponse.Code, scaleResponse.Body.String())
 	}
-	if !strings.Contains(scaleResponse.Body.String(), `"resource_tier":"large"`) || !strings.Contains(scaleResponse.Body.String(), `"message":"resource tier updated"`) {
-		t.Fatalf("expected large scaled project response: %s", scaleResponse.Body.String())
+	if !strings.Contains(scaleResponse.Body.String(), `"resource_tier":"custom"`) || !strings.Contains(scaleResponse.Body.String(), `"cpu":6`) || !strings.Contains(scaleResponse.Body.String(), `"enforce_limits":true`) || !strings.Contains(scaleResponse.Body.String(), `"message":"resource sizing updated"`) {
+		t.Fatalf("expected exact resource scaled project response: %s", scaleResponse.Body.String())
 	}
 
 	usageResponse := perform(server, http.MethodGet, "/v1/orgs/"+orgID+"/usage", "")
-	for _, expected := range []string{`"cpu":8`, `"ram_mb":16384`, `"disk_gb":160`, `"projects":1`} {
+	for _, expected := range []string{`"cpu":6`, `"ram_mb":12288`, `"disk_gb":120`, `"projects":1`} {
 		if !strings.Contains(usageResponse.Body.String(), expected) {
 			t.Fatalf("expected scaled usage %s: %s", expected, usageResponse.Body.String())
 		}
 	}
 	hostsResponse := perform(server, http.MethodGet, "/v1/hosts", "")
-	for _, expected := range []string{`"used":{"cpu":8`, `"ram_mb":16384`, `"disk_gb":160`, `"projects":1`} {
+	for _, expected := range []string{`"used":{"cpu":6`, `"ram_mb":12288`, `"disk_gb":120`, `"projects":1`} {
 		if !strings.Contains(hostsResponse.Body.String(), expected) {
 			t.Fatalf("expected scaled host usage %s: %s", expected, hostsResponse.Body.String())
 		}
 	}
 	logsResponse := perform(server, http.MethodGet, "/v1/projects/scale-proj/logs", "")
-	if !strings.Contains(logsResponse.Body.String(), "Resource tier scaled") {
+	if !strings.Contains(logsResponse.Body.String(), "Resource sizing updated") {
 		t.Fatalf("expected scale project log: %s", logsResponse.Body.String())
 	}
 	auditResponse := perform(server, http.MethodGet, "/v1/audit-events", "")
@@ -3022,7 +3100,7 @@ func TestPlatformDatabaseIngressAllowlistReconcilesProjectTCPRoutes(t *testing.T
 	}
 
 	// Master kill switch off forces every project private regardless of mode.
-	off := perform(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.supadupa.test","stack_version":"latest","profile":"full","resource_tier":"small","backup_schedule":"daily","feature_flags":{"database_external_access":false}}`)
+	off := perform(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.supadupa.test","stack_version":"latest","profile":"full","resource_tier":"custom","backup_schedule":"daily","feature_flags":{"database_external_access":false}}`)
 	if off.Code != http.StatusOK {
 		t.Fatalf("expected master-off update 200, got %d: %s", off.Code, off.Body.String())
 	}
@@ -3727,6 +3805,22 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 		}
 	}
 
+	historyResponse := perform(server, http.MethodGet, "/v1/projects/metrics-proj/telemetry/history?range=1h&step=15s", "")
+	if historyResponse.Code != http.StatusOK {
+		t.Fatalf("expected project telemetry history 200, got %d: %s", historyResponse.Code, historyResponse.Body.String())
+	}
+	for _, expected := range []string{
+		`"project_ref":"metrics-proj"`,
+		`"step_seconds":15`,
+		`"points":[`,
+		`"cpu_reservation_percent"`,
+		`"memory_reservation_percent"`,
+	} {
+		if !strings.Contains(historyResponse.Body.String(), expected) {
+			t.Fatalf("expected project telemetry history value %s: %s", expected, historyResponse.Body.String())
+		}
+	}
+
 	jsonResponse := perform(server, http.MethodGet, "/v1/metrics", "")
 	if jsonResponse.Code != http.StatusOK {
 		t.Fatalf("expected metrics json 200, got %d: %s", jsonResponse.Code, jsonResponse.Body.String())
@@ -3787,6 +3881,35 @@ func TestFleetMetricsJSONAndPrometheus(t *testing.T) {
 	}
 	if strings.Count(promResponse.Body.String(), "# HELP supadupa_project_resource_cpu ") != 1 {
 		t.Fatalf("expected one HELP line for project CPU metric: %s", promResponse.Body.String())
+	}
+}
+
+func TestProjectTelemetryHistoryRequiresProjectViewer(t *testing.T) {
+	store := control.NewMemoryStore()
+	server := NewServer(Config{Store: store, Provisioner: fakeProvisioner{}, AuthRequired: true})
+
+	bootstrap := perform(server, http.MethodPost, "/v1/auth/bootstrap", `{"email":"owner@example.com","password":"super-secure"}`)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("bootstrap failed: %d %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	token := extractString(t, bootstrap.Body.String(), "token")
+	orgResponse := performWithToken(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`, token)
+	if orgResponse.Code != http.StatusCreated {
+		t.Fatalf("create org failed: %d %s", orgResponse.Code, orgResponse.Body.String())
+	}
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	projectResponse := performWithToken(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"history-auth","name":"History Auth","domain":"supadupa.test","profile":"full"}`, token)
+	if projectResponse.Code != http.StatusAccepted {
+		t.Fatalf("create project failed: %d %s", projectResponse.Code, projectResponse.Body.String())
+	}
+
+	unauthorized := perform(server, http.MethodGet, "/v1/projects/history-auth/telemetry/history?range=1h", "")
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated history request to be unauthorized, got %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	authorized := performWithToken(server, http.MethodGet, "/v1/projects/history-auth/telemetry/history?range=1h", "", token)
+	if authorized.Code != http.StatusOK || !strings.Contains(authorized.Body.String(), `"project_ref":"history-auth"`) {
+		t.Fatalf("expected authorized history response, got %d: %s", authorized.Code, authorized.Body.String())
 	}
 }
 
@@ -6752,7 +6875,7 @@ func TestProjectLifecycleActions(t *testing.T) {
 	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
 	orgID := extractString(t, orgResponse.Body.String(), "id")
 	enableOrgFeaturesForTest(t, store, orgID, "custom_domains")
-	projectBody := `{"ref":"life-proj","name":"Life","domain":"supadupa.test","profile":"full","resource_tier":"small"}`
+	projectBody := `{"ref":"life-proj","name":"Life","domain":"supadupa.test","stack_version":"15.8.1.060","profile":"full","resource_tier":"small"}`
 	projectResponse := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", projectBody)
 	if projectResponse.Code != http.StatusAccepted {
 		t.Fatalf("expected project status 202, got %d: %s", projectResponse.Code, projectResponse.Body.String())
@@ -6785,8 +6908,8 @@ func TestProjectLifecycleActions(t *testing.T) {
 		t.Fatalf("expected restarted project: %d %s", restartResponse.Code, restartResponse.Body.String())
 	}
 
-	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/life-proj/upgrade", `{"version":"15.8.1.060"}`)
-	if upgradeResponse.Code != http.StatusOK || !strings.Contains(upgradeResponse.Body.String(), `"stack_version":"15.8.1.060"`) {
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/life-proj/upgrade", `{"version":"15.8.1.085"}`)
+	if upgradeResponse.Code != http.StatusOK || !strings.Contains(upgradeResponse.Body.String(), `"stack_version":"15.8.1.085"`) {
 		t.Fatalf("expected upgraded project: %d %s", upgradeResponse.Code, upgradeResponse.Body.String())
 	}
 
@@ -6897,6 +7020,34 @@ func TestProjectUpgradeRejectsUnsupportedStackVersionBeforeBackup(t *testing.T) 
 	}
 	if len(backups) != 0 {
 		t.Fatalf("backup should not run for unsupported version, got %#v", backups)
+	}
+}
+
+func TestProjectUpgradeRejectsDowngradeBeforeBackup(t *testing.T) {
+	backupRoot := t.TempDir()
+	t.Setenv("SUPADUPA_BACKUP_ROOT", backupRoot)
+	store := control.NewMemoryStore()
+	provisioner := &capturingProvisioner{}
+	server := NewServer(Config{Store: store, Provisioner: provisioner})
+	orgResponse := perform(server, http.MethodPost, "/v1/orgs", `{"name":"Platform"}`)
+	orgID := extractString(t, orgResponse.Body.String(), "id")
+	if response := perform(server, http.MethodPost, "/v1/orgs/"+orgID+"/projects", `{"ref":"upgrade-downgrade","name":"Upgrade Downgrade","domain":"supadupa.test","stack_version":"15.8.1.085","profile":"full","resource_tier":"small"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("expected project create 202, got %d: %s", response.Code, response.Body.String())
+	}
+
+	upgradeResponse := perform(server, http.MethodPost, "/v1/projects/upgrade-downgrade/upgrade", `{"version":"15.8.1.060"}`)
+	if upgradeResponse.Code != http.StatusBadRequest || !strings.Contains(upgradeResponse.Body.String(), "not newer") {
+		t.Fatalf("expected downgrade rejection, got %d: %s", upgradeResponse.Code, upgradeResponse.Body.String())
+	}
+	if len(provisioner.upgradeVersions) != 0 {
+		t.Fatalf("provisioner should not run for downgrade, got %#v", provisioner.upgradeVersions)
+	}
+	backups, err := store.ListBackups(context.Background(), "upgrade-downgrade")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("backup should not run for downgrade, got %#v", backups)
 	}
 }
 
@@ -7494,7 +7645,7 @@ func perform(server *http.Server, method string, path string, body string) *http
 // open a database from the UI (master on + per-project opt-in).
 func enableDatabaseExposure(t *testing.T, server *http.Server, ref string, mode string, allowlist string) {
 	t.Helper()
-	master := perform(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.supadupa.test","stack_version":"latest","profile":"full","resource_tier":"small","backup_schedule":"daily","feature_flags":{"database_external_access":true}}`)
+	master := perform(server, http.MethodPut, "/v1/settings/defaults", `{"domain":"apps.supadupa.test","stack_version":"latest","profile":"full","resource_tier":"custom","backup_schedule":"daily","feature_flags":{"database_external_access":true}}`)
 	if master.Code != http.StatusOK {
 		t.Fatalf("enable database external access: %d %s", master.Code, master.Body.String())
 	}
@@ -7675,7 +7826,7 @@ func (fakeProvisioner) Pause(ctx context.Context, ref string) error { return nil
 
 func (fakeProvisioner) Resume(ctx context.Context, ref string) error { return nil }
 
-func (fakeProvisioner) Scale(ctx context.Context, ref string, tier control.ResourceTier) error {
+func (fakeProvisioner) Scale(ctx context.Context, ref string, spec control.ProjectSpec) error {
 	return nil
 }
 

@@ -75,6 +75,7 @@ type memoryStoreSnapshot struct {
 	WALArchives           []WALArchive
 	ProjectLogs           []ProjectLog
 	Telemetry             map[string]TelemetrySample
+	TelemetryHistory      map[string][]TelemetryHistorySample
 	NodeTelemetry         map[string]NodeTelemetrySample
 	AuditEvents           []AuditEvent
 }
@@ -128,6 +129,7 @@ func emptySnapshot() memoryStoreSnapshot {
 		WALArchives:           []WALArchive{},
 		ProjectLogs:           []ProjectLog{},
 		Telemetry:             map[string]TelemetrySample{},
+		TelemetryHistory:      map[string][]TelemetryHistorySample{},
 		NodeTelemetry:         map[string]NodeTelemetrySample{},
 		AuditEvents:           []AuditEvent{},
 	}
@@ -236,6 +238,7 @@ func (s *PersistentStore) applySnapshotLocked(snapshot memoryStoreSnapshot) {
 	s.walArchives = append([]WALArchive(nil), snapshot.WALArchives...)
 	s.projectLogs = append([]ProjectLog(nil), snapshot.ProjectLogs...)
 	s.telemetry = nonNilMap(snapshot.Telemetry)
+	s.telemetryHistory = nonNilSliceMap(snapshot.TelemetryHistory)
 	s.nodeTelemetry = nonNilMap(snapshot.NodeTelemetry)
 	s.auditEvents = append([]AuditEvent(nil), snapshot.AuditEvents...)
 }
@@ -1811,6 +1814,7 @@ func (s *PersistentStore) snapshot() memoryStoreSnapshot {
 		WALArchives:           append([]WALArchive(nil), s.walArchives...),
 		ProjectLogs:           append([]ProjectLog(nil), s.projectLogs...),
 		Telemetry:             cloneMap(s.telemetry),
+		TelemetryHistory:      cloneSliceMap(s.telemetryHistory),
 		NodeTelemetry:         cloneMap(s.nodeTelemetry),
 		AuditEvents:           append([]AuditEvent(nil), s.auditEvents...),
 	}
@@ -2936,6 +2940,11 @@ func (s *PersistentStore) UpdateProjectStackVersion(ctx context.Context, ref str
 
 func (s *PersistentStore) UpdateProjectResourceTier(ctx context.Context, ref string, tier ResourceTier) (Project, error) {
 	project, err := s.MemoryStore.UpdateProjectResourceTier(ctx, ref, tier)
+	return project, s.checkpoint(ctx, err)
+}
+
+func (s *PersistentStore) UpdateProjectResources(ctx context.Context, ref string, input ProjectResourcesInput) (Project, error) {
+	project, err := s.MemoryStore.UpdateProjectResources(ctx, ref, input)
 	return project, s.checkpoint(ctx, err)
 }
 

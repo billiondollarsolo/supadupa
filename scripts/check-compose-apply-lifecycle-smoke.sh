@@ -248,8 +248,19 @@ export SUPADUPA_SECRET_KEY="smoke-secret-key-$suffix-000000000000000000000000"
 export SUPADUPA_AUTH_SECRET="smoke-auth-secret-$suffix-000000000000000000000000"
 export SUPADUPA_ALLOW_DEV_SECRETS=""
 export SUPADUPA_CONTROL_PLANE_USER="10001:10001"
+export SUPADUPA_DOCKER_PROXY_USER="$SUPADUPA_CONTROL_PLANE_USER"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  SUPADUPA_DOCKER_PROXY_USER="0:0"
+fi
 export SUPADUPA_DOCKER_GID
-SUPADUPA_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
+SUPADUPA_DOCKER_GID="0"
+if [[ -S /var/run/docker.sock ]]; then
+  if detected_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null)"; then
+    if [[ "$detected_gid" =~ ^[0-9]+$ ]]; then
+      SUPADUPA_DOCKER_GID="$detected_gid"
+    fi
+  fi
+fi
 export SUPADUPA_API_ADDR="127.0.0.1:$api_port"
 export SUPADUPA_ADMIN_ADDR="127.0.0.1:$admin_port"
 export SUPADUPA_META_DB_ADDR="127.0.0.1:$meta_port"
@@ -260,7 +271,7 @@ export SUPADUPA_CERTS_HOST_DIR="$runtime/certs"
 export SUPADUPA_PROJECT_DOMAIN="apps.example.test"
 export SUPADUPA_APPS_DOMAIN="apps.example.test"
 export SUPADUPA_DEFAULT_PROFILE="essential"
-export SUPADUPA_DEFAULT_RESOURCE_TIER="small"
+export SUPADUPA_DEFAULT_RESOURCE_TIER="custom"
 export SUPADUPA_DEFAULT_STACK_VERSION="15.8.1.060"
 export SUPADUPA_REPLICA_READY_TIMEOUT_SECONDS="${SUPADUPA_REPLICA_READY_TIMEOUT_SECONDS:-240}"
 
@@ -322,7 +333,7 @@ resource "supadupa_project" "lifecycle" {
   domain        = "apps.example.test"
   stack_version = "15.8.1.060"
   profile       = "essential"
-  resource_tier = "small"
+  resource_tier = "custom"
 }
 EOF
 

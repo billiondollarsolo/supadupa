@@ -472,21 +472,27 @@ var defaultPlatformFeatureFlags = map[string]bool{
 	"production_posture": false,
 }
 
-// Bounds for optional exact-size overrides on project creation. These cap what
-// an advanced user can request per dimension; a zero value falls back to the
-// tier preset.
+// Bounds for exact project sizing. A zero value falls back to the recommended
+// size for the selected profile and service set.
 const (
-	maxProjectCPU    = 64     // cores
-	minProjectRAMMB  = 256    // MB
-	maxProjectRAMMB  = 262144 // 256 GB
-	maxProjectDiskGB = 16384  // 16 TB
+	maxProjectCPU                  = 64     // cores
+	minProjectRAMMB                = 256    // MB
+	maxProjectRAMMB                = 262144 // 256 GB
+	maxProjectDiskGB               = 16384  // 16 TB
+	recommendedCPUHeadroomPercent  = 20
+	recommendedRAMHeadroomPercent  = 25
+	recommendedDiskHeadroomPercent = 20
+	recommendedRAMRoundingStepMB   = 256
+	recommendedDiskRoundingStepGB  = 5
+	telemetryHistoryRetention      = 30 * 24 * time.Hour
+	telemetryHistoryRawRetention   = 24 * time.Hour
+	telemetryHistoryRollupStep     = 5 * time.Minute
+	telemetryHistoryMaxPoints      = 1000
+	telemetryMaxFutureSkew         = 5 * time.Minute
 )
 
-// Tier presets are sized for a full-profile Supabase project (Postgres, Kong,
-// Auth, REST, Realtime, Storage, Studio, edge functions, and Logflare
-// analytics). "small" is the realistic floor for the full profile — the BEAM
-// analytics service alone wants ~1 GB — so small starts at 4 GB rather than the
-// 2 GB that can't actually run the full stack.
+// Replica and legacy preset reservations. Main project create/resize flows store
+// exact custom sizing; replica creation still uses tiered placement choices.
 var resourceTierReservations = map[ResourceTier]HostCapacity{
 	ResourceTierSmall:  {CPU: 2, RAMMB: 4096, DiskGB: 40, Project: 1},
 	ResourceTierMedium: {CPU: 4, RAMMB: 8192, DiskGB: 80, Project: 1},
@@ -561,6 +567,7 @@ type Store interface {
 	UpdateProjectStatus(ctx context.Context, ref string, status ProjectPhase, message string) (Project, error)
 	UpdateProjectStackVersion(ctx context.Context, ref string, version string) (Project, error)
 	UpdateProjectResourceTier(ctx context.Context, ref string, tier ResourceTier) (Project, error)
+	UpdateProjectResources(ctx context.Context, ref string, input ProjectResourcesInput) (Project, error)
 	GetProjectServices(ctx context.Context, ref string) (ProjectServices, error)
 	UpdateProjectServices(ctx context.Context, ref string, input ProjectServicesInput) (Project, error)
 	DeleteProject(ctx context.Context, ref string) error
@@ -668,6 +675,7 @@ type Store interface {
 	VerifyAuditLog(ctx context.Context) (AuditIntegrity, error)
 	GetFleetMetrics(ctx context.Context) (FleetMetrics, error)
 	GetProjectMetrics(ctx context.Context, ref string) (ProjectMetrics, error)
+	GetProjectTelemetryHistory(ctx context.Context, ref string, query TelemetryHistoryQuery) (ProjectTelemetryHistory, error)
 	RecordProjectTelemetry(ctx context.Context, ref string, input TelemetrySampleInput) (TelemetrySample, error)
 	RecordNodeTelemetry(ctx context.Context, hostID string, input NodeTelemetrySampleInput) (NodeTelemetrySample, error)
 }
@@ -960,6 +968,63 @@ type TelemetrySampleInput struct {
 	SampledAt        time.Time
 }
 
+type TelemetryHistoryQuery struct {
+	From  time.Time
+	To    time.Time
+	Step  time.Duration
+	Limit int
+}
+
+type ProjectTelemetryHistory struct {
+	ProjectRef          string                         `json:"project_ref"`
+	From                time.Time                      `json:"from"`
+	To                  time.Time                      `json:"to"`
+	StepSeconds         int                            `json:"step_seconds"`
+	RetentionSeconds    int                            `json:"retention_seconds"`
+	RawRetentionSeconds int                            `json:"raw_retention_seconds"`
+	LatestSampledAt     time.Time                      `json:"latest_sampled_at,omitempty"`
+	Points              []ProjectTelemetryHistoryPoint `json:"points"`
+}
+
+type ProjectTelemetryHistoryPoint struct {
+	SampledAt                time.Time `json:"sampled_at"`
+	Source                   string    `json:"source"`
+	Samples                  int       `json:"samples"`
+	CPUPercent               float64   `json:"cpu_percent"`
+	CPUReservationPercent    float64   `json:"cpu_reservation_percent"`
+	MemoryBytes              int64     `json:"memory_bytes"`
+	MemoryLimitBytes         int64     `json:"memory_limit_bytes"`
+	MemoryReservationPercent float64   `json:"memory_reservation_percent"`
+	DiskUsedBytes            int64     `json:"disk_used_bytes"`
+	DiskLimitBytes           int64     `json:"disk_limit_bytes"`
+	DiskReservationPercent   float64   `json:"disk_reservation_percent"`
+	NetworkRxBytes           int64     `json:"network_rx_bytes"`
+	NetworkTxBytes           int64     `json:"network_tx_bytes"`
+	ReservedCPU              int       `json:"reserved_cpu"`
+	ReservedRAMMB            int       `json:"reserved_ram_mb"`
+	ReservedDiskGB           int       `json:"reserved_disk_gb"`
+}
+
+type TelemetryHistorySample struct {
+	ProjectRef               string
+	Source                   string
+	Samples                  int
+	CPUPercent               float64
+	CPUReservationPercent    float64
+	MemoryBytes              int64
+	MemoryLimitBytes         int64
+	MemoryReservationPercent float64
+	DiskUsedBytes            int64
+	DiskLimitBytes           int64
+	DiskReservationPercent   float64
+	NetworkRxBytes           int64
+	NetworkTxBytes           int64
+	ReservedCPU              int
+	ReservedRAMMB            int
+	ReservedDiskGB           int
+	SampledAt                time.Time
+}
+
 type TelemetryRollup struct {
 	ProjectsSampled   int       `json:"projects_sampled"`
 	CPUPercent        float64   `json:"cpu_percent"`
@@ -1123,6 +1188,13 @@ type CreateProjectRequest struct {
 	EnforceLimits bool              `json:"enforce_limits,omitempty"`
 	Services      map[string]bool   `json:"services"`
 	Environment   map[string]string `json:"environment"`
+}
+
+type ProjectResourcesInput struct {
+	CPU           int  `json:"cpu"`
+	RAMMB         int  `json:"ram_mb"`
+	DiskGB        int  `json:"disk_gb"`
+	EnforceLimits bool `json:"enforce_limits"`
 }
 
 type ProjectServices struct {
@@ -2230,6 +2302,7 @@ type MemoryStore struct {
 	walArchives           []WALArchive
 	projectLogs           []ProjectLog
 	telemetry             map[string]TelemetrySample
+	telemetryHistory      map[string][]TelemetryHistorySample
 	nodeTelemetry         map[string]NodeTelemetrySample
 	auditEvents           []AuditEvent
 }
@@ -2280,6 +2353,7 @@ func NewMemoryStore() *MemoryStore {
 		pitrPolicies:          map[string]PITRPolicy{},
 		platformBackups:       []PlatformBackup{},
 		telemetry:             map[string]TelemetrySample{},
+		telemetryHistory:      map[string][]TelemetryHistorySample{},
 		nodeTelemetry:         map[string]NodeTelemetrySample{},
 	}
 }
@@ -2573,7 +2647,6 @@ func (s *MemoryStore) BeginUserMFAEnrollment(ctx context.Context, userID string)
 	}
 	user.MFAPendingSecret = secret
 	user.MFAUpdatedAt = time.Now().UTC()
-	user.TokenVersion = nextTokenVersion(user.TokenVersion)
 	s.users[user.Email] = user
 
 	return MFAEnrollment{
@@ -3742,7 +3815,20 @@ func (s *MemoryStore) createProjectRequestWithDefaults(req CreateProjectRequest)
 		req.Profile = defaults.Profile
 	}
 	if req.ResourceTier == "" {
-		req.ResourceTier = defaults.ResourceTier
+		req.ResourceTier = ResourceTierCustom
+	}
+	if req.ResourceTier == ResourceTierCustom {
+		spec := req.toSpec()
+		recommended := recommendedReservationForSpec(spec)
+		if req.CPU == 0 {
+			req.CPU = recommended.CPU
+		}
+		if req.RAMMB == 0 {
+			req.RAMMB = recommended.RAMMB
+		}
+		if req.DiskGB == 0 {
+			req.DiskGB = recommended.DiskGB
+		}
 	}
 	return req
 }
@@ -3895,7 +3981,7 @@ func (s *MemoryStore) DeleteProjectBranch(ctx context.Context, sourceRef string,
 func (s *MemoryStore) CreateProjectReplica(ctx context.Context, ref string, input ProjectReplicaInput) (ProjectReplica, error) {
 	ref = strings.ToLower(strings.TrimSpace(ref))
 	name := strings.ToLower(strings.TrimSpace(input.Name))
-	tier := input.Tier
+	tier := ResourceTier(strings.TrimSpace(string(input.Tier)))
 	region := strings.TrimSpace(input.Region)
 	hostID := strings.TrimSpace(input.HostID)
 	readWeight := input.ReadWeight
@@ -3910,7 +3996,10 @@ func (s *MemoryStore) CreateProjectReplica(ctx context.Context, ref string, inpu
 		return ProjectReplica{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
 	if tier == "" {
-		tier = project.Spec.ResourceTier
+		tier = defaultReplicaTierForProject(project.Spec)
+	}
+	if err := validateReplicaResourceTier(tier); err != nil {
+		return ProjectReplica{}, err
 	}
 	if name == "" {
 		name = fmt.Sprintf("replica-%d", len(s.replicas[ref])+1)
@@ -4282,6 +4371,62 @@ func (s *MemoryStore) UpdateProjectResourceTier(ctx context.Context, ref string,
 	project.Spec.RAMMB = 0
 	project.Spec.DiskGB = 0
 	project.Message = "resource tier updated"
+	project.UpdatedAt = time.Now().UTC()
+	s.projects[ref] = project
+	return project, nil
+}
+
+func (s *MemoryStore) UpdateProjectResources(ctx context.Context, ref string, input ProjectResourcesInput) (Project, error) {
+	if input.CPU < 1 {
+		return Project{}, fmt.Errorf("cpu must be at least 1 core")
+	}
+	if input.RAMMB < minProjectRAMMB {
+		return Project{}, fmt.Errorf("ram cannot be below %d MB", minProjectRAMMB)
+	}
+	if input.DiskGB < 1 {
+		return Project{}, fmt.Errorf("disk must be at least 1 GB")
+	}
+	if err := validateResourceSizing(input.CPU, input.RAMMB, input.DiskGB); err != nil {
+		return Project{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	project, ok := s.projects[ref]
+	if !ok {
+		return Project{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+	oldReservation := resourceReservationForSpec(project.Spec)
+	nextSpec := project.Spec
+	nextSpec.ResourceTier = ResourceTierCustom
+	nextSpec.CPU = input.CPU
+	nextSpec.RAMMB = input.RAMMB
+	nextSpec.DiskGB = input.DiskGB
+	nextSpec.EnforceLimits = input.EnforceLimits
+	if err := validateEnforcedResourceMinimum(nextSpec); err != nil {
+		return Project{}, err
+	}
+	newReservation := resourceReservationForSpec(nextSpec)
+	if err := s.validateProjectScaleQuotaLocked(project.OrgID, oldReservation, newReservation); err != nil {
+		return Project{}, err
+	}
+	if project.Spec.HostID != "" {
+		host, ok := s.hosts[project.Spec.HostID]
+		if !ok {
+			return Project{}, fmt.Errorf("%w: host %s", ErrNotFound, project.Spec.HostID)
+		}
+		nextUsed := addHostCapacity(subtractHostCapacity(host.Used, oldReservation), newReservation)
+		if !capacityWithinLimit(nextUsed.CPU, host.Capacity.CPU) ||
+			!capacityWithinLimit(nextUsed.RAMMB, host.Capacity.RAMMB) ||
+			!capacityWithinLimit(nextUsed.DiskGB, host.Capacity.DiskGB) ||
+			!capacityWithinLimit(nextUsed.Project, host.Capacity.Project) {
+			return Project{}, fmt.Errorf("%w: host %s has insufficient capacity for requested resources", ErrConflict, project.Spec.HostID)
+		}
+		host.Used = nextUsed
+		s.hosts[host.ID] = host
+	}
+	project.Spec = nextSpec
+	project.Message = "resource sizing updated"
 	project.UpdatedAt = time.Now().UTC()
 	s.projects[ref] = project
 	return project, nil
@@ -6936,9 +7081,13 @@ func (s *MemoryStore) RecordProjectTelemetry(ctx context.Context, ref string, in
 	if input.MemoryBytes < 0 || input.MemoryLimitBytes < 0 || input.DiskUsedBytes < 0 || input.DiskLimitBytes < 0 || input.NetworkRxBytes < 0 || input.NetworkTxBytes < 0 {
 		return TelemetrySample{}, fmt.Errorf("telemetry counters cannot be negative")
 	}
+	now := time.Now().UTC()
 	sampledAt := input.SampledAt.UTC()
 	if sampledAt.IsZero() {
-		sampledAt = time.Now().UTC()
+		sampledAt = now
+	}
+	if sampledAt.After(now.Add(telemetryMaxFutureSkew)) {
+		return TelemetrySample{}, fmt.Errorf("project telemetry sampled_at cannot be more than %s in the future", telemetryMaxFutureSkew)
 	}
 	sample := TelemetrySample{
 		ProjectRef:       ref,
@@ -6955,10 +7104,17 @@ func (s *MemoryStore) RecordProjectTelemetry(ctx context.Context, ref string, in
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.projects[ref]; !ok {
+	project, ok := s.projects[ref]
+	if !ok {
 		return TelemetrySample{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
 	}
 	s.telemetry[ref] = sample
+	if s.telemetryHistory == nil {
+		s.telemetryHistory = map[string][]TelemetryHistorySample{}
+	}
+	reservation := resourceReservationForSpec(project.Spec)
+	s.telemetryHistory[ref] = append(s.telemetryHistory[ref], telemetryHistorySampleFromTelemetry(sample, reservation))
+	s.telemetryHistory[ref] = compactTelemetryHistory(s.telemetryHistory[ref], now)
 	return sample, nil
 }
 
@@ -7126,6 +7282,46 @@ func (s *MemoryStore) GetProjectMetrics(ctx context.Context, ref string) (Projec
 	return metrics, nil
 }
 
+func (s *MemoryStore) GetProjectTelemetryHistory(ctx context.Context, ref string, query TelemetryHistoryQuery) (ProjectTelemetryHistory, error) {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	now := time.Now().UTC()
+	normalized := normalizeTelemetryHistoryQuery(query, now)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.projects[ref]; !ok {
+		return ProjectTelemetryHistory{}, fmt.Errorf("%w: project %s", ErrNotFound, ref)
+	}
+
+	samples := append([]TelemetryHistorySample(nil), s.telemetryHistory[ref]...)
+	if len(samples) == 0 {
+		if latest, ok := s.telemetry[ref]; ok {
+			sampledAt := latest.SampledAt.UTC()
+			if !sampledAt.Before(now.Add(-telemetryHistoryRetention)) && !sampledAt.After(now.Add(telemetryMaxFutureSkew)) {
+				reservation := resourceReservationForSpec(s.projects[ref].Spec)
+				samples = append(samples, telemetryHistorySampleFromTelemetry(latest, reservation))
+			}
+		}
+	}
+	points := telemetryHistoryPoints(samples, normalized)
+	latestSampledAt := time.Time{}
+	for _, sample := range samples {
+		if latestSampledAt.IsZero() || sample.SampledAt.After(latestSampledAt) {
+			latestSampledAt = sample.SampledAt
+		}
+	}
+	return ProjectTelemetryHistory{
+		ProjectRef:          ref,
+		From:                normalized.From,
+		To:                  normalized.To,
+		StepSeconds:         int(normalized.Step.Seconds()),
+		RetentionSeconds:    int(telemetryHistoryRetention.Seconds()),
+		RawRetentionSeconds: int(telemetryHistoryRawRetention.Seconds()),
+		LatestSampledAt:     latestSampledAt,
+		Points:              points,
+	}, nil
+}
+
 type auditContextKey struct{}
 
 type auditContextValue struct {
@@ -7227,12 +7423,15 @@ func validateCreateProject(req CreateProjectRequest) error {
 	if _, err := normalizeProjectServices(req.Services); err != nil {
 		return err
 	}
+	if err := validateEnforcedResourceMinimum(req.toSpec()); err != nil {
+		return err
+	}
 	return nil
 }
 
 // validateResourceSizing bounds optional exact-size overrides. A zero value
-// means "use the tier preset" and is always valid; non-zero values must fall
-// within sane platform limits.
+// means "use the recommended size" and is always valid; non-zero values must
+// fall within sane platform limits.
 func validateResourceSizing(cpu, ramMB, diskGB int) error {
 	if cpu < 0 || ramMB < 0 || diskGB < 0 {
 		return fmt.Errorf("resource sizing cannot be negative")
@@ -7248,6 +7447,18 @@ func validateResourceSizing(cpu, ramMB, diskGB int) error {
 	}
 	if diskGB > maxProjectDiskGB {
 		return fmt.Errorf("disk cannot exceed %d GB", maxProjectDiskGB)
+	}
+	return nil
+}
+
+func validateEnforcedResourceMinimum(spec ProjectSpec) error {
+	if !spec.EnforceLimits {
+		return nil
+	}
+	reservation := resourceReservationForSpec(spec)
+	minimum := minimumReservationForSpec(spec)
+	if reservation.CPU < minimum.CPU || reservation.RAMMB < minimum.RAMMB || reservation.DiskGB < minimum.DiskGB {
+		return fmt.Errorf("enforced limits cannot be below the selected stack minimum (%d CPU, %d MB RAM, %d GB disk)", minimum.CPU, minimum.RAMMB, minimum.DiskGB)
 	}
 	return nil
 }
@@ -7680,12 +7891,139 @@ func resourceReservationForTier(tier ResourceTier) HostCapacity {
 	return reservation
 }
 
-// resourceReservationForSpec starts from the project's tier preset and applies
-// any exact per-dimension overrides (CPU cores / RAM MB / disk GB) carried on
-// the spec. A zero override means "use the preset", so presets and exact sizing
-// compose cleanly.
+func defaultReplicaTierForProject(spec ProjectSpec) ResourceTier {
+	if isReplicaResourceTier(spec.ResourceTier) {
+		return spec.ResourceTier
+	}
+	return ResourceTierSmall
+}
+
+func validateReplicaResourceTier(tier ResourceTier) error {
+	if isReplicaResourceTier(tier) {
+		return nil
+	}
+	return fmt.Errorf("unsupported replica resource tier %q; replicas support small, medium, or large", tier)
+}
+
+func isReplicaResourceTier(tier ResourceTier) bool {
+	_, ok := resourceTierReservations[tier]
+	return ok
+}
+
+func minimumReservationForSpec(spec ProjectSpec) HostCapacity {
+	states := ProjectServiceStates(spec.Services)
+	if len(spec.Services) == 0 {
+		states = DefaultProjectServiceStates()
+	}
+	ramMB := 2048
+	cpuUnits := 100
+	diskGB := 20
+	if states["auth"] {
+		ramMB += 256
+		cpuUnits += 20
+	}
+	if states["rest"] {
+		ramMB += 256
+		cpuUnits += 20
+	}
+	if states["realtime"] {
+		ramMB += 512
+		cpuUnits += 30
+	}
+	if states["storage"] {
+		ramMB += 512
+		cpuUnits += 30
+		diskGB += 20
+	}
+	if states["imgproxy"] {
+		ramMB += 256
+		cpuUnits += 20
+	}
+	if states["functions"] {
+		ramMB += 512
+		cpuUnits += 20
+	}
+	if states["pooler"] {
+		ramMB += 256
+		cpuUnits += 10
+	}
+	if states["studio"] {
+		ramMB += 512
+		cpuUnits += 10
+	}
+	if states["analytics"] {
+		ramMB += 1024
+		cpuUnits += 30
+		diskGB += 10
+	}
+	if states["vector"] {
+		ramMB += 256
+		cpuUnits += 10
+	}
+	if states["graphql"] {
+		ramMB += 128
+		cpuUnits += 10
+	}
+	if spec.Profile == StackProfileOrioleDB {
+		ramMB += 1024
+		cpuUnits += 50
+		diskGB += 20
+	}
+	cpu := (cpuUnits + 99) / 100
+	if cpu < 1 {
+		cpu = 1
+	}
+	if ramMB%512 != 0 {
+		ramMB = ((ramMB / 512) + 1) * 512
+	}
+	if diskGB < 20 {
+		diskGB = 20
+	}
+	return HostCapacity{CPU: cpu, RAMMB: ramMB, DiskGB: diskGB, Project: 1}
+}
+
+func recommendedReservationForSpec(spec ProjectSpec) HostCapacity {
+	minimum := minimumReservationForSpec(spec)
+	return HostCapacity{
+		CPU:     clampInt(addPercentRoundUp(minimum.CPU, recommendedCPUHeadroomPercent), 1, maxProjectCPU),
+		RAMMB:   clampInt(roundUpInt(addPercentRoundUp(minimum.RAMMB, recommendedRAMHeadroomPercent), recommendedRAMRoundingStepMB), minProjectRAMMB, maxProjectRAMMB),
+		DiskGB:  clampInt(roundUpInt(addPercentRoundUp(minimum.DiskGB, recommendedDiskHeadroomPercent), recommendedDiskRoundingStepGB), 1, maxProjectDiskGB),
+		Project: minimum.Project,
+	}
+}
+
+func addPercentRoundUp(value int, percent int) int {
+	if value <= 0 {
+		return 0
+	}
+	return (value*(100+percent) + 99) / 100
+}
+
+func roundUpInt(value int, step int) int {
+	if value <= 0 || step <= 1 {
+		return value
+	}
+	return ((value + step - 1) / step) * step
+}
+
+func clampInt(value int, min int, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+// resourceReservationForSpec resolves the capacity actually reserved for a
+// project. New projects carry exact custom sizing. Historical tier values are
+// still understood as internal aliases.
 func resourceReservationForSpec(spec ProjectSpec) HostCapacity {
 	reservation := resourceReservationForTier(spec.ResourceTier)
+	if spec.ResourceTier == ResourceTierCustom {
+		reservation = recommendedReservationForSpec(spec)
+	}
 	if spec.CPU > 0 {
 		reservation.CPU = spec.CPU
 	}
@@ -7699,12 +8037,140 @@ func resourceReservationForSpec(spec ProjectSpec) HostCapacity {
 }
 
 // EffectiveResourceSizing resolves the CPU cores, RAM (MB), and disk (GB) for a
-// spec by combining its tier preset with any exact per-dimension overrides. It
-// is the single source of truth shared by capacity accounting and the
+// spec. It is the single source of truth shared by capacity accounting and the
 // provisioner's optional runtime-limit enforcement.
 func EffectiveResourceSizing(spec ProjectSpec) (cpu int, ramMB int, diskGB int) {
 	reservation := resourceReservationForSpec(spec)
 	return reservation.CPU, reservation.RAMMB, reservation.DiskGB
+}
+
+type projectServiceResourceWeight struct {
+	name      string
+	cpuWeight int
+	ramWeight int
+}
+
+// ProjectServiceResourceAllocations splits an enforced project CPU/RAM budget
+// across every runtime service that has its own container. The allocation is
+// per-container, because Docker Compose and Kubernetes limits are container
+// scoped rather than aggregate project-scoped. GraphQL is intentionally absent:
+// it is a Postgres extension in this stack, not a separate workload.
+func ProjectServiceResourceAllocations(spec ProjectSpec) map[string]ProjectServiceResourceAllocation {
+	if !spec.EnforceLimits {
+		return map[string]ProjectServiceResourceAllocation{}
+	}
+	cpu, ramMB, _ := EffectiveResourceSizing(spec)
+	if cpu <= 0 || ramMB <= 0 {
+		return map[string]ProjectServiceResourceAllocation{}
+	}
+	services := projectServiceResourceWeights(spec)
+	cpuParts := distributeWeightedInt(cpu*1000, services, func(service projectServiceResourceWeight) int {
+		return service.cpuWeight
+	})
+	ramParts := distributeWeightedInt(ramMB, services, func(service projectServiceResourceWeight) int {
+		return service.ramWeight
+	})
+	out := make(map[string]ProjectServiceResourceAllocation, len(services))
+	for _, service := range services {
+		out[service.name] = ProjectServiceResourceAllocation{
+			CPUMilli: cpuParts[service.name],
+			RAMMB:    ramParts[service.name],
+		}
+	}
+	return out
+}
+
+func projectServiceResourceWeights(spec ProjectSpec) []projectServiceResourceWeight {
+	states := ProjectServiceStates(spec.Services)
+	services := []projectServiceResourceWeight{
+		{name: "db", cpuWeight: 100, ramWeight: 2048},
+		{name: "kong", cpuWeight: 40, ramWeight: 768},
+		{name: "meta", cpuWeight: 15, ramWeight: 256},
+	}
+	if states["auth"] {
+		services = append(services, projectServiceResourceWeight{name: "auth", cpuWeight: 20, ramWeight: 256})
+	}
+	if states["rest"] {
+		services = append(services, projectServiceResourceWeight{name: "rest", cpuWeight: 20, ramWeight: 256})
+	}
+	if states["realtime"] {
+		services = append(services, projectServiceResourceWeight{name: "realtime", cpuWeight: 30, ramWeight: 512})
+	}
+	if states["storage"] {
+		services = append(services, projectServiceResourceWeight{name: "storage", cpuWeight: 30, ramWeight: 512})
+	}
+	if states["imgproxy"] {
+		services = append(services, projectServiceResourceWeight{name: "imgproxy", cpuWeight: 20, ramWeight: 256})
+	}
+	if states["functions"] {
+		services = append(services, projectServiceResourceWeight{name: "functions", cpuWeight: 20, ramWeight: 512})
+	}
+	if states["pooler"] {
+		services = append(services, projectServiceResourceWeight{name: "pooler", cpuWeight: 10, ramWeight: 256})
+	}
+	if states["studio"] {
+		services = append(services, projectServiceResourceWeight{name: "studio", cpuWeight: 10, ramWeight: 512})
+	}
+	if states["analytics"] {
+		services = append(services, projectServiceResourceWeight{name: "analytics", cpuWeight: 30, ramWeight: 1024})
+	}
+	if states["vector"] {
+		services = append(services, projectServiceResourceWeight{name: "vector", cpuWeight: 10, ramWeight: 256})
+	}
+	return services
+}
+
+type weightedIntRemainder struct {
+	name      string
+	remainder int
+	index     int
+}
+
+func distributeWeightedInt(total int, services []projectServiceResourceWeight, weight func(projectServiceResourceWeight) int) map[string]int {
+	out := make(map[string]int, len(services))
+	if total <= 0 || len(services) == 0 {
+		return out
+	}
+	totalWeight := 0
+	for _, service := range services {
+		if value := weight(service); value > 0 {
+			totalWeight += value
+		}
+	}
+	if totalWeight <= 0 {
+		share := total / len(services)
+		remainder := total % len(services)
+		for index, service := range services {
+			out[service.name] = share
+			if index < remainder {
+				out[service.name]++
+			}
+		}
+		return out
+	}
+	allocated := 0
+	remainders := make([]weightedIntRemainder, 0, len(services))
+	for index, service := range services {
+		value := weight(service)
+		if value <= 0 {
+			continue
+		}
+		raw := total * value
+		base := raw / totalWeight
+		out[service.name] = base
+		allocated += base
+		remainders = append(remainders, weightedIntRemainder{name: service.name, remainder: raw % totalWeight, index: index})
+	}
+	sort.SliceStable(remainders, func(i, j int) bool {
+		if remainders[i].remainder != remainders[j].remainder {
+			return remainders[i].remainder > remainders[j].remainder
+		}
+		return remainders[i].index < remainders[j].index
+	})
+	for index := 0; index < total-allocated && index < len(remainders); index++ {
+		out[remainders[index].name]++
+	}
+	return out
 }
 
 func replicaReservationForTier(tier ResourceTier) HostCapacity {
@@ -7981,6 +8447,275 @@ func subtractHostCapacity(left HostCapacity, right HostCapacity) HostCapacity {
 		DiskGB:  maxInt(0, left.DiskGB-right.DiskGB),
 		Project: maxInt(0, left.Project-right.Project),
 	}
+}
+
+func telemetryHistorySampleFromTelemetry(sample TelemetrySample, reservation HostCapacity) TelemetryHistorySample {
+	return TelemetryHistorySample{
+		ProjectRef:               sample.ProjectRef,
+		Source:                   sample.Source,
+		Samples:                  1,
+		CPUPercent:               sample.CPUPercent,
+		CPUReservationPercent:    cpuReservationPercent(sample.CPUPercent, reservation.CPU),
+		MemoryBytes:              sample.MemoryBytes,
+		MemoryLimitBytes:         sample.MemoryLimitBytes,
+		MemoryReservationPercent: byteReservationPercent(sample.MemoryBytes, int64(reservation.RAMMB)*1024*1024),
+		DiskUsedBytes:            sample.DiskUsedBytes,
+		DiskLimitBytes:           sample.DiskLimitBytes,
+		DiskReservationPercent:   byteReservationPercent(sample.DiskUsedBytes, int64(reservation.DiskGB)*1024*1024*1024),
+		NetworkRxBytes:           sample.NetworkRxBytes,
+		NetworkTxBytes:           sample.NetworkTxBytes,
+		ReservedCPU:              reservation.CPU,
+		ReservedRAMMB:            reservation.RAMMB,
+		ReservedDiskGB:           reservation.DiskGB,
+		SampledAt:                sample.SampledAt.UTC(),
+	}
+}
+
+func compactTelemetryHistory(samples []TelemetryHistorySample, now time.Time) []TelemetryHistorySample {
+	if len(samples) == 0 {
+		return nil
+	}
+	now = now.UTC()
+	keepAfter := now.Add(-telemetryHistoryRetention)
+	rawAfter := now.Add(-telemetryHistoryRawRetention)
+	raw := make([]TelemetryHistorySample, 0, len(samples))
+	rollups := map[time.Time]*telemetryHistoryAccumulator{}
+	for _, sample := range samples {
+		if sample.Samples <= 0 {
+			sample.Samples = 1
+		}
+		sample.SampledAt = sample.SampledAt.UTC()
+		if sample.SampledAt.Before(keepAfter) {
+			continue
+		}
+		if !sample.SampledAt.Before(rawAfter) {
+			raw = append(raw, sample)
+			continue
+		}
+		bucket := sample.SampledAt.Truncate(telemetryHistoryRollupStep)
+		acc := rollups[bucket]
+		if acc == nil {
+			acc = &telemetryHistoryAccumulator{sampledAt: bucket}
+			rollups[bucket] = acc
+		}
+		acc.add(sample)
+	}
+
+	out := make([]TelemetryHistorySample, 0, len(raw)+len(rollups))
+	for _, acc := range rollups {
+		out = append(out, acc.point())
+	}
+	out = append(out, raw...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SampledAt.Before(out[j].SampledAt)
+	})
+	return out
+}
+
+func normalizeTelemetryHistoryQuery(query TelemetryHistoryQuery, now time.Time) TelemetryHistoryQuery {
+	now = now.UTC()
+	to := query.To.UTC()
+	if to.IsZero() || to.After(now) {
+		to = now
+	}
+	from := query.From.UTC()
+	if from.IsZero() {
+		from = to.Add(-1 * time.Hour)
+	}
+	minFrom := to.Add(-telemetryHistoryRetention)
+	if from.Before(minFrom) {
+		from = minFrom
+	}
+	if !from.Before(to) {
+		from = to.Add(-1 * time.Hour)
+	}
+	if from.Before(minFrom) {
+		from = minFrom
+	}
+	step := query.Step
+	if step <= 0 {
+		step = telemetryHistoryDefaultStep(to.Sub(from))
+	}
+	if step < 15*time.Second {
+		step = 15 * time.Second
+	}
+	if step > 24*time.Hour {
+		step = 24 * time.Hour
+	}
+	limit := query.Limit
+	if limit <= 0 || limit > telemetryHistoryMaxPoints {
+		limit = telemetryHistoryMaxPoints
+	}
+	return TelemetryHistoryQuery{From: from, To: to, Step: step, Limit: limit}
+}
+
+func telemetryHistoryDefaultStep(window time.Duration) time.Duration {
+	switch {
+	case window <= time.Hour:
+		return 15 * time.Second
+	case window <= 6*time.Hour:
+		return time.Minute
+	case window <= 24*time.Hour:
+		return 5 * time.Minute
+	case window <= 7*24*time.Hour:
+		return 30 * time.Minute
+	default:
+		return 2 * time.Hour
+	}
+}
+
+func telemetryHistoryPoints(samples []TelemetryHistorySample, query TelemetryHistoryQuery) []ProjectTelemetryHistoryPoint {
+	if len(samples) == 0 {
+		return []ProjectTelemetryHistoryPoint{}
+	}
+	buckets := map[time.Time]*telemetryHistoryAccumulator{}
+	for _, sample := range samples {
+		if sample.SampledAt.Before(query.From) || sample.SampledAt.After(query.To) {
+			continue
+		}
+		bucket := sample.SampledAt.Truncate(query.Step)
+		if bucket.Before(query.From) {
+			bucket = query.From
+		}
+		acc := buckets[bucket]
+		if acc == nil {
+			acc = &telemetryHistoryAccumulator{sampledAt: bucket}
+			buckets[bucket] = acc
+		}
+		acc.add(sample)
+	}
+	points := make([]ProjectTelemetryHistoryPoint, 0, len(buckets))
+	for _, acc := range buckets {
+		point := acc.historyPoint()
+		points = append(points, point)
+	}
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].SampledAt.Before(points[j].SampledAt)
+	})
+	if query.Limit > 0 && len(points) > query.Limit {
+		points = points[len(points)-query.Limit:]
+	}
+	return points
+}
+
+type telemetryHistoryAccumulator struct {
+	sampledAt                time.Time
+	projectRef               string
+	source                   string
+	samples                  int
+	cpuPercent               float64
+	cpuReservationPercent    float64
+	memoryBytes              float64
+	memoryLimitBytes         float64
+	memoryReservationPercent float64
+	diskUsedBytes            float64
+	diskLimitBytes           float64
+	diskReservationPercent   float64
+	networkRxBytes           float64
+	networkTxBytes           float64
+	reservedCPU              float64
+	reservedRAMMB            float64
+	reservedDiskGB           float64
+}
+
+func (a *telemetryHistoryAccumulator) add(sample TelemetryHistorySample) {
+	weight := sample.Samples
+	if weight <= 0 {
+		weight = 1
+	}
+	if a.projectRef == "" {
+		a.projectRef = sample.ProjectRef
+	}
+	if a.source == "" {
+		a.source = sample.Source
+	} else if sample.Source != "" && a.source != sample.Source {
+		a.source = "mixed"
+	}
+	if a.sampledAt.IsZero() {
+		a.sampledAt = sample.SampledAt
+	}
+	w := float64(weight)
+	a.samples += weight
+	a.cpuPercent += sample.CPUPercent * w
+	a.cpuReservationPercent += sample.CPUReservationPercent * w
+	a.memoryBytes += float64(sample.MemoryBytes) * w
+	a.memoryLimitBytes += float64(sample.MemoryLimitBytes) * w
+	a.memoryReservationPercent += sample.MemoryReservationPercent * w
+	a.diskUsedBytes += float64(sample.DiskUsedBytes) * w
+	a.diskLimitBytes += float64(sample.DiskLimitBytes) * w
+	a.diskReservationPercent += sample.DiskReservationPercent * w
+	a.networkRxBytes += float64(sample.NetworkRxBytes) * w
+	a.networkTxBytes += float64(sample.NetworkTxBytes) * w
+	a.reservedCPU += float64(sample.ReservedCPU) * w
+	a.reservedRAMMB += float64(sample.ReservedRAMMB) * w
+	a.reservedDiskGB += float64(sample.ReservedDiskGB) * w
+}
+
+func (a telemetryHistoryAccumulator) point() TelemetryHistorySample {
+	samples := maxInt(1, a.samples)
+	return TelemetryHistorySample{
+		ProjectRef:               a.projectRef,
+		Source:                   a.source,
+		Samples:                  samples,
+		CPUPercent:               a.avg(a.cpuPercent),
+		CPUReservationPercent:    a.avg(a.cpuReservationPercent),
+		MemoryBytes:              int64(a.avg(a.memoryBytes)),
+		MemoryLimitBytes:         int64(a.avg(a.memoryLimitBytes)),
+		MemoryReservationPercent: a.avg(a.memoryReservationPercent),
+		DiskUsedBytes:            int64(a.avg(a.diskUsedBytes)),
+		DiskLimitBytes:           int64(a.avg(a.diskLimitBytes)),
+		DiskReservationPercent:   a.avg(a.diskReservationPercent),
+		NetworkRxBytes:           int64(a.avg(a.networkRxBytes)),
+		NetworkTxBytes:           int64(a.avg(a.networkTxBytes)),
+		ReservedCPU:              int(a.avg(a.reservedCPU)),
+		ReservedRAMMB:            int(a.avg(a.reservedRAMMB)),
+		ReservedDiskGB:           int(a.avg(a.reservedDiskGB)),
+		SampledAt:                a.sampledAt,
+	}
+}
+
+func (a telemetryHistoryAccumulator) historyPoint() ProjectTelemetryHistoryPoint {
+	sample := a.point()
+	return ProjectTelemetryHistoryPoint{
+		SampledAt:                sample.SampledAt,
+		Source:                   sample.Source,
+		Samples:                  sample.Samples,
+		CPUPercent:               sample.CPUPercent,
+		CPUReservationPercent:    sample.CPUReservationPercent,
+		MemoryBytes:              sample.MemoryBytes,
+		MemoryLimitBytes:         sample.MemoryLimitBytes,
+		MemoryReservationPercent: sample.MemoryReservationPercent,
+		DiskUsedBytes:            sample.DiskUsedBytes,
+		DiskLimitBytes:           sample.DiskLimitBytes,
+		DiskReservationPercent:   sample.DiskReservationPercent,
+		NetworkRxBytes:           sample.NetworkRxBytes,
+		NetworkTxBytes:           sample.NetworkTxBytes,
+		ReservedCPU:              sample.ReservedCPU,
+		ReservedRAMMB:            sample.ReservedRAMMB,
+		ReservedDiskGB:           sample.ReservedDiskGB,
+	}
+}
+
+func (a telemetryHistoryAccumulator) avg(value float64) float64 {
+	if a.samples <= 0 {
+		return 0
+	}
+	return value / float64(a.samples)
+}
+
+func cpuReservationPercent(cpuPercent float64, reservedCPU int) float64 {
+	if reservedCPU <= 0 {
+		return 0
+	}
+	usedCores := cpuPercent / 100
+	return (usedCores / float64(reservedCPU)) * 100
+}
+
+func byteReservationPercent(used int64, reserved int64) float64 {
+	if reserved <= 0 {
+		return 0
+	}
+	return (float64(used) / float64(reserved)) * 100
 }
 
 func telemetryRollup(projects map[string]Project, samples map[string]TelemetrySample, now time.Time) TelemetryRollup {
@@ -10123,7 +10858,7 @@ func defaultPlatformDefaults() PlatformDefaults {
 		Domain:                      "supadupa.test",
 		StackVersion:                "latest",
 		Profile:                     StackProfileFull,
-		ResourceTier:                ResourceTierSmall,
+		ResourceTier:                ResourceTierCustom,
 		BackupSchedule:              "daily",
 		FeatureFlags:                cloneBoolMap(defaultPlatformFeatureFlags),
 		DatabaseIngressAllowedCIDRs: []string{},
@@ -10181,10 +10916,13 @@ func normalizePlatformDefaults(input PlatformDefaultsInput) (PlatformDefaults, e
 	}
 	tier := input.ResourceTier
 	if tier == "" {
-		tier = ResourceTierSmall
+		tier = ResourceTierCustom
 	}
 	if err := validateResourceTier(tier); err != nil {
 		return PlatformDefaults{}, err
+	}
+	if tier != ResourceTierCustom {
+		return PlatformDefaults{}, fmt.Errorf("platform project resource defaults use exact sizing; resource_tier must be %q", ResourceTierCustom)
 	}
 	schedule := strings.TrimSpace(input.BackupSchedule)
 	if schedule == "" {
@@ -10567,6 +11305,9 @@ func normalizeBackupStorageTargetInput(id string, existing BackupStorageTarget, 
 			return BackupStorageTarget{}, fmt.Errorf("backup storage target endpoint scheme must be http or https")
 		}
 		endpoint = strings.TrimRight(endpoint, "/")
+		if err := validateBackupStorageTargetEndpointForSignedEgress(endpoint); err != nil {
+			return BackupStorageTarget{}, err
+		}
 	}
 	region := strings.TrimSpace(input.Region)
 	if region == "" {

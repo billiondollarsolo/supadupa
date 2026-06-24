@@ -136,7 +136,7 @@ else
   create_json="$ARTIFACT_DIR/stack-releases-unsupported-create.json"
   create_err="$ARTIFACT_DIR/stack-releases-unsupported-create.stderr"
   create_ref="compat-bad-stack-$(date -u +%H%M%S)"
-  create_status="$(api_json POST "/v1/orgs/$org_id/projects" "{\"ref\":\"$create_ref\",\"name\":\"Unsupported Stack\",\"domain\":\"apps.supadupa.invalid\",\"stack_version\":\"$unsupported_version\",\"profile\":\"full\",\"resource_tier\":\"small\"}" "$create_json" "$create_err")"
+  create_status="$(api_json POST "/v1/orgs/$org_id/projects" "{\"ref\":\"$create_ref\",\"name\":\"Unsupported Stack\",\"domain\":\"apps.supadupa.invalid\",\"stack_version\":\"$unsupported_version\",\"profile\":\"full\"}" "$create_json" "$create_err")"
   if [[ "$create_status" != "400" ]]; then
     fail "stack_releases.unsupported_create_rejected" "expected HTTP 400, got HTTP $create_status"
   fi

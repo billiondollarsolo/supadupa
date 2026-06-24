@@ -36,6 +36,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "supadupa.controlPlaneServiceAccountName" -}}
+{{- if .Values.serviceAccount.name -}}
+{{- .Values.serviceAccount.name -}}
+{{- else if .Values.serviceAccount.controlPlaneName -}}
+{{- .Values.serviceAccount.controlPlaneName -}}
+{{- else if .Values.serviceAccount.create -}}
+{{- include "supadupa.fullname" . -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.controlPlaneName -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "supadupa.operatorServiceAccountName" -}}
+{{- if .Values.serviceAccount.name -}}
+{{- .Values.serviceAccount.name -}}
+{{- else if .Values.serviceAccount.operatorName -}}
+{{- .Values.serviceAccount.operatorName -}}
+{{- else if .Values.serviceAccount.create -}}
+{{- printf "%s-operator" (include "supadupa.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.operatorName -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "supadupa.secretName" -}}
 {{- default (printf "%s-secrets" (include "supadupa.fullname" .)) .Values.secrets.existingSecret -}}
 {{- end -}}

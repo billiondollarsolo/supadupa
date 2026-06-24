@@ -257,7 +257,17 @@ if [[ "$host_uid" == "0" ]]; then
 fi
 docker_gid="0"
 if [[ -S /var/run/docker.sock ]]; then
-  docker_gid="$(stat -c '%g' /var/run/docker.sock)"
+  if detected_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null)"; then
+    if [[ "$detected_gid" =~ ^[0-9]+$ ]]; then
+      docker_gid="$detected_gid"
+    fi
+  fi
+fi
+docker_proxy_user="$control_plane_user"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # Docker Desktop/Rancher Desktop expose a VM-owned socket inside containers;
+  # the host socket group is not a reliable group_add value from macOS.
+  docker_proxy_user="0:0"
 fi
 build_sha="$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo unknown)"
 secret_key="$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
@@ -434,6 +444,7 @@ SUPADUPA_ROUTES_HOST_DIR=$runtime_dir/routes
 SUPADUPA_CERTS_HOST_DIR=$runtime_dir/certs
 SUPADUPA_PROJECT_HOST_ROOT=$runtime_dir/projects
 SUPADUPA_CONTROL_PLANE_USER=$control_plane_user
+SUPADUPA_DOCKER_PROXY_USER=$docker_proxy_user
 SUPADUPA_DOCKER_GID=$docker_gid
 SUPADUPA_BUILD_SHA=$build_sha
 

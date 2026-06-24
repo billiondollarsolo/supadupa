@@ -814,6 +814,18 @@ func deploymentObject(project Project, resources ProjectResources, workload Serv
 		}
 		container["ports"] = ports
 	}
+	if workload.Resources != nil {
+		resources := map[string]any{}
+		if len(workload.Resources.Requests) > 0 {
+			resources["requests"] = workload.Resources.Requests
+		}
+		if len(workload.Resources.Limits) > 0 {
+			resources["limits"] = workload.Resources.Limits
+		}
+		if len(resources) > 0 {
+			container["resources"] = resources
+		}
+	}
 	if len(workload.Spec.Env) > 0 {
 		env := make([]map[string]any, 0, len(workload.Spec.Env))
 		keys := make([]string, 0, len(workload.Spec.Env))

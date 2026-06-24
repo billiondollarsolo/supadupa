@@ -97,19 +97,19 @@ func TestClientPlatformSettingsRequests(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/settings/defaults":
-			_, _ = w.Write([]byte(`{"domain":"supadupa.test","stack_version":"latest","profile":"full","resource_tier":"small","backup_schedule":"daily","smtp":{"enabled":false,"host":"","port":587,"sender_name":"","sender_email":"","username":"","password_handle":"","tls_mode":"starttls"},"updated_at":"2026-06-05T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"domain":"supadupa.test","stack_version":"latest","profile":"full","resource_tier":"custom","backup_schedule":"daily","smtp":{"enabled":false,"host":"","port":587,"sender_name":"","sender_email":"","username":"","password_handle":"","tls_mode":"starttls"},"updated_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/settings/defaults":
 			var got PlatformDefaultsInput
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Domain != "supadupa.internal" || got.StackVersion != "2026.06" || got.Profile != "essential" || got.ResourceTier != "medium" || got.BackupSchedule != "hourly" {
+			if got.Domain != "supadupa.internal" || got.StackVersion != "2026.06" || got.Profile != "essential" || got.ResourceTier != "custom" || got.BackupSchedule != "hourly" {
 				t.Fatalf("unexpected platform defaults payload %#v", got)
 			}
 			if !got.SMTP.Enabled || got.SMTP.Host != "smtp.example.com" || got.SMTP.Port != 2525 || got.SMTP.PasswordHandle != "secret://platform/smtp-password" || got.SMTP.TLSMode != "implicit" {
 				t.Fatalf("unexpected platform smtp payload %#v", got.SMTP)
 			}
-			_, _ = w.Write([]byte(`{"domain":"supadupa.internal","stack_version":"2026.06","profile":"essential","resource_tier":"medium","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"},"updated_at":"2026-06-05T12:01:00Z"}`))
+			_, _ = w.Write([]byte(`{"domain":"supadupa.internal","stack_version":"2026.06","profile":"essential","resource_tier":"custom","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"},"updated_at":"2026-06-05T12:01:00Z"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/settings/sso":
 			_, _ = w.Write([]byte(`{"enabled":false,"provider":"saml","idp_entity_id":"","sso_url":"","certificate_pem":"","acs_url":"","metadata_url":"","email_domain":"","auto_provision":false,"default_role":"developer","updated_at":"2026-06-05T12:00:00Z"}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/settings/sso":
@@ -142,7 +142,7 @@ func TestClientPlatformSettingsRequests(t *testing.T) {
 		Domain:         "supadupa.internal",
 		StackVersion:   "2026.06",
 		Profile:        "essential",
-		ResourceTier:   "medium",
+		ResourceTier:   "custom",
 		BackupSchedule: "hourly",
 		SMTP: PlatformSMTP{
 			Enabled:        true,
@@ -158,7 +158,7 @@ func TestClientPlatformSettingsRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update platform defaults: %v", err)
 	}
-	if defaults.Profile != "essential" || defaults.ResourceTier != "medium" || !defaults.SMTP.Enabled || defaults.SMTP.Host != "smtp.example.com" {
+	if defaults.Profile != "essential" || defaults.ResourceTier != "custom" || !defaults.SMTP.Enabled || defaults.SMTP.Host != "smtp.example.com" {
 		t.Fatalf("unexpected updated defaults %#v", defaults)
 	}
 	sso, err := client.GetPlatformSSOConfig(context.Background())

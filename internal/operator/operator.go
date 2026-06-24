@@ -90,27 +90,26 @@ func (r Reconciler) runtimeNamespacePrefix() string {
 
 // runtimeNamespace resolves the namespace that holds a project's runtime
 // resources. With isolation disabled this is always the control namespace.
-func (r Reconciler) runtimeNamespace(project Project, controlNS string) string {
+func (r Reconciler) runtimeNamespace(project Project, controlNS string) (string, error) {
 	if !r.IsolationEnabled {
-		return controlNS
+		return controlNS, nil
 	}
 	if explicit := strings.TrimSpace(project.Spec.RuntimeNamespace); explicit != "" {
-		return explicit
+		expected := r.derivedRuntimeNamespace(project)
+		if explicit != expected {
+			return "", fmt.Errorf("runtimeNamespace %q is not owned by project %q; expected %q", explicit, projectRef(project), expected)
+		}
+		return explicit, nil
 	}
+	return r.derivedRuntimeNamespace(project), nil
+}
+
+func (r Reconciler) derivedRuntimeNamespace(project Project) string {
 	ref := strings.TrimSpace(project.Spec.Ref)
 	if ref == "" {
 		ref = strings.TrimSpace(project.Metadata.Name)
 	}
 	return r.runtimeNamespacePrefix() + kubernetesName(ref)
-}
-
-// isolationOwnsNamespace reports whether the operator is responsible for the
-// lifecycle of the project's runtime namespace (so it may create/delete it).
-func (r Reconciler) isolationOwnsNamespace(project Project, controlNS string) bool {
-	if !r.IsolationEnabled {
-		return false
-	}
-	return r.runtimeNamespace(project, controlNS) != controlNS
 }
 
 func (r Reconciler) isolationConfig() IsolationConfig {
@@ -203,6 +202,10 @@ type ProjectSpec struct {
 	StackVersion            string                  `json:"stackVersion,omitempty"`
 	Profile                 string                  `json:"profile,omitempty"`
 	ResourceTier            string                  `json:"resourceTier,omitempty"`
+	CPU                     int                     `json:"cpu,omitempty"`
+	RAMMB                   int                     `json:"ramMB,omitempty"`
+	DiskGB                  int                     `json:"diskGB,omitempty"`
+	EnforceLimits           bool                    `json:"enforceLimits,omitempty"`
 	Environment             map[string]string       `json:"environment,omitempty"`
 	Services                map[string]ServiceSpec  `json:"services,omitempty"`
 	RuntimeSecurityDefaults RuntimeSecurityDefaults `json:"runtimeSecurityDefaults,omitempty"`
@@ -283,6 +286,7 @@ type ServiceSpec struct {
 	Ports                    []ServicePortSpec       `json:"ports,omitempty"`
 	ServiceType              string                  `json:"serviceType,omitempty"`
 	Env                      map[string]string       `json:"env,omitempty"`
+	Resources                *ServiceResourceSpec    `json:"resources,omitempty"`
 	Volumes                  []ServiceVolumeSpec     `json:"volumes,omitempty"`
 	ConfigFiles              []ServiceConfigFileSpec `json:"configFiles,omitempty"`
 	WritablePaths            []ServiceWritableSpec   `json:"writablePaths,omitempty"`
@@ -305,6 +309,11 @@ type ServicePortSpec struct {
 type ServiceDependencySpec struct {
 	Service string `json:"service,omitempty"`
 	Port    int    `json:"port,omitempty"`
+}
+
+type ServiceResourceSpec struct {
+	Requests map[string]string `json:"requests,omitempty"`
+	Limits   map[string]string `json:"limits,omitempty"`
 }
 
 type ServiceVolumeSpec struct {
@@ -409,6 +418,7 @@ type ServiceResources struct {
 	Replicas        int32
 	Dependencies    []ServiceDependencySpec
 	Ports           []ServicePortSpec
+	Resources       *ServiceResourceSpec
 	Volumes         []ServiceVolumeSpec
 	ConfigFiles     []ServiceConfigFileResources
 	WritablePaths   []ServiceWritableSpec
@@ -508,10 +518,20 @@ func (r Reconciler) ReconcileProject(ctx context.Context, namespace string, proj
 	}
 	// controlNS holds the Project CR + status; runtimeNS holds workload objects.
 	controlNS := namespace
-	runtimeNS := r.runtimeNamespace(project, controlNS)
-	ownsNamespace := r.isolationOwnsNamespace(project, controlNS)
 	now := r.now()
 	desired := normalizedDesiredState(project.Spec.DesiredState)
+	runtimeNS, err := r.runtimeNamespace(project, controlNS)
+	if err != nil {
+		if strings.TrimSpace(project.Metadata.DeletionTimestamp) != "" {
+			return err
+		}
+		status := degradedStatusForProject(project, now, "InvalidRuntimeNamespace", err.Error())
+		if patchErr := r.Client.PatchProjectStatus(ctx, controlNS, name, status); patchErr != nil {
+			return appendError(err, patchErr)
+		}
+		return err
+	}
+	ownsNamespace := r.IsolationEnabled && runtimeNS != controlNS
 
 	// Finalizer-driven teardown: a direct deletion of the Project CR (kubectl
 	// delete, GitOps prune, namespace delete) sets metadata.deletionTimestamp.
@@ -1137,6 +1157,7 @@ func workloadsForProject(project Project, projectLabels map[string]string, baseN
 			Replicas:        replicas,
 			Dependencies:    serviceDependencies(service),
 			Ports:           servicePorts(service),
+			Resources:       service.Resources,
 			Volumes:         serviceVolumes(service),
 			ConfigFiles:     serviceConfigFiles(name, service),
 			WritablePaths:   serviceWritablePaths(service),

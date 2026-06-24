@@ -57,7 +57,7 @@ func TestPersistentStoreRestoresCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update org feature flags: %v", err)
 	}
-	host, err := store.CreateHost(ctx, CreateHostRequest{Name: "host-a", Address: "10.0.0.10", Capacity: HostCapacity{CPU: 4, RAMMB: 8192, DiskGB: 100, Project: 3}})
+	host, err := store.CreateHost(ctx, CreateHostRequest{Name: "host-a", Address: "10.0.0.10", Capacity: HostCapacity{CPU: 8, RAMMB: 16384, DiskGB: 160, Project: 3}})
 	if err != nil {
 		t.Fatalf("create host: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestPersistentStoreRestoresCheckpoint(t *testing.T) {
 		Domain:         "apps.example.com",
 		StackVersion:   "15.8.1.060",
 		Profile:        StackProfileEssential,
-		ResourceTier:   ResourceTierMedium,
+		ResourceTier:   ResourceTierCustom,
 		BackupSchedule: "hourly",
 		FeatureFlags: map[string]bool{
 			"single_org_mode": false,
@@ -251,7 +251,7 @@ func TestPersistentStoreRestoresCheckpoint(t *testing.T) {
 	if sso.IDPEntityID != updatedSSO.IDPEntityID || sso.SSOURL != updatedSSO.SSOURL || sso.ACSURL != updatedSSO.ACSURL || sso.EmailDomain != updatedSSO.EmailDomain || sso.AutoProvision != updatedSSO.AutoProvision || sso.DefaultRole != updatedSSO.DefaultRole {
 		t.Fatalf("expected restored sso %#v, got %#v", updatedSSO, sso)
 	}
-	if projects[0].Spec.Domain != updatedDefaults.Domain || projects[0].Spec.ResourceTier != updatedDefaults.ResourceTier {
+	if projects[0].Spec.Domain != updatedDefaults.Domain || projects[0].Spec.ResourceTier != ResourceTierCustom || projects[0].Spec.CPU <= 0 || projects[0].Spec.RAMMB <= 0 || projects[0].Spec.DiskGB <= 0 {
 		t.Fatalf("expected restored project to use defaults, got %#v", projects[0].Spec)
 	}
 	assertRestoredProjectChildFields(t, ctx, restored, project.Ref, authClient, authHook, databaseWebhook, networkConnection, additionalChildFields)

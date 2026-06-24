@@ -357,6 +357,36 @@ export type TelemetrySample = {
   sampled_at: string;
 };
 
+export type ProjectTelemetryHistory = {
+  project_ref: string;
+  from: string;
+  to: string;
+  step_seconds: number;
+  retention_seconds: number;
+  raw_retention_seconds: number;
+  latest_sampled_at?: string;
+  points: ProjectTelemetryHistoryPoint[];
+};
+
+export type ProjectTelemetryHistoryPoint = {
+  sampled_at: string;
+  source: string;
+  samples: number;
+  cpu_percent: number;
+  cpu_reservation_percent: number;
+  memory_bytes: number;
+  memory_limit_bytes: number;
+  memory_reservation_percent: number;
+  disk_used_bytes: number;
+  disk_limit_bytes: number;
+  disk_reservation_percent: number;
+  network_rx_bytes: number;
+  network_tx_bytes: number;
+  reserved_cpu: number;
+  reserved_ram_mb: number;
+  reserved_disk_gb: number;
+};
+
 export type TelemetryRollup = {
   projects_sampled: number;
   cpu_percent: number;
@@ -393,7 +423,7 @@ export type PlatformDefaults = {
   domain: string;
   stack_version: string;
   profile: "essential" | "full" | "orioledb" | string;
-  resource_tier: "small" | "medium" | "large" | string;
+  resource_tier: "custom" | string;
   backup_schedule: "daily" | "hourly" | string;
   feature_flags: Record<string, boolean>;
   database_ingress_allowed_cidrs: string[];
@@ -466,10 +496,15 @@ export type Project = {
   spec: {
     domain: string;
     host_id?: string;
-    stack_version: string;
-    profile: string;
-    resource_tier: string;
-  };
+	    stack_version: string;
+	    profile: string;
+	    resource_tier: string;
+	    cpu?: number;
+	    ram_mb?: number;
+	    disk_gb?: number;
+	    enforce_limits?: boolean;
+	    services?: Record<string, { enabled?: boolean; config?: Record<string, string> | null }>;
+	  };
   runtime_status?: ProjectRuntimeStatus;
   db_ingress_mode?: string;
   created_at: string;

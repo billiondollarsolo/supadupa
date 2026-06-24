@@ -23,6 +23,7 @@ import (
 var dockerAPIVersionPrefix = regexp.MustCompile(`^/v[0-9]+(\.[0-9]+)?(/|$)`)
 var dockerComposeProjectRefPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,53}[a-z0-9])$`)
 var dockerObjectIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+var dockerVolumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var dockerImageReferencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,254}$`)
 var dockerImageTagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 
@@ -547,6 +548,7 @@ type dockerContainerListItem struct {
 type dockerHostConfig struct {
 	Binds       []string      `json:"Binds"`
 	Mounts      []dockerMount `json:"Mounts"`
+	VolumesFrom []string      `json:"VolumesFrom"`
 	Privileged  bool          `json:"Privileged"`
 	CapAdd      []string      `json:"CapAdd"`
 	Devices     []any         `json:"Devices"`
@@ -917,6 +919,9 @@ func validateDockerHostConfig(projectRef string, config dockerHostConfig, extraM
 	if len(config.Devices) > 0 {
 		return fmt.Errorf("container device mappings are not allowed through docker proxy")
 	}
+	if len(config.VolumesFrom) > 0 {
+		return fmt.Errorf("volumes-from is not allowed through docker proxy")
+	}
 	for name, mode := range map[string]string{
 		"network": config.NetworkMode,
 		"pid":     config.PidMode,
@@ -933,11 +938,19 @@ func validateDockerHostConfig(projectRef string, config dockerHostConfig, extraM
 		}
 	}
 	for _, mount := range append(config.Mounts, extraMounts...) {
-		if !strings.EqualFold(strings.TrimSpace(mount.Type), "bind") {
+		switch strings.ToLower(strings.TrimSpace(mount.Type)) {
+		case "bind":
+			if !projectRelativeOrAbsoluteBindSourceAllowed(projectRef, mount.Source) {
+				return fmt.Errorf("bind mount source %q is outside the project's allowed paths", mount.Source)
+			}
+		case "volume":
+			if !projectVolumeSourceAllowed(projectRef, mount.Source) {
+				return fmt.Errorf("volume mount source %q is outside the project's allowed volumes", mount.Source)
+			}
+		case "tmpfs":
 			continue
-		}
-		if !projectBindSourceAllowed(projectRef, mount.Source) {
-			return fmt.Errorf("bind mount source %q is outside the project's allowed paths", mount.Source)
+		default:
+			return fmt.Errorf("mount type %q is not allowed through docker proxy", mount.Type)
 		}
 	}
 	return nil
@@ -952,29 +965,54 @@ func splitDockerBind(bind string) (string, string) {
 	return strings.TrimSpace(source), strings.TrimSpace(target)
 }
 
-// projectBindSourceAllowed is an ALLOWLIST for container bind-mount sources
-// arriving through the proxy. The proxy is the single privileged boundary
-// (it holds the real root-owned docker socket), so instead of denylisting known
-// dangerous host paths we permit ONLY:
-//   - named docker volumes / in-project relative paths that don't traverse up
-//     (e.g. "db-data", "./pg_hba.conf"), and
-//   - absolute host paths inside THIS project's own directory under the
-//     configured SUPADUPA_PROJECT_HOST_ROOT.
-//
-// Everything else — the docker socket, /var/lib/docker, /home, /etc, another
-// project's directory, or any host path outside the project root — is rejected,
-// closing the host-takeover and cross-tenant escape surface a denylist missed.
+// projectBindSourceAllowed is an ALLOWLIST for HostConfig.Binds sources
+// arriving through the proxy. Binds can contain either host paths or named
+// Docker volumes, so bare names must be treated as Docker-global volume names
+// and constrained to the current Compose project.
 func projectBindSourceAllowed(projectRef string, source string) bool {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return false
+	}
+	if !strings.HasPrefix(source, "/") {
+		if projectRelativeBindSourceAllowed(source) {
+			return true
+		}
+		return projectVolumeSourceAllowed(projectRef, source)
+	}
+	return allowedProjectBindMountPath(projectRef, source)
+}
+
+func projectRelativeOrAbsoluteBindSourceAllowed(projectRef string, source string) bool {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return false
+	}
+	if strings.HasPrefix(source, "/") {
+		return allowedProjectBindMountPath(projectRef, source)
+	}
+	return projectRelativeBindSourceAllowed(source)
+}
+
+func projectRelativeBindSourceAllowed(source string) bool {
+	source = strings.TrimSpace(source)
+	if source != "." && !strings.HasPrefix(source, "./") && !strings.HasPrefix(source, ".\\") {
+		return false
+	}
+	cleaned := filepath.Clean(source)
+	return cleaned == "." || (cleaned != ".." && !strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)))
+}
+
+func projectVolumeSourceAllowed(projectRef string, source string) bool {
+	projectRef = strings.TrimSpace(projectRef)
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return true
 	}
-	if !strings.HasPrefix(source, "/") {
-		// Named volume or in-project relative path; allow unless it escapes upward.
-		cleaned := filepath.Clean(source)
-		return cleaned != ".." && !strings.HasPrefix(cleaned, ".."+string(os.PathSeparator))
-	}
-	return allowedProjectBindMountPath(projectRef, source)
+	return dockerComposeProjectRefPattern.MatchString(projectRef) &&
+		projectRef != "supadupa" &&
+		dockerVolumeNamePattern.MatchString(source) &&
+		strings.HasPrefix(source, projectRef+"_")
 }
 
 func allowedProjectBindMountPath(projectRef string, path string) bool {

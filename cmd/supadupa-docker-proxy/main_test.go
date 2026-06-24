@@ -85,8 +85,12 @@ func TestDockerContainerCreateValidationAllowsSupadupaComposePayload(t *testing.
 			"Binds": [
 				"/root/supadupa/runtime/projects/alpha/functions:/home/deno/functions:ro",
 				"/root/supadupa/runtime/projects/alpha/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro",
-				"db-data:/var/lib/postgresql/data",
+				"alpha_db-data:/var/lib/postgresql/data",
 				"./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"
+			],
+			"Mounts": [
+				{"Type": "volume", "Source": "alpha_storage-data", "Target": "/var/lib/storage"},
+				{"Type": "tmpfs", "Target": "/tmp"}
 			],
 			"NetworkMode": "alpha_internal"
 		}
@@ -147,6 +151,22 @@ func TestDockerContainerCreateValidationBlocksHostTakeoverPayloads(t *testing.T)
 		{
 			name: "relative traversal bind",
 			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Binds":["../beta/pg_hba.conf:/etc/postgresql/pg_hba.conf"]}}`,
+		},
+		{
+			name: "bare named volume",
+			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Binds":["db-data:/var/lib/postgresql/data"]}}`,
+		},
+		{
+			name: "cross-project named volume",
+			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Binds":["beta_db-data:/var/lib/postgresql/data"]}}`,
+		},
+		{
+			name: "cross-project structured volume",
+			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"Mounts":[{"Type":"volume","Source":"beta_db-data","Target":"/var/lib/postgresql/data"}]}}`,
+		},
+		{
+			name: "volumes from sibling container",
+			body: `{"Labels":{"com.docker.compose.project":"alpha"},"HostConfig":{"VolumesFrom":["beta_db_1"]}}`,
 		},
 		{
 			name: "device mapping",

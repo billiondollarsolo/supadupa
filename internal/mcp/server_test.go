@@ -40,6 +40,11 @@ func TestRunnerInitializeListToolsAndCallManagementAPI(t *testing.T) {
 			_, _ = w.Write([]byte(`{"api_url":"https://alpha.example.test","custom_api_urls":["https://api.example.com"],"custom_domains":[{"project_ref":"alpha","fqdn":"api.example.com","cert_status":"issued","cert_mode":"acme"}],"studio_url":"https://studio.alpha.example.test"}`))
 		case "/v1/projects/alpha/metrics":
 			_, _ = w.Write([]byte(`{"project_ref":"alpha","status":"healthy","analytics_buckets":1}`))
+		case "/v1/projects/alpha/telemetry/history":
+			if r.URL.Query().Get("range") != "24h" || r.URL.Query().Get("step") != "5m" {
+				t.Fatalf("unexpected telemetry history query %q", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"project_ref":"alpha","step_seconds":300,"points":[]}`))
 		case "/v1/projects/alpha/config/ai":
 			_, _ = w.Write([]byte(`{"project_ref":"alpha","area":"ai","config":{"studio_assistant_enabled":"true"}}`))
 		case "/v1/projects/alpha/logs":
@@ -281,42 +286,43 @@ func TestRunnerInitializeListToolsAndCallManagementAPI(t *testing.T) {
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"supadupa_project_connect","arguments":{"ref":"alpha"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"supadupa_get_fleet_metrics","arguments":{}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"supadupa_get_project_metrics","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"supadupa_get_project_config","arguments":{"ref":"alpha","area":"ai"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"supadupa_list_project_logs","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"supadupa_list_project_analytics_buckets","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"supadupa_get_org_usage","arguments":{"org_id":"org_1"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"supadupa_list_org_usage_snapshots","arguments":{"org_id":"org_1","limit":2}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"supadupa_list_billing_invoices","arguments":{"org_id":"org_1","limit":2}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"supadupa_list_project_domains","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"supadupa_add_project_domain","arguments":{"ref":"alpha","fqdn":"API.EXAMPLE.COM."}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"supadupa_delete_project_domain","arguments":{"ref":"alpha","fqdn":"api.example.com"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"supadupa_list_project_log_drains","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"supadupa_create_project_log_drain","arguments":{"ref":"alpha","target":"https","config":{"url":"https://logs.example.com/ingest","token":"secret://projects/alpha/logs"}}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"supadupa_delete_project_log_drain","arguments":{"ref":"alpha","id":"drain_1"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"supadupa_list_project_network_connections","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"supadupa_create_project_network_connection","arguments":{"ref":"alpha","name":"aws-prod","type":"privatelink","provider":"aws","region":"us-east-1","cidrs":["10.0.0.0/16"],"endpoint_id":"vpce-123","config":{"account_id":"123456789012"}}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"supadupa_delete_project_network_connection","arguments":{"ref":"alpha","id":"net_1"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"supadupa_list_project_replication_pipelines","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"supadupa_create_project_replication_pipeline","arguments":{"ref":"alpha","name":"orders-etl","type":"etl","source_table":"orders","destination":"s3","destination_uri":"s3://lake/orders","credential_handle":"secret://projects/alpha/etl","config":{"bucket":"lake"}}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"supadupa_delete_project_replication_pipeline","arguments":{"ref":"alpha","id":"pipe_1"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"supadupa_list_project_embedding_jobs","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"supadupa_create_project_embedding_job","arguments":{"ref":"alpha","name":"docs-embeddings","source_table":"documents","source_column":"body"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"supadupa_delete_project_embedding_job","arguments":{"ref":"alpha","id":"emb_1"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{"name":"supadupa_list_project_functions","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"supadupa_deploy_project_function","arguments":{"ref":"alpha","name":"hello-api","source":"Deno.serve(() => new Response('ok'))","secrets":{"API_KEY":"secret://projects/alpha/functions/api-key"}}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"supadupa_list_project_function_regions","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"supadupa_create_project_function_region","arguments":{"ref":"alpha","function_name":"hello-api","host_id":"host-1","region":"us-east-1","routing_policy":"primary"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"supadupa_delete_project_function_region","arguments":{"ref":"alpha","id":"region_1"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"supadupa_list_project_function_storage_mounts","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"supadupa_create_project_function_storage_mount","arguments":{"ref":"alpha","function_name":"hello-api","bucket_name":"assets","mount_path":"/mnt/assets","read_only":true,"prefix":"public","env_alias":"ASSETS_MOUNT"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"supadupa_delete_project_function_storage_mount","arguments":{"ref":"alpha","id":"mount_1"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"supadupa_delete_project_function","arguments":{"ref":"alpha","name":"hello-api"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":37,"method":"tools/call","params":{"name":"supadupa_list_project_auth_clients","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":38,"method":"tools/call","params":{"name":"supadupa_create_project_auth_client","arguments":{"ref":"alpha","name":"Dashboard App","client_id":"dashboard_app","client_secret_handle":"secret://projects/alpha/auth/dashboard","redirect_uris":["https://app.example.com/auth/callback"],"grant_types":["authorization_code","refresh_token"],"scopes":["openid","email"]}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":39,"method":"tools/call","params":{"name":"supadupa_delete_project_auth_client","arguments":{"ref":"alpha","client_id":"dashboard_app"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"supadupa_list_project_auth_hooks","arguments":{"ref":"alpha"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"supadupa_set_project_auth_hook","arguments":{"ref":"alpha","hook_type":"custom_access_token","target_uri":"https://hooks.example.com/token","edge_function":"token-hook","secret_handle":"secret://projects/alpha/auth/hook","headers":{"authorization":"secret://projects/alpha/auth/header"},"timeout_ms":7000,"retry_attempts":2}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"supadupa_delete_project_auth_hook","arguments":{"ref":"alpha","hook_type":"custom_access_token"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"supadupa_get_project_telemetry_history","arguments":{"ref":"alpha","range":"24h","step":"5m"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"supadupa_get_project_config","arguments":{"ref":"alpha","area":"ai"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"supadupa_list_project_logs","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"supadupa_list_project_analytics_buckets","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"supadupa_get_org_usage","arguments":{"org_id":"org_1"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"supadupa_list_org_usage_snapshots","arguments":{"org_id":"org_1","limit":2}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"supadupa_list_billing_invoices","arguments":{"org_id":"org_1","limit":2}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"supadupa_list_project_domains","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"supadupa_add_project_domain","arguments":{"ref":"alpha","fqdn":"API.EXAMPLE.COM."}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"supadupa_delete_project_domain","arguments":{"ref":"alpha","fqdn":"api.example.com"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"supadupa_list_project_log_drains","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"supadupa_create_project_log_drain","arguments":{"ref":"alpha","target":"https","config":{"url":"https://logs.example.com/ingest","token":"secret://projects/alpha/logs"}}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"supadupa_delete_project_log_drain","arguments":{"ref":"alpha","id":"drain_1"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"supadupa_list_project_network_connections","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"supadupa_create_project_network_connection","arguments":{"ref":"alpha","name":"aws-prod","type":"privatelink","provider":"aws","region":"us-east-1","cidrs":["10.0.0.0/16"],"endpoint_id":"vpce-123","config":{"account_id":"123456789012"}}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"supadupa_delete_project_network_connection","arguments":{"ref":"alpha","id":"net_1"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"supadupa_list_project_replication_pipelines","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"supadupa_create_project_replication_pipeline","arguments":{"ref":"alpha","name":"orders-etl","type":"etl","source_table":"orders","destination":"s3","destination_uri":"s3://lake/orders","credential_handle":"secret://projects/alpha/etl","config":{"bucket":"lake"}}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"supadupa_delete_project_replication_pipeline","arguments":{"ref":"alpha","id":"pipe_1"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"supadupa_list_project_embedding_jobs","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"supadupa_create_project_embedding_job","arguments":{"ref":"alpha","name":"docs-embeddings","source_table":"documents","source_column":"body"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{"name":"supadupa_delete_project_embedding_job","arguments":{"ref":"alpha","id":"emb_1"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"supadupa_list_project_functions","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"supadupa_deploy_project_function","arguments":{"ref":"alpha","name":"hello-api","source":"Deno.serve(() => new Response('ok'))","secrets":{"API_KEY":"secret://projects/alpha/functions/api-key"}}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"supadupa_list_project_function_regions","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"supadupa_create_project_function_region","arguments":{"ref":"alpha","function_name":"hello-api","host_id":"host-1","region":"us-east-1","routing_policy":"primary"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"supadupa_delete_project_function_region","arguments":{"ref":"alpha","id":"region_1"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"supadupa_list_project_function_storage_mounts","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"supadupa_create_project_function_storage_mount","arguments":{"ref":"alpha","function_name":"hello-api","bucket_name":"assets","mount_path":"/mnt/assets","read_only":true,"prefix":"public","env_alias":"ASSETS_MOUNT"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"supadupa_delete_project_function_storage_mount","arguments":{"ref":"alpha","id":"mount_1"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":37,"method":"tools/call","params":{"name":"supadupa_delete_project_function","arguments":{"ref":"alpha","name":"hello-api"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":38,"method":"tools/call","params":{"name":"supadupa_list_project_auth_clients","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":39,"method":"tools/call","params":{"name":"supadupa_create_project_auth_client","arguments":{"ref":"alpha","name":"Dashboard App","client_id":"dashboard_app","client_secret_handle":"secret://projects/alpha/auth/dashboard","redirect_uris":["https://app.example.com/auth/callback"],"grant_types":["authorization_code","refresh_token"],"scopes":["openid","email"]}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"supadupa_delete_project_auth_client","arguments":{"ref":"alpha","client_id":"dashboard_app"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"supadupa_list_project_auth_hooks","arguments":{"ref":"alpha"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"supadupa_set_project_auth_hook","arguments":{"ref":"alpha","hook_type":"custom_access_token","target_uri":"https://hooks.example.com/token","edge_function":"token-hook","secret_handle":"secret://projects/alpha/auth/hook","headers":{"authorization":"secret://projects/alpha/auth/header"},"timeout_ms":7000,"retry_attempts":2}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":"supadupa_delete_project_auth_hook","arguments":{"ref":"alpha","hook_type":"custom_access_token"}}}`)
 	output := bytes.NewBuffer(nil)
 
 	exit := Runner{
@@ -333,13 +339,13 @@ func TestRunnerInitializeListToolsAndCallManagementAPI(t *testing.T) {
 	}
 
 	responses := readTestFrames(t, output)
-	if len(responses) != 42 {
-		t.Fatalf("expected forty-two responses, got %d: %s", len(responses), output.String())
+	if len(responses) != 43 {
+		t.Fatalf("expected forty-three responses, got %d: %s", len(responses), output.String())
 	}
 	if !strings.Contains(responses[0], `"serverInfo":{"name":"supadupa-mcp"`) {
 		t.Fatalf("expected initialize server info: %s", responses[0])
 	}
-	if !strings.Contains(responses[1], `"name":"supadupa_project_connect"`) || !strings.Contains(responses[1], `"name":"supadupa_trigger_backup"`) || !strings.Contains(responses[1], `"name":"supadupa_list_project_analytics_buckets"`) || !strings.Contains(responses[1], `"name":"supadupa_list_project_auth_clients"`) || !strings.Contains(responses[1], `"name":"supadupa_deploy_project_function"`) || !strings.Contains(responses[1], `"name":"supadupa_create_project_embedding_job"`) || !strings.Contains(responses[1], `"name":"supadupa_add_project_domain"`) || !strings.Contains(responses[1], `"name":"supadupa_create_host"`) {
+	if !strings.Contains(responses[1], `"name":"supadupa_project_connect"`) || !strings.Contains(responses[1], `"name":"supadupa_get_project_telemetry_history"`) || !strings.Contains(responses[1], `"name":"supadupa_trigger_backup"`) || !strings.Contains(responses[1], `"name":"supadupa_list_project_analytics_buckets"`) || !strings.Contains(responses[1], `"name":"supadupa_list_project_auth_clients"`) || !strings.Contains(responses[1], `"name":"supadupa_deploy_project_function"`) || !strings.Contains(responses[1], `"name":"supadupa_create_project_embedding_job"`) || !strings.Contains(responses[1], `"name":"supadupa_add_project_domain"`) || !strings.Contains(responses[1], `"name":"supadupa_create_host"`) {
 		t.Fatalf("expected tool list: %s", responses[1])
 	}
 	if !strings.Contains(responses[2], `"structuredContent":[{"name":"Alpha","ref":"alpha","status":"healthy"}]`) {
@@ -348,22 +354,22 @@ func TestRunnerInitializeListToolsAndCallManagementAPI(t *testing.T) {
 	if !strings.Contains(responses[3], `"api_url":"https://alpha.example.test"`) || !strings.Contains(responses[3], `"custom_api_urls":["https://api.example.com"]`) || !strings.Contains(responses[3], `"fqdn":"api.example.com"`) {
 		t.Fatalf("expected connect payload: %s", responses[3])
 	}
-	if !strings.Contains(responses[4], `"analytics_buckets":1`) || !strings.Contains(responses[6], `"studio_assistant_enabled":"true"`) || !strings.Contains(responses[8], `"storage_uri":"s3://lake/events"`) {
+	if !strings.Contains(responses[4], `"analytics_buckets":1`) || !strings.Contains(responses[6], `"project_ref":"alpha"`) || !strings.Contains(responses[7], `"studio_assistant_enabled":"true"`) || !strings.Contains(responses[9], `"storage_uri":"s3://lake/events"`) {
 		t.Fatalf("expected expanded MCP structured results: %#v", responses)
 	}
-	if !strings.Contains(responses[9], `"org_id":"org_1"`) || !strings.Contains(responses[10], `"snap_1"`) || !strings.Contains(responses[11], `"SDP-202606-0001"`) {
+	if !strings.Contains(responses[10], `"org_id":"org_1"`) || !strings.Contains(responses[11], `"snap_1"`) || !strings.Contains(responses[12], `"SDP-202606-0001"`) {
 		t.Fatalf("expected org usage and billing MCP results: %#v", responses)
 	}
-	if !strings.Contains(responses[12], `"api.example.com"`) || !strings.Contains(responses[16], `"token":"********"`) || !strings.Contains(responses[19], `"status":"requested"`) {
+	if !strings.Contains(responses[13], `"api.example.com"`) || !strings.Contains(responses[17], `"token":"********"`) || !strings.Contains(responses[20], `"status":"requested"`) {
 		t.Fatalf("expected platform MCP results: %#v", responses)
 	}
-	if !strings.Contains(responses[21], `"orders-etl"`) || !strings.Contains(responses[22], `"destination":"s3"`) || !strings.Contains(responses[24], `"docs-embeddings"`) || !strings.Contains(responses[25], `"source_table":"documents"`) {
+	if !strings.Contains(responses[22], `"orders-etl"`) || !strings.Contains(responses[23], `"destination":"s3"`) || !strings.Contains(responses[25], `"docs-embeddings"`) || !strings.Contains(responses[26], `"source_table":"documents"`) {
 		t.Fatalf("expected replication and embedding MCP results: %#v", responses)
 	}
-	if !strings.Contains(responses[27], `"name":"hello-api"`) || !strings.Contains(responses[28], `"API_KEY":"********"`) || !strings.Contains(responses[30], `"routing_policy":"primary"`) || !strings.Contains(responses[33], `"mount_path":"/mnt/assets"`) {
+	if !strings.Contains(responses[28], `"name":"hello-api"`) || !strings.Contains(responses[29], `"API_KEY":"********"`) || !strings.Contains(responses[31], `"routing_policy":"primary"`) || !strings.Contains(responses[34], `"mount_path":"/mnt/assets"`) {
 		t.Fatalf("expected Edge Function MCP results: %#v", responses)
 	}
-	if !strings.Contains(responses[36], `"client_id":"dashboard_app"`) || !strings.Contains(responses[37], `"client_secret_handle":"********"`) || !strings.Contains(responses[39], `"hook_type":"custom_access_token"`) || !strings.Contains(responses[40], `"authorization":"********"`) {
+	if !strings.Contains(responses[37], `"client_id":"dashboard_app"`) || !strings.Contains(responses[38], `"client_secret_handle":"********"`) || !strings.Contains(responses[40], `"hook_type":"custom_access_token"`) || !strings.Contains(responses[41], `"authorization":"********"`) {
 		t.Fatalf("expected auth MCP results: %#v", responses)
 	}
 	expectedRequests := strings.Join([]string{
@@ -371,6 +377,7 @@ func TestRunnerInitializeListToolsAndCallManagementAPI(t *testing.T) {
 		"GET /v1/projects/alpha/connect",
 		"GET /v1/metrics",
 		"GET /v1/projects/alpha/metrics",
+		"GET /v1/projects/alpha/telemetry/history",
 		"GET /v1/projects/alpha/config/ai",
 		"GET /v1/projects/alpha/logs",
 		"GET /v1/projects/alpha/analytics-buckets",
@@ -443,17 +450,17 @@ func TestPlatformDefaultsToolsUseSettingsEndpoint(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/settings/defaults":
-			_, _ = w.Write([]byte(`{"domain":"supadupa.test","stack_version":"latest","profile":"full","resource_tier":"small","backup_schedule":"daily","smtp":{"enabled":false,"host":"","port":587,"sender_name":"","sender_email":"","username":"","password_handle":"","tls_mode":"starttls"}}`))
+			_, _ = w.Write([]byte(`{"domain":"supadupa.test","stack_version":"latest","profile":"full","resource_tier":"custom","backup_schedule":"daily","smtp":{"enabled":false,"host":"","port":587,"sender_name":"","sender_email":"","username":"","password_handle":"","tls_mode":"starttls"}}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/settings/defaults":
 			var got map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
 			smtp, ok := got["smtp"].(map[string]any)
-			if !ok || got["domain"] != "apps.example.com" || got["stack_version"] != "2026.06.05" || got["profile"] != "orioledb" || got["resource_tier"] != "medium" || got["backup_schedule"] != "hourly" || smtp["enabled"] != true || smtp["host"] != "smtp.example.com" || smtp["port"] != float64(2525) || smtp["sender_email"] != "noreply@example.com" || smtp["password_handle"] != "secret://platform/smtp-password" || smtp["tls_mode"] != "implicit" {
+			if !ok || got["domain"] != "apps.example.com" || got["stack_version"] != "2026.06.05" || got["profile"] != "orioledb" || got["resource_tier"] != "custom" || got["backup_schedule"] != "hourly" || smtp["enabled"] != true || smtp["host"] != "smtp.example.com" || smtp["port"] != float64(2525) || smtp["sender_email"] != "noreply@example.com" || smtp["password_handle"] != "secret://platform/smtp-password" || smtp["tls_mode"] != "implicit" {
 				t.Fatalf("unexpected platform defaults payload %#v", got)
 			}
-			_, _ = w.Write([]byte(`{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"orioledb","resource_tier":"medium","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"}}`))
+			_, _ = w.Write([]byte(`{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"orioledb","resource_tier":"custom","backup_schedule":"hourly","smtp":{"enabled":true,"host":"smtp.example.com","port":2525,"sender_name":"supadupa","sender_email":"noreply@example.com","username":"apikey","password_handle":"secret://platform/smtp-password","tls_mode":"implicit"}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -463,7 +470,7 @@ func TestPlatformDefaultsToolsUseSettingsEndpoint(t *testing.T) {
 	input := bytes.NewBuffer(nil)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_get_platform_defaults","arguments":{}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_set_platform_defaults","arguments":{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"orioledb","resource_tier":"medium","backup_schedule":"hourly","smtp_enabled":true,"smtp_host":"smtp.example.com","smtp_port":2525,"smtp_sender_name":"supadupa","smtp_sender_email":"noreply@example.com","smtp_username":"apikey","smtp_password_handle":"secret://platform/smtp-password","smtp_tls_mode":"implicit"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_set_platform_defaults","arguments":{"domain":"apps.example.com","stack_version":"2026.06.05","profile":"orioledb","resource_tier":"custom","backup_schedule":"hourly","smtp_enabled":true,"smtp_host":"smtp.example.com","smtp_port":2525,"smtp_sender_name":"supadupa","smtp_sender_email":"noreply@example.com","smtp_username":"apikey","smtp_password_handle":"secret://platform/smtp-password","smtp_tls_mode":"implicit"}}}`)
 	output := bytes.NewBuffer(nil)
 
 	exit := Runner{
@@ -904,14 +911,14 @@ func TestProjectLifecycleToolsUseProjectEndpoints(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"ref":"alpha","status":"healthy","spec":{"stack_version":"2026.06.05"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/alpha/scale":
-			var got map[string]string
+			var got map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got["resource_tier"] != "large" {
+			if got["cpu"] != float64(6) || got["ram_mb"] != float64(12288) || got["disk_gb"] != float64(120) || got["enforce_limits"] != true {
 				t.Fatalf("unexpected scale payload %#v", got)
 			}
-			_, _ = w.Write([]byte(`{"ref":"alpha","status":"healthy","spec":{"resource_tier":"large"}}`))
+			_, _ = w.Write([]byte(`{"ref":"alpha","status":"healthy","spec":{"resource_tier":"custom","cpu":6,"ram_mb":12288,"disk_gb":120,"enforce_limits":true}}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/projects/alpha":
 			if r.URL.Query().Get("retain_volumes") != "true" {
 				t.Fatalf("expected retain_volumes=true, got %s", r.URL.RawQuery)
@@ -926,8 +933,9 @@ func TestProjectLifecycleToolsUseProjectEndpoints(t *testing.T) {
 	input := bytes.NewBuffer(nil)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_upgrade_project","arguments":{"ref":"alpha","version":"2026.06.05"}}}`)
-	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_scale_project","arguments":{"ref":"alpha","tier":"large"}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_scale_project","arguments":{"ref":"alpha","cpu":6,"ram_mb":12288,"disk_gb":120,"enforce_limits":true}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"supadupa_destroy_project","arguments":{"ref":"alpha","retain_volumes":true}}}`)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"supadupa_destroy_project","arguments":{"ref":"alpha","retain_volumes":true,"confirmation":"destroy project alpha"}}}`)
 	output := bytes.NewBuffer(nil)
 
 	exit := Runner{
@@ -940,14 +948,17 @@ func TestProjectLifecycleToolsUseProjectEndpoints(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d", exit)
 	}
 	responses := readTestFrames(t, output)
-	if len(responses) != 4 {
-		t.Fatalf("expected four responses, got %d: %s", len(responses), output.String())
+	if len(responses) != 5 {
+		t.Fatalf("expected five responses, got %d: %s", len(responses), output.String())
 	}
 	if !strings.Contains(responses[0], `"name":"supadupa_upgrade_project"`) || !strings.Contains(responses[0], `"name":"supadupa_scale_project"`) || !strings.Contains(responses[0], `"name":"supadupa_destroy_project"`) {
 		t.Fatalf("expected lifecycle tools in list: %s", responses[0])
 	}
-	if !strings.Contains(responses[1], `"stack_version":"2026.06.05"`) || !strings.Contains(responses[2], `"resource_tier":"large"`) {
+	if !strings.Contains(responses[1], `"stack_version":"2026.06.05"`) || !strings.Contains(responses[2], `"cpu":6`) || !strings.Contains(responses[2], `"enforce_limits":true`) {
 		t.Fatalf("expected lifecycle responses, got %#v", responses)
+	}
+	if !strings.Contains(responses[3], `confirmation must be exactly`) {
+		t.Fatalf("expected unconfirmed destroy to be rejected, got %#v", responses[3])
 	}
 	expectedRequests := strings.Join([]string{
 		"POST /v1/projects/alpha/upgrade",
@@ -1589,6 +1600,7 @@ func TestSecretToolsUseAuditedProjectEndpoints(t *testing.T) {
 	defer api.Close()
 
 	input := bytes.NewBuffer(nil)
+	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"supadupa_list_project_secrets","arguments":{"ref":"alpha"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supadupa_reveal_project_secret","arguments":{"ref":"alpha","kind":"service_role"}}}`)
 	writeTestFrame(t, input, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"supadupa_record_project_secret_copy","arguments":{"ref":"alpha","kind":"service_role"}}}`)
@@ -1605,17 +1617,43 @@ func TestSecretToolsUseAuditedProjectEndpoints(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d", exit)
 	}
 	responses := readTestFrames(t, output)
-	if len(responses) != 4 || !strings.Contains(responses[0], `"masked_value":"********"`) || !strings.Contains(responses[1], `"value":"svc_secret_value"`) || strings.Contains(responses[2], `"value"`) || !strings.Contains(responses[3], `"rotated_at":"2026-06-05T12:30:00Z"`) {
+	if len(responses) != 5 {
 		t.Fatalf("expected secret tool responses, got %#v", responses)
+	}
+	if strings.Contains(responses[0], `"name":"supadupa_reveal_project_secret"`) || !strings.Contains(responses[0], `"name":"supadupa_record_project_secret_copy"`) {
+		t.Fatalf("expected reveal tool to be hidden by default, got %s", responses[0])
+	}
+	if !strings.Contains(responses[1], `"masked_value":"********"`) || !strings.Contains(responses[2], "supadupa_reveal_project_secret is disabled") || strings.Contains(responses[2], "svc_secret_value") || strings.Contains(responses[3], `"value"`) || !strings.Contains(responses[4], `"rotated_at":"2026-06-05T12:30:00Z"`) {
+		t.Fatalf("expected default secret tool responses to stay redacted, got %#v", responses)
 	}
 	expectedRequests := strings.Join([]string{
 		"GET /v1/projects/alpha/secrets",
-		"GET /v1/projects/alpha/secrets/service_role/reveal",
 		"POST /v1/projects/alpha/secrets/service_role/copy",
 		"POST /v1/projects/alpha/keys/rotate",
 	}, "\n")
 	if strings.Join(requests, "\n") != expectedRequests {
 		t.Fatalf("unexpected requests %#v", requests)
+	}
+
+	requests = nil
+	revealInput := bytes.NewBuffer(nil)
+	writeTestFrame(t, revealInput, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"supadupa_reveal_project_secret","arguments":{"ref":"alpha","kind":"service_role"}}}`)
+	revealOutput := bytes.NewBuffer(nil)
+	exit = Runner{
+		Stdin:  revealInput,
+		Stdout: revealOutput,
+		Stderr: io.Discard,
+		Env:    map[string]string{"SUPADUPA_API_URL": api.URL, "SUPADUPA_MCP_ALLOW_SECRET_REVEAL": "true"},
+	}.Run(context.Background(), nil)
+	if exit != 0 {
+		t.Fatalf("expected opt-in reveal exit 0, got %d", exit)
+	}
+	revealResponses := readTestFrames(t, revealOutput)
+	if len(revealResponses) != 1 || !strings.Contains(revealResponses[0], `"value":"svc_secret_value"`) {
+		t.Fatalf("expected opt-in reveal response, got %#v", revealResponses)
+	}
+	if strings.Join(requests, "\n") != "GET /v1/projects/alpha/secrets/service_role/reveal" {
+		t.Fatalf("unexpected opt-in reveal requests %#v", requests)
 	}
 }
 

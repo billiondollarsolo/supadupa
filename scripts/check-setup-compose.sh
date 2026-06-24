@@ -23,7 +23,7 @@ EOF
 assert_env_mode() {
   local env_file="$1"
   local mode
-  mode="$(stat -c '%a' "$env_file")"
+  mode="$(stat -c '%a' "$env_file" 2>/dev/null || stat -f '%Lp' "$env_file")"
   if [[ "$mode" != "600" ]]; then
     echo "expected $env_file mode 600, got $mode" >&2
     exit 1

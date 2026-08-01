@@ -750,7 +750,8 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 
 | ID | Status | Notes |
 |----|--------|-------|
-| D1–D3 D5–D6 D9–D11 D13 | deferred | See external table |
+| D1 D3 D5–D6 D9–D11 D13 | deferred | See external table |
+| D2 | partial | Unit/render + `check-kind-dataplane-gate.sh`; live Kind needs kind binary (external table) |
 | D4 | done | CNI caveat documented known-issues + kubernetes |
 | D7 | done | Helm PDB fails closed when replicaCount≤1; schema if/then |
 | D8 | done | External meta-DB recommendation in kubernetes.md |

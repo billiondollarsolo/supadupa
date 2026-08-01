@@ -131,6 +131,8 @@ jobs:
         run: go test -race ./internal/api ./internal/control ./internal/scheduler ./internal/operator ./internal/provisioner/compose
       - name: Platform version dual-source check
         run: scripts/check-platform-version.sh
+      - name: Kind dataplane gate (structural)
+        run: scripts/check-kind-dataplane-gate.sh
       - name: Go toolchain guard
         run: test "$(go env GOVERSION)" = "go1.26.4"
       # govulncheck hard-fails this job on findings (no SUPADUPA_FINAL_SKIP_* path in CI).
@@ -225,7 +227,7 @@ jobs:
       - name: Kubernetes Kind smoke
         env:
           SUPADUPA_KIND_REBUILD_IMAGES: "false"
-        run: scripts/check-kubernetes-kind-smoke.sh
+        run: scripts/check-kubernetes-kind-smoke.sh scripts/check-kind-dataplane-gate.sh
       - name: Script syntax
         run: |
           bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-platform-version.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/check-terraform-provider-smoke.sh scripts/check-final-remediation-suite.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh

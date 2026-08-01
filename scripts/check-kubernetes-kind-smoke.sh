@@ -12,6 +12,9 @@ CORE_PROJECT="${SUPADUPA_KIND_SUPABASE_CORE_PROJECT:-kind-core}"
 KEEP_CLUSTER="${SUPADUPA_KIND_KEEP_CLUSTER:-false}"
 REBUILD_IMAGES="${SUPADUPA_KIND_REBUILD_IMAGES:-true}"
 SUPABASE_CORE_SMOKE="${SUPADUPA_KIND_SUPABASE_CORE_SMOKE:-false}"
+# Opt-in: enable storage/realtime/functions/pooler/analytics on the core smoke Project
+# and wait for those Deployments. Default false so CI stays lightweight.
+DATAPLANE_SMOKE="${SUPADUPA_KIND_DATAPLANE_SMOKE:-false}"
 PRELOAD_CORE_IMAGES="${SUPADUPA_KIND_PRELOAD_CORE_IMAGES:-true}"
 DELETE_EXISTING_CLUSTER="${SUPADUPA_KIND_DELETE_EXISTING_CLUSTER:-false}"
 # Namespace-per-project isolation smoke. Default false because kindnet does NOT
@@ -237,19 +240,54 @@ SQL
 run_supabase_core_smoke() {
   local render_root
   local manifest
+  local core_services=(db kong meta auth rest)
+  local dataplane_services=(storage realtime functions pooler analytics)
+  local all_services=("${core_services[@]}")
   render_root="$(mktemp -d)"
-  manifest="$(go run "$ROOT/scripts/kubernetes-core-smoke-renderer" "$render_root" "$NAMESPACE" "$CORE_PROJECT" "apps.example.test")"
+  # Propagate dataplane flag into the Go renderer (opt-in; default keeps CI light).
+  manifest="$(SUPADUPA_KIND_DATAPLANE_SMOKE="$DATAPLANE_SMOKE" go run "$ROOT/scripts/kubernetes-core-smoke-renderer" "$render_root" "$NAMESPACE" "$CORE_PROJECT" "apps.example.test")"
   "$KUBECTL_BIN" -n "$NAMESPACE" apply -f "$manifest"
 
   verify_supabase_core_database
   retry_until "Supabase core Project status RuntimeReady" 150 4 project_phase_is "$CORE_PROJECT" RuntimeReady
-  for service in db kong meta auth rest; do
+  if [[ "$DATAPLANE_SMOKE" == "true" ]]; then
+    all_services+=("${dataplane_services[@]}")
+  fi
+  for service in "${all_services[@]}"; do
     "$KUBECTL_BIN" -n "$NAMESPACE" rollout status "deployment/$CORE_PROJECT-$service" --timeout=300s
     "$KUBECTL_BIN" -n "$NAMESPACE" get service "$CORE_PROJECT-$service" >/dev/null
   done
   "$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$CORE_PROJECT-db-data" >/dev/null
+  if [[ "$DATAPLANE_SMOKE" == "true" ]]; then
+    "$KUBECTL_BIN" -n "$NAMESPACE" get pvc "$CORE_PROJECT-storage-data" >/dev/null
+  fi
 
-  assert_kube_json "Supabase core Project uses provisioner-rendered real images" project "$CORE_PROJECT" '
+  if [[ "$DATAPLANE_SMOKE" == "true" ]]; then
+    assert_kube_json "Supabase dataplane Project uses provisioner-rendered real images" project "$CORE_PROJECT" '
+services = obj["spec"]["services"]
+assert services["db"]["image"].startswith("supabase/postgres:"), services["db"]["image"]
+assert services["kong"]["image"].startswith("kong/kong:"), services["kong"]["image"]
+assert services["auth"]["image"].startswith("supabase/gotrue:"), services["auth"]["image"]
+assert services["rest"]["image"].startswith("postgrest/postgrest:"), services["rest"]["image"]
+for name, repo in (
+    ("storage", "supabase/storage-api:"),
+    ("realtime", "supabase/realtime:"),
+    ("functions", "supabase/edge-runtime:"),
+    ("pooler", "supabase/supavisor:"),
+    ("analytics", "supabase/logflare:"),
+):
+    svc = services[name]
+    assert svc["enabled"] is True, (name, svc)
+    assert svc["image"].startswith(repo), (name, svc["image"])
+    assert "@sha256:" in svc["image"], (name, svc["image"])
+assert any(p.get("port") == 5000 for p in services["storage"].get("ports") or []), services["storage"]
+assert any(p.get("port") == 4000 for p in services["realtime"].get("ports") or []), services["realtime"]
+assert any(p.get("port") == 9000 for p in services["functions"].get("ports") or []), services["functions"]
+assert any(p.get("name") == "transaction" and p.get("port") == 6543 for p in services["pooler"].get("ports") or []), services["pooler"]
+assert any(p.get("port") == 4000 for p in services["analytics"].get("ports") or []), services["analytics"]
+'
+  else
+    assert_kube_json "Supabase core Project uses provisioner-rendered real images" project "$CORE_PROJECT" '
 services = obj["spec"]["services"]
 assert services["db"]["image"].startswith("supabase/postgres:"), services["db"]["image"]
 assert services["kong"]["image"].startswith("kong/kong:"), services["kong"]["image"]
@@ -258,6 +296,7 @@ assert services["rest"]["image"].startswith("postgrest/postgrest:"), services["r
 assert services["storage"]["enabled"] is False, services["storage"]
 assert services["realtime"]["enabled"] is False, services["realtime"]
 '
+  fi
 
   assert_kube_json "Supabase core Kong Deployment mounts generated declarative config" deployment "$CORE_PROJECT-kong" '
 pod = obj["spec"]["template"]["spec"]
@@ -283,7 +322,7 @@ assert "kong docker-start" in container["args"][0], container.get("args")
 
   "$KUBECTL_BIN" -n "$NAMESPACE" patch project "$CORE_PROJECT" --type merge -p '{"spec":{"desiredState":"destroying"}}'
   retry_until "Supabase core Project status Terminating" 90 2 project_phase_is "$CORE_PROJECT" Terminating
-  for service in db kong meta auth rest; do
+  for service in "${all_services[@]}"; do
     retry_until "destroyed Supabase core $service deployment" 90 2 resource_absent deployment "$CORE_PROJECT-$service"
     retry_until "destroyed Supabase core $service service" 90 2 resource_absent service "$CORE_PROJECT-$service"
   done

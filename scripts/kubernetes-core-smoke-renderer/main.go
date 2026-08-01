@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"supadupa2026/internal/control"
 	k8sprovisioner "supadupa2026/internal/provisioner/kubernetes"
@@ -16,6 +17,9 @@ func main() {
 		os.Exit(2)
 	}
 	rootDir, namespace, ref, domain := os.Args[1], os.Args[2], os.Args[3], os.Args[4]
+	// Opt-in data-plane smoke (storage/realtime/functions/pooler/analytics).
+	// Default remains core-only so CI kind smoke stays lightweight.
+	dataplane := strings.EqualFold(strings.TrimSpace(os.Getenv("SUPADUPA_KIND_DATAPLANE_SMOKE")), "true")
 	spec := control.ProjectSpec{
 		Ref:          ref,
 		OrgID:        "kind-smoke-org",
@@ -68,13 +72,13 @@ func main() {
 		Services: map[string]control.ServiceSpec{
 			"auth":      {Enabled: true},
 			"rest":      {Enabled: true},
-			"realtime":  {Enabled: false},
-			"storage":   {Enabled: false},
+			"realtime":  {Enabled: dataplane},
+			"storage":   {Enabled: dataplane},
 			"imgproxy":  {Enabled: false},
-			"functions": {Enabled: false},
-			"pooler":    {Enabled: false},
+			"functions": {Enabled: dataplane},
+			"pooler":    {Enabled: dataplane},
 			"studio":    {Enabled: false},
-			"analytics": {Enabled: false},
+			"analytics": {Enabled: dataplane},
 			"vector":    {Enabled: false},
 		},
 	}

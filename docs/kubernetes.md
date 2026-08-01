@@ -157,6 +157,13 @@ When isolation is enabled, the operator owns the runtime-namespace lifecycle. Fo
 
 The Compose model this mirrors is in `internal/provisioner/compose/compose.go` (`ensureEdgeNetwork`).
 
+
+
+## Extended data-plane Kind smoke (opt-in)
+
+Set `SUPADUPA_KIND_DATAPLANE_SMOKE=true` when running `scripts/check-kubernetes-kind-smoke.sh` to provision a Project with storage, realtime, functions, pooler, and analytics enabled and assert Deployment readiness. Default Kind CI remains the lightweight core path. Unit coverage for these service renders lives in `internal/provisioner/kubernetes` (`TestKubernetesRenderedServicesIncludesDataPlaneServices`).
+
+
 ## Current Limits
 
 - **Cross-project network isolation is implemented** (see "Project Network Isolation" above): namespace-per-project with default-deny `NetworkPolicy`, runtime ServiceAccount, PSA labels, and optional quota/limits, on by default. The remaining caveat is that network denial is only enforced under a policy-enforcing CNI (Calico/Cilium); under kindnet the policies are inert. Lease-based leader election and a real Prometheus `/metrics` endpoint are implemented but ship off by default (operator pinned to a single replica unless leader election is enabled).

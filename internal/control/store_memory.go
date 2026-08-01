@@ -1,0 +1,110 @@
+package control
+
+import (
+	"sync"
+)
+
+type MemoryStore struct {
+	mu                    sync.RWMutex
+	platformDefaults      PlatformDefaults
+	platformSSO           PlatformSSOConfig
+	users                 map[string]User
+	orgs                  map[string]Org
+	orgQuotas             map[string]OrgQuota
+	usageSnapshots        map[string][]UsageSnapshot
+	billingInvoices       map[string][]BillingInvoice
+	memberships           map[string]map[string]Membership
+	teams                 map[string]map[string]Team
+	teamMembers           map[string]map[string]TeamMember
+	projectAccess         map[string][]ProjectAccessGrant
+	hosts                 map[string]Host
+	projects              map[string]Project
+	routes                map[string][]ProjectRoute
+	domains               map[string][]ProjectDomain
+	configs               map[string]map[string]ProjectConfig
+	authClients           map[string][]ProjectAuthClient
+	authHooks             map[string][]ProjectAuthHook
+	functions             map[string][]ProjectFunction
+	functionRegions       map[string][]ProjectFunctionRegion
+	functionStorageMounts map[string][]ProjectFunctionStorageMount
+	replicationPipelines  map[string][]ProjectReplicationPipeline
+	embeddingJobs         map[string][]ProjectEmbeddingJob
+	databaseExtensions    map[string][]ProjectDatabaseExtension
+	databaseCronJobs      map[string][]ProjectDatabaseCronJob
+	databaseQueues        map[string][]ProjectDatabaseQueue
+	databaseWebhooks      map[string][]ProjectDatabaseWebhook
+	databaseSchemas       map[string][]ProjectDatabaseSchema
+	databaseRoles         map[string][]ProjectDatabaseRole
+	storageBuckets        map[string][]ProjectStorageBucket
+	vectorBuckets         map[string][]ProjectVectorBucket
+	analyticsBuckets      map[string][]ProjectAnalyticsBucket
+	cdnPolicies           map[string]ProjectCDNPolicy
+	cdnInvalidations      map[string][]CDNInvalidation
+	networkConnections    map[string][]ProjectNetworkConnection
+	branches              map[string][]ProjectBranch
+	replicas              map[string][]ProjectReplica
+	logDrains             map[string][]LogDrain
+	secrets               map[string]map[string]ProjectSecret
+	backupStorageTargets  map[string]BackupStorageTarget
+	policies              map[string]BackupPolicy
+	pitrPolicies          map[string]PITRPolicy
+	backups               []Backup
+	platformBackups       []PlatformBackup
+	walArchives           []WALArchive
+	projectLogs           []ProjectLog
+	telemetry             map[string]TelemetrySample
+	telemetryHistory      map[string][]TelemetryHistorySample
+	nodeTelemetry         map[string]NodeTelemetrySample
+	auditEvents           []AuditEvent
+}
+
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
+		platformDefaults:      defaultPlatformDefaults(),
+		platformSSO:           defaultPlatformSSOConfig(),
+		users:                 map[string]User{},
+		orgs:                  map[string]Org{},
+		orgQuotas:             map[string]OrgQuota{},
+		usageSnapshots:        map[string][]UsageSnapshot{},
+		billingInvoices:       map[string][]BillingInvoice{},
+		memberships:           map[string]map[string]Membership{},
+		teams:                 map[string]map[string]Team{},
+		teamMembers:           map[string]map[string]TeamMember{},
+		projectAccess:         map[string][]ProjectAccessGrant{},
+		hosts:                 map[string]Host{},
+		projects:              map[string]Project{},
+		routes:                map[string][]ProjectRoute{},
+		domains:               map[string][]ProjectDomain{},
+		configs:               map[string]map[string]ProjectConfig{},
+		authClients:           map[string][]ProjectAuthClient{},
+		authHooks:             map[string][]ProjectAuthHook{},
+		functions:             map[string][]ProjectFunction{},
+		functionRegions:       map[string][]ProjectFunctionRegion{},
+		functionStorageMounts: map[string][]ProjectFunctionStorageMount{},
+		replicationPipelines:  map[string][]ProjectReplicationPipeline{},
+		embeddingJobs:         map[string][]ProjectEmbeddingJob{},
+		databaseExtensions:    map[string][]ProjectDatabaseExtension{},
+		databaseCronJobs:      map[string][]ProjectDatabaseCronJob{},
+		databaseQueues:        map[string][]ProjectDatabaseQueue{},
+		databaseWebhooks:      map[string][]ProjectDatabaseWebhook{},
+		databaseSchemas:       map[string][]ProjectDatabaseSchema{},
+		databaseRoles:         map[string][]ProjectDatabaseRole{},
+		storageBuckets:        map[string][]ProjectStorageBucket{},
+		vectorBuckets:         map[string][]ProjectVectorBucket{},
+		analyticsBuckets:      map[string][]ProjectAnalyticsBucket{},
+		cdnPolicies:           map[string]ProjectCDNPolicy{},
+		cdnInvalidations:      map[string][]CDNInvalidation{},
+		networkConnections:    map[string][]ProjectNetworkConnection{},
+		branches:              map[string][]ProjectBranch{},
+		replicas:              map[string][]ProjectReplica{},
+		logDrains:             map[string][]LogDrain{},
+		secrets:               map[string]map[string]ProjectSecret{},
+		backupStorageTargets:  map[string]BackupStorageTarget{},
+		policies:              map[string]BackupPolicy{},
+		pitrPolicies:          map[string]PITRPolicy{},
+		platformBackups:       []PlatformBackup{},
+		telemetry:             map[string]TelemetrySample{},
+		telemetryHistory:      map[string][]TelemetryHistorySample{},
+		nodeTelemetry:         map[string]NodeTelemetrySample{},
+	}
+}

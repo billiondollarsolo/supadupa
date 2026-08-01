@@ -184,7 +184,7 @@ Sequencing recommendation: **A → B → L (gate) → C → F → E → K → G/
 | ID | Item | Pri | Effort | Evidence | Done | Validation |
 |----|------|-----|--------|----------|------|------------|
 | D1 | K8s not primary runtime | P1 | XL | index, README | Equal live validation vs Compose for declared GA features | Full parity checklist |
-| D2 | Full Supabase K8s data plane incomplete | P1 | XL | kubernetes.md limits | Live storage, realtime, functions, pooler, analytics, ingress, Kong auth/transform | Extended Kind smoke + e2e |
+| D2 | Full Supabase K8s data plane incomplete | P1 | XL | kubernetes.md | Partial: unit/render for storage/realtime/functions/pooler/analytics + opt-in Kind flag; live Kind blocked without kind binary | Remaining: `SUPADUPA_KIND_DATAPLANE_SMOKE=true scripts/check-kubernetes-kind-smoke.sh` |
 | D3 | Auxiliary CRDs observed-only (`DataPlanePending`) | P1 | L | kubernetes.md, operator | Real reconcile for ProjectConfig, AuthHooks, BranchClone, Replica, Retained | Operator unit + Kind |
 | D4 | NetworkPolicy needs policy CNI | P1 | M | kubernetes.md | Document required CNI; optional Kind Calico job | `KIND_ISOLATION_CNI_ENFORCED` |
 | D5 | No in-place shared-ns → per-project-ns migration | P2 | L | kubernetes.md | Drain/recreate tool or documented freeze | Runbook |
@@ -389,7 +389,7 @@ Sequencing recommendation: **A → B → L (gate) → C → F → E → K → G/
 | ID | Item | Pri | Effort | Notes |
 |----|------|-----|--------|-------|
 | M1 | Bump Go indirects / aws-sdk-go-v2 minors | P2 | S | `go get -u` careful; govulncheck |
-| M2 | Frontend major track: React 19, TS 6, Zustand 5, lucide 1 | P2 | L | Separate PR; full UI smoke |
+| M2 | Frontend major track: React 19 | P2 | L | React 19 done this branch; TS6/Zustand5/lucide still optional | `npm run check/a11y/build` green on React 19 |
 | M3 | Keep Radix/TanStack/recharts current on minor | P2 | S | Regular cadence |
 | M4 | Project image digest pins (see B3) | P1 | M | Supply chain |
 | M5 | Helm/Kind/kubectl pin update cadence | P3 | S | Document quarterly |
@@ -696,7 +696,7 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | E4 | blocked | Geo Functions placement | Multi-host lab + functions deep with true multi-region placement |
 | E7–E9 E12 | deferred | Iceberg/embeddings/clone/orioledb depth | Feature-specific: branch clone `SUPADUPA_BRANCH_CLONE_COMMAND=…` + `SUPADUPA_COMPAT_BRANCH_VALIDATE=true scripts/compat/29-branches-deep.sh` |
 | J1–J7 | blocked | Multi-host / HA lab not available | Provision ≥2 hosts, register capacity, place projects per region; run `scripts/compat/26-replicas-deep.sh` with promote/failover flags and document failover RTO |
-| D1–D3 D5–D11 D13 | deferred | K8s program multi-month | Expand Kind: `SUPADUPA_KIND_SUPABASE_CORE_SMOKE=true SUPADUPA_KIND_ISOLATION_SMOKE=true scripts/check-kubernetes-kind-smoke.sh` then add storage/realtime/functions phases |
+| D2 | partial | Unit/render proves storage+realtime+functions+pooler+analytics with digest images; Kind dataplane smoke flag added but Kind binary missing here — remaining: install kind + `SUPADUPA_KIND_DATAPLANE_SMOKE=true scripts/check-kubernetes-kind-smoke.sh` |
 
 ### WS-A Recovery
 
@@ -778,7 +778,7 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | ID | Status | Notes |
 |----|--------|-------|
 | G1 | done | Billing/PITR empty states mention feature flags |
-| G2 | deferred | Split app.tsx / database-panels | Remaining: mechanical file splits; `npm run check && npm run build`. |
+| G2 | partial | Backend mega-splits done (store + server_test). Frontend god-files (app.tsx/database-panels) still deferred: `npm run check && npm run build` after splits. |
 | G3 | done | ErrorBoundary |
 | G4 | done | email/ref/CIDR validators wired into login, create project, database ingress |
 | G5 | done | eslint + eslint-plugin-jsx-a11y (`npm run a11y`) wired in CI local-checks |
@@ -811,7 +811,7 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 
 | ID | Status | Notes |
 |----|--------|-------|
-| Mega-file splits | deferred | store.go / server_test.go splits | Remaining: mechanical package splits; `go test ./internal/control ./internal/api`. |
+| Mega-file splits | done | store.go 11479→481 across 19 files; server_test.go split into domain `*_test.go` (monolith removed); `go test ./internal/control ./internal/api` green |
 | Dual version + race + randomHex + stack resolve | done | |
 
 ### WS-L CI
@@ -834,7 +834,8 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | ID | Status | Notes |
 |----|--------|-------|
 | M1 | done | x/crypto + aws-sdk-go-v2 minor bumps |
-| M2–M3 M5–M8 | deferred | Frontend major upgrades | Remaining: React 19 / TS 6 / Zustand 5 PR; `npm run check && npm run build && npm run a11y && npm run browser-smoke`. |
+| M2 | done | React 19 + react-dom 19 + @types 19; check/a11y/build green |
+| M3 M5–M8 | deferred | Remaining major track (TS 6, Zustand 5, lucide 1) | Remaining: dedicated PR; `npm run check && npm run a11y && npm run build`. |
 | M4 | done | Project stack image digests via B3 stack release digests |
 
 ### WS-N Docs

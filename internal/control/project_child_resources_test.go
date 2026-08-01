@@ -176,7 +176,8 @@ func TestProjectChildResourceInventoryMatchesManualSurfaces(t *testing.T) {
 }
 
 func TestProjectChildListMethodsUseSharedCloneSortHelper(t *testing.T) {
-	store := readProjectChildSource(t, "store.go")
+	// MemoryStore list methods live across store.go / store_*.go after the store split.
+	store := readProjectChildStoreSources(t)
 	sharedListMethods := map[string]string{
 		"ListProjectAuthClients":           "authClients",
 		"ListProjectAuthHooks":             "authHooks",
@@ -654,6 +655,32 @@ func readProjectChildSource(t *testing.T, elements ...string) string {
 		t.Fatal(err)
 	}
 	return string(payload)
+}
+
+// readProjectChildStoreSources concatenates store.go and store_*.go (excluding
+// tests) so source-structure assertions still work after the mechanical store split.
+func readProjectChildStoreSources(t *testing.T) string {
+	t.Helper()
+	matches, err := filepath.Glob("store*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, match := range matches {
+		if strings.HasSuffix(match, "_test.go") {
+			continue
+		}
+		payload, err := os.ReadFile(match)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(payload)
+		b.WriteByte('\n')
+	}
+	if b.Len() == 0 {
+		t.Fatal("no store*.go sources found")
+	}
+	return b.String()
 }
 
 func projectChildSourceSection(t *testing.T, source string, startMarker string, endMarker string) string {

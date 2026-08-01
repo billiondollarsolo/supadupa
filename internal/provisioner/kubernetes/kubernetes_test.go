@@ -50,6 +50,25 @@ func hasRenderedDependency(dependencies []kubernetesRenderedDependency, service 
 	return false
 }
 
+func hasRenderedPort(ports []kubernetesRenderedPort, name string, port int) bool {
+	for _, p := range ports {
+		if p.Name == name && p.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
+func assertPinnedStackImage(t *testing.T, service string, image string, repositoryPrefix string) {
+	t.Helper()
+	if !strings.HasPrefix(image, repositoryPrefix) {
+		t.Fatalf("%s image should start with %q, got %q", service, repositoryPrefix, image)
+	}
+	if !strings.Contains(image, "@sha256:") {
+		t.Fatalf("%s image should be digest-pinned with @sha256:, got %q", service, image)
+	}
+}
+
 func assertKubernetesServiceHasResources(t *testing.T, services map[string]kubernetesRenderedService, name string) {
 	t.Helper()
 	service, ok := services[name]
@@ -338,6 +357,154 @@ func TestCreateFiltersDependenciesForDisabledOptionalServices(t *testing.T) {
 	}
 	if !hasRenderedDependency(kong.DependsOn, "auth", 9999) {
 		t.Fatalf("kong should retain dependencies on enabled services: %#v", kong.DependsOn)
+	}
+}
+
+// TestKubernetesRenderedServicesIncludesDataPlaneServices proves plan D2 / criterion 3a:
+// when storage, realtime, functions, pooler, and analytics are enabled, Create renders
+// each into the Project CR with coherent default-stack images (repo + digest), ports,
+// volumes, dependencies, and probes.
+func TestKubernetesRenderedServicesIncludesDataPlaneServices(t *testing.T) {
+	root := t.TempDir()
+	provisioner := NewWithOptions(Options{RootDir: root, Namespace: "platform"})
+
+	// Explicit service map so enablement does not depend on profile defaults alone.
+	err := provisioner.Create(context.Background(), control.ProjectSpec{
+		Ref:          "dataplane",
+		Domain:       "supadupa.test",
+		StackVersion: control.DefaultStackReleaseVersion,
+		Profile:      control.StackProfileFull,
+		ResourceTier: control.ResourceTierSmall,
+		Services: map[string]control.ServiceSpec{
+			"storage":   {Enabled: true},
+			"realtime":  {Enabled: true},
+			"functions": {Enabled: true},
+			"pooler":    {Enabled: true},
+			"analytics": {Enabled: true},
+			// Keep rest enabled: storage depends on it.
+			"rest": {Enabled: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	payload, err := os.ReadFile(filepath.Join(root, "dataplane", "project.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Raw YAML must list all five data-plane services.
+	body := string(payload)
+	for _, name := range []string{"storage", "realtime", "functions", "pooler", "analytics"} {
+		if !strings.Contains(body, "\n    "+name+":\n") {
+			t.Fatalf("expected Project CR YAML to include service %q:\n%s", name, body)
+		}
+	}
+
+	manifest := decodeRenderedProjectManifest(t, payload)
+	services := manifest.Spec.Services
+
+	// --- storage: volume + http 5000, deps db/rest, http probes ---
+	storage, ok := services["storage"]
+	if !ok || !storage.Enabled {
+		t.Fatalf("expected enabled storage in rendered services, got %#v", storage)
+	}
+	assertPinnedStackImage(t, "storage", storage.Image, "supabase/storage-api:v1.60.4")
+	if !hasRenderedPort(storage.Ports, "http", 5000) {
+		t.Fatalf("storage should expose http port 5000, got %#v", storage.Ports)
+	}
+	if len(storage.Volumes) != 1 || storage.Volumes[0].MountPath != "/var/lib/storage" || storage.Volumes[0].Name != "data" {
+		t.Fatalf("storage should mount data volume at /var/lib/storage, got %#v", storage.Volumes)
+	}
+	if !hasRenderedDependency(storage.DependsOn, "db", 5432) || !hasRenderedDependency(storage.DependsOn, "rest", 3000) {
+		t.Fatalf("storage should depend on db:5432 and rest:3000, got %#v", storage.DependsOn)
+	}
+	if storage.ReadinessProbe == nil || storage.ReadinessProbe.Type != "http" || storage.ReadinessProbe.Path != "/status" || storage.ReadinessProbe.Port != 5000 {
+		t.Fatalf("unexpected storage readiness probe: %#v", storage.ReadinessProbe)
+	}
+	if storage.LivenessProbe == nil || storage.LivenessProbe.Type != "http" || storage.LivenessProbe.Path != "/status" || storage.LivenessProbe.Port != 5000 {
+		t.Fatalf("unexpected storage liveness probe: %#v", storage.LivenessProbe)
+	}
+
+	// --- realtime: http 4000, dep db, http probes ---
+	realtime, ok := services["realtime"]
+	if !ok || !realtime.Enabled {
+		t.Fatalf("expected enabled realtime in rendered services, got %#v", realtime)
+	}
+	assertPinnedStackImage(t, "realtime", realtime.Image, "supabase/realtime:v2.102.3")
+	if !hasRenderedPort(realtime.Ports, "http", 4000) {
+		t.Fatalf("realtime should expose http port 4000, got %#v", realtime.Ports)
+	}
+	if !hasRenderedDependency(realtime.DependsOn, "db", 5432) {
+		t.Fatalf("realtime should depend on db:5432, got %#v", realtime.DependsOn)
+	}
+	if realtime.ReadinessProbe == nil || realtime.ReadinessProbe.Type != "http" || realtime.ReadinessProbe.Port != 4000 {
+		t.Fatalf("unexpected realtime readiness probe: %#v", realtime.ReadinessProbe)
+	}
+	if realtime.LivenessProbe == nil || realtime.LivenessProbe.Type != "http" || realtime.LivenessProbe.Port != 4000 {
+		t.Fatalf("unexpected realtime liveness probe: %#v", realtime.LivenessProbe)
+	}
+
+	// --- functions: http 9000, http probes ---
+	functions, ok := services["functions"]
+	if !ok || !functions.Enabled {
+		t.Fatalf("expected enabled functions in rendered services, got %#v", functions)
+	}
+	assertPinnedStackImage(t, "functions", functions.Image, "supabase/edge-runtime:v1.74.0")
+	if !hasRenderedPort(functions.Ports, "http", 9000) {
+		t.Fatalf("functions should expose http port 9000, got %#v", functions.Ports)
+	}
+	if functions.ReadinessProbe == nil || functions.ReadinessProbe.Type != "http" || functions.ReadinessProbe.Port != 9000 {
+		t.Fatalf("unexpected functions readiness probe: %#v", functions.ReadinessProbe)
+	}
+	if functions.LivenessProbe == nil || functions.LivenessProbe.Type != "http" || functions.LivenessProbe.Port != 9000 {
+		t.Fatalf("unexpected functions liveness probe: %#v", functions.LivenessProbe)
+	}
+
+	// --- pooler: transaction 6543 (+ session/http), dep db, tcp probes on 6543 ---
+	pooler, ok := services["pooler"]
+	if !ok || !pooler.Enabled {
+		t.Fatalf("expected enabled pooler in rendered services, got %#v", pooler)
+	}
+	assertPinnedStackImage(t, "pooler", pooler.Image, "supabase/supavisor:2.9.5")
+	if !hasRenderedPort(pooler.Ports, "transaction", 6543) {
+		t.Fatalf("pooler should expose transaction port 6543, got %#v", pooler.Ports)
+	}
+	if !hasRenderedDependency(pooler.DependsOn, "db", 5432) {
+		t.Fatalf("pooler should depend on db:5432, got %#v", pooler.DependsOn)
+	}
+	if pooler.ReadinessProbe == nil || pooler.ReadinessProbe.Type != "tcp" || pooler.ReadinessProbe.Port != 6543 {
+		t.Fatalf("unexpected pooler readiness probe: %#v", pooler.ReadinessProbe)
+	}
+	if pooler.LivenessProbe == nil || pooler.LivenessProbe.Type != "tcp" || pooler.LivenessProbe.Port != 6543 {
+		t.Fatalf("unexpected pooler liveness probe: %#v", pooler.LivenessProbe)
+	}
+
+	// --- analytics: http 4000, dep db, http probes ---
+	analytics, ok := services["analytics"]
+	if !ok || !analytics.Enabled {
+		t.Fatalf("expected enabled analytics in rendered services, got %#v", analytics)
+	}
+	assertPinnedStackImage(t, "analytics", analytics.Image, "supabase/logflare:1.43.1")
+	if !hasRenderedPort(analytics.Ports, "http", 4000) {
+		t.Fatalf("analytics should expose http port 4000, got %#v", analytics.Ports)
+	}
+	if !hasRenderedDependency(analytics.DependsOn, "db", 5432) {
+		t.Fatalf("analytics should depend on db:5432, got %#v", analytics.DependsOn)
+	}
+	if analytics.ReadinessProbe == nil || analytics.ReadinessProbe.Type != "http" || analytics.ReadinessProbe.Port != 4000 {
+		t.Fatalf("unexpected analytics readiness probe: %#v", analytics.ReadinessProbe)
+	}
+	if analytics.LivenessProbe == nil || analytics.LivenessProbe.Type != "http" || analytics.LivenessProbe.Port != 4000 {
+		t.Fatalf("unexpected analytics liveness probe: %#v", analytics.LivenessProbe)
+	}
+
+	// Kong should wait on the enabled edge services that front the data plane.
+	kong := services["kong"]
+	if !hasRenderedDependency(kong.DependsOn, "storage", 5000) ||
+		!hasRenderedDependency(kong.DependsOn, "realtime", 4000) ||
+		!hasRenderedDependency(kong.DependsOn, "functions", 9000) {
+		t.Fatalf("kong should depend on enabled storage/realtime/functions, got %#v", kong.DependsOn)
 	}
 }
 

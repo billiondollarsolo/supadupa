@@ -21,3 +21,6 @@ scripts/compat/.artifacts/
 # Local review artifacts
 /screenshots/
 frontend/_shots.cjs
+
+# Vitest coverage
+frontend/coverage/

@@ -100,6 +100,22 @@ The dashboard is intended as an at-a-glance operational view:
 
 Static requested resources and live usage are different. Requested resources describe what a project reserves or intends to use; live usage describes what the host/project is consuming now.
 
+
+
+## Host capacity accounting (no project-wide cgroup)
+
+Tier and exact CPU/RAM/disk values are **reservations** for placement, quota, and dashboards. Docker Compose does **not** provide a true project-wide aggregate cgroup that caps the sum of all service containers under one project hard limit.
+
+What operators should do:
+
+1. Size the host for control plane **plus** the sum of concurrent project reservations (see install resource requirements).
+2. Enable **Enforce limits** on projects that must not burst: Supadupa then writes per-container Compose `deploy.resources.limits` (or Kubernetes requests/limits) by distributing the project budget across enabled services.
+3. Treat telemetry over 100% of reservation as a signal that the project is bursting into free host capacity when limits are off — not as a Compose bug.
+4. For stricter multi-tenant isolation than per-container limits, run projects on dedicated hosts/VMs or use Kubernetes with ResourceQuota per project namespace (`projectIsolation` + quota in the Helm chart).
+
+This is plan item **C3** (host accounting documentation). True host-level aggregate cgroups remain optional future work outside Compose.
+
+
 ## Metrics And Logs
 
 The current MVP includes lightweight metrics/log surfaces in the admin UI. For production-grade observability, plan to add external log and metrics storage such as Prometheus/Grafana, OpenTelemetry, or another long-retention backend.

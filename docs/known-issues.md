@@ -18,6 +18,8 @@ host-memory limit, not a bug.
 
 ## Resource sizes are reservations unless limits are enforced
 
+See also [Host capacity accounting](operations.md#host-capacity-accounting-no-project-wide-cgroup) for operator guidance (plan C3).
+
 Tier/custom sizes (CPU/RAM/disk) are used for **placement and quota accounting**.
 They are **not** enforced container limits unless you enable "Enforce limits".
 When enabled, Supadupa distributes the selected CPU/RAM budget across enabled

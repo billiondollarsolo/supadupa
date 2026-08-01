@@ -708,7 +708,7 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | A4 | done | Loopback honesty retained + documented |
 | A5 | done | Production profile sets REQUIRE_* flags |
 | A6 | blocked | See external table |
-| A7 | deferred | K8s PITR commands — see D program |
+| A7 | deferred | K8s PITR substrate defaults | Remaining: implement `SUPADUPA_PITR_RESTORE_COMMAND` / physical/WAL defaults for k8s provisioner; validate with Kind + disposable project restore. |
 | A8 | done | backups-recovery control-plane vs project section |
 | A9 | done | Opt-in destructive auto-restore documented/guarded (no product claim change) |
 | A10 | done | Logical vs PITR schema note |
@@ -719,13 +719,13 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 |----|--------|-------|
 | B1 | done | Production hard-fail: JSON adapter requires `SUPADUPA_ALLOW_DEV_SECRETS`; else startup error (`enforcePlatformSSOJSONAdapterPolicy`). Real SAML productization remains deferred (external table). |
 | B2 | done | Adapter default off; warn only under allow-dev |
-| B3 | deferred | Digest lock project images: extend stack_releases manifests with digests + render tests |
-| B4 | deferred | Apply worker host architecture — production-profile documents |
+| B3 | done | Built-in releases pin multi-arch digests; compose/k8s use ImageRef; unit + compose render tests |
+| B4 | deferred | Separate apply worker host/VM | Remaining: add deploy overlay + docs for isolated apply worker; validate with `scripts/check-compose-apply-lifecycle-smoke.sh` against remote DOCKER_HOST. |
 | B5 | done | Existing proxy tests + allowlist retained as current boundary |
 | B6 | done | Fail-closed randomHex compose+store + unit tests |
 | B7 | done | Vector docker.sock default off documented |
 | B8 | done | Dual-gate DB ingress fail-closed |
-| B9 | deferred | External KMS default runbook partial (security.md knobs) |
+| B9 | deferred | External KMS as default prod path | Remaining: production-profile default `SUPADUPA_KMS_PROVIDER`; `go test ./internal/control -run Encryption`. |
 | B10 | done | Legacy MFA plaintext load counter + metric + re-enroll docs |
 | B11 | done | Traefik dashboard defaults disabled |
 | B12 | done | Legacy password/SCIM verify counters + metrics + docs |
@@ -738,13 +738,13 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 |----|--------|-------|
 | C1 | done | Documented sizing / analytics OOM (known-issues + production-profile) |
 | C2 | done | Reservations vs enforce-limits documented |
-| C3 | deferred | Aggregate cgroup research |
-| C4 | deferred | Edge dual-attach engineering |
-| C5 | deferred | Reconcile hysteresis |
+| C3 | done | Host capacity accounting documented in operations.md + known-issues (Compose has no project-wide aggregate cgroup; enforce-limits + host sizing guidance) |
+| C4 | deferred | Edge-router recreate 502 window | Remaining: dual edge or pre-join networks; chaos: recreate only edge-router and measure attach time <5s. |
+| C5 | deferred | Status thrash under resource pressure | Remaining: add reconcile backoff hysteresis; loadtest assert no compose re-apply storm. |
 | C6 | done | `control.EnsurePlatformRouteFile` + startup rewrite + tests; known-issues note |
-| C7 | deferred | Docker Hub CI auth |
+| C7 | deferred | Docker Hub rate limits | Remaining: add CI registry login secrets + `docker login` before image builds in compat.yml. |
 | C8 | done | Apply mode honesty documented |
-| C9 | deferred | Auto-pause policy |
+| C9 | deferred | Auto scale-to-zero policy | Remaining: optional idle auto-pause scheduler; lifecycle tests for pause after idle. |
 
 ### WS-D Kubernetes
 
@@ -771,25 +771,25 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | ID | Status | Notes |
 |----|--------|-------|
 | F1 | done | Same as B1 hard-fail unsupported prod path |
-| F2–F7 | deferred | SCIM/MFA deep / project SAML / templates — need IdP/SMS labs |
+| F2–F7 | deferred | SCIM/MFA deep / project SAML | Remaining: IdP/SMS lab; `SUPADUPA_COMPAT_AUTH_MFA_VALIDATE=true` + SCIM token configured security phase. |
 
 ### WS-G UI
 
 | ID | Status | Notes |
 |----|--------|-------|
 | G1 | done | Billing/PITR empty states mention feature flags |
-| G2 | deferred | God-file splits (merge risk) |
+| G2 | deferred | Split app.tsx / database-panels | Remaining: mechanical file splits; `npm run check && npm run build`. |
 | G3 | done | ErrorBoundary |
 | G4 | done | email/ref/CIDR validators wired into login, create project, database ingress |
-| G5 | done | aria-invalid on login email; a11y without full eslint |
+| G5 | done | eslint + eslint-plugin-jsx-a11y (`npm run a11y`) wired in CI local-checks |
 | G6 | done | Expanded vitest (validators + boundary) |
-| G7–G11 | deferred | Broader e2e/Studio |
+| G7–G11 | deferred | Broader Playwright + Studio | Remaining: expand `frontend/tests/e2e`; `npm run browser-smoke`. |
 
 ### WS-H Integrations
 
 | ID | Status | Notes |
 |----|--------|-------|
-| H1–H4 H6 | deferred | Codegen program |
+| H1–H4 H6 | deferred | TF/CLI/MCP codegen | Remaining: inventory-driven codegen spike; `go test ./internal/terraform ./internal/cli ./internal/mcp` + provider smoke. |
 | H5 | done | Reveal opt-in audited |
 | H7 | done | cmd cli/mcp/terraform-provider smoke tests |
 
@@ -798,7 +798,7 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | ID | Status | Notes |
 |----|--------|-------|
 | I1 | done | Compliance certification disclaimer |
-| I2 I3 I4 I6 I7 | deferred | Live advisor / OTel / long retention |
+| I2–I4 I6 I7 | deferred | Advisor depth / OTel / long retention | Remaining: substrate health checks + optional OTel exporter; scrape `/metrics` after enable. |
 | I5 | done | production_posture in flags + profile |
 
 ### WS-J Multi-region
@@ -811,7 +811,7 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 
 | ID | Status | Notes |
 |----|--------|-------|
-| Mega-file splits | deferred | store.go / server_test.go |
+| Mega-file splits | deferred | store.go / server_test.go splits | Remaining: mechanical package splits; `go test ./internal/control ./internal/api`. |
 | Dual version + race + randomHex + stack resolve | done | |
 
 ### WS-L CI
@@ -821,12 +821,12 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | L1 | blocked | External table |
 | L2 | done | race critical packages |
 | L3 | done | `govulncheck-required` job on tags v* / release/** |
-| L4 | deferred | PR compose smokes (heavy) |
+| L4 | deferred | PR compose apply smokes | Remaining: optional heavy job running `scripts/check-compose-local-smoke.sh` on schedule. |
 | L5 | done | terraform-provider-smoke job (schedule/dispatch/tags) |
-| L6 | deferred | Kind core nightly expand |
-| L7 | deferred | Upgrade matrix release gate expand |
-| L8 | deferred | Coverage floor |
-| L9 | deferred | Split workflows further |
+| L6 | deferred | Kind core+isolation nightly | Remaining: schedule `SUPADUPA_KIND_SUPABASE_CORE_SMOKE=true SUPADUPA_KIND_ISOLATION_SMOKE=true scripts/check-kubernetes-kind-smoke.sh`. |
+| L7 | deferred | Upgrade matrix release gate | Remaining: release workflow with `SUPADUPA_COMPAT_UPGRADE_MATRIX=true scripts/compat/run.sh`. |
+| L8 | done | `npm run coverage` with vitest v8 thresholds (lib/components floors) in CI |
+| L9 | deferred | Split CI workflows | Remaining: extract lint/security/compat workflows from monoworkflow. |
 | L10 | done | skip reason self-check in final suite |
 
 ### WS-M Dependencies
@@ -834,8 +834,8 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | ID | Status | Notes |
 |----|--------|-------|
 | M1 | done | x/crypto + aws-sdk-go-v2 minor bumps |
-| M2–M3 M5–M8 | deferred | React 19 track etc. |
-| M4 | deferred | Same B3 digests |
+| M2–M3 M5–M8 | deferred | Frontend major upgrades | Remaining: React 19 / TS 6 / Zustand 5 PR; `npm run check && npm run build && npm run a11y && npm run browser-smoke`. |
+| M4 | done | Project stack image digests via B3 stack release digests |
 
 ### WS-N Docs
 

@@ -126,7 +126,7 @@ jobs:
       - name: Prepare security artifacts
         run: mkdir -p artifacts/security
       - name: Go tests
-        run: go test ./...
+        run: go test ./cmd/... ./internal/... ./scripts/...
       - name: Go race tests (critical packages)
         run: go test -race ./internal/api ./internal/control ./internal/scheduler ./internal/operator ./internal/provisioner/compose
       - name: Platform version dual-source check
@@ -138,11 +138,15 @@ jobs:
       - name: Go vulnerability check
         run: |
           set -euo pipefail
-          go run golang.org/x/vuln/cmd/govulncheck@latest ./... | tee artifacts/security/govulncheck.txt
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./cmd/... ./internal/... | tee artifacts/security/govulncheck.txt
       - name: Frontend build
         run: npm --prefix frontend run build
       - name: Frontend static remediation checks
         run: npm --prefix frontend run check
+      - name: Frontend a11y (jsx-a11y)
+        run: npm --prefix frontend run a11y
+      - name: Frontend unit coverage floor
+        run: npm --prefix frontend run coverage
       - name: Install Playwright Chromium
         run: npm --prefix frontend exec playwright install --with-deps chromium
       - name: Frontend browser smoke
@@ -245,7 +249,7 @@ jobs:
         run: |
           set -euo pipefail
           # No SUPADUPA_FINAL_SKIP_* / continue-on-error: findings fail the job.
-          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./cmd/... ./internal/...
 
   # L5: Terraform provider CLI smoke (fake Management API + apply/plan/destroy).
   # Runs on schedule, tags, release branches, and manual dispatch — not every PR

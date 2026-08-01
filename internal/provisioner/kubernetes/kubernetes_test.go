@@ -126,7 +126,7 @@ func TestCreateRendersProjectCRD(t *testing.T) {
 		t.Fatalf("expected CUSTOM environment value, got %#v", manifest.Spec.Environment)
 	}
 	db := manifest.Spec.Services["db"]
-	if db.Image != "supabase/postgres:15.8.1.060" || len(db.Ports) != 1 || db.Ports[0].Port != 5432 {
+	if !strings.HasPrefix(db.Image, "supabase/postgres:15.8.1.060") || !strings.Contains(db.Image, "@sha256:") || len(db.Ports) != 1 || db.Ports[0].Port != 5432 {
 		t.Fatalf("unexpected db service: %#v", db)
 	}
 	if db.RunAsNonRoot == nil || *db.RunAsNonRoot {
@@ -158,7 +158,7 @@ func TestCreateRendersProjectCRD(t *testing.T) {
 		t.Fatalf("expected Kubernetes db bootstrap SQL to render Supabase roles, schemas, and publications, got:\n%s", db.ConfigFiles[0].Content)
 	}
 	kong := manifest.Spec.Services["kong"]
-	if kong.Image != "kong/kong:3.9.1" || kong.Ingress == nil || kong.Ingress.Host != "alpha.supadupa.test" {
+	if !strings.HasPrefix(kong.Image, "kong/kong:3.9.1") || !strings.Contains(kong.Image, "@sha256:") || kong.Ingress == nil || kong.Ingress.Host != "alpha.supadupa.test" {
 		t.Fatalf("unexpected kong service: %#v", kong)
 	}
 	if kong.RunAsNonRoot == nil || *kong.RunAsNonRoot {
@@ -215,7 +215,7 @@ func TestCreateRendersProjectCRD(t *testing.T) {
 		t.Fatalf("expected auth dependency on db:5432, got %#v", auth.DependsOn)
 	}
 	storage := manifest.Spec.Services["storage"]
-	if !storage.Enabled || storage.Image != "supabase/storage-api:v1.60.4" || len(storage.Ports) != 1 || storage.Ports[0].Port != 5000 {
+	if !storage.Enabled || !strings.HasPrefix(storage.Image, "supabase/storage-api:v1.60.4") || !strings.Contains(storage.Image, "@sha256:") || len(storage.Ports) != 1 || storage.Ports[0].Port != 5000 {
 		t.Fatalf("unexpected storage service: %#v", storage)
 	}
 	if storage.Env["DATABASE_URL"] != "postgres://supabase_storage_admin:$(POSTGRES_PASSWORD)@alpha-db:5432/$(POSTGRES_DB)" ||
@@ -853,7 +853,7 @@ func TestSyncServicesPreservesPausedDesiredState(t *testing.T) {
 	if manifest.Spec.Services["storage"].Enabled {
 		t.Fatalf("expected storage to be disabled after service sync: %#v", manifest.Spec.Services["storage"])
 	}
-	if manifest.Spec.Services["db"].Image != "supabase/postgres:15.8.1.060" {
+	if !strings.HasPrefix(manifest.Spec.Services["db"].Image, "supabase/postgres:15.8.1.060") || !strings.Contains(manifest.Spec.Services["db"].Image, "@sha256:") {
 		t.Fatalf("service sync should preserve existing stack version for default service rendering: %#v", manifest.Spec.Services["db"])
 	}
 	if manifest.Spec.Services["kong"].Ingress == nil || manifest.Spec.Services["kong"].Ingress.Host != "alpha.example.test" {

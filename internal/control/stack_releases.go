@@ -25,6 +25,9 @@ type StackReleaseManifest struct {
 	Pooler       string `json:"pooler"`
 	Analytics    string `json:"analytics"`
 	Vector       string `json:"vector"`
+	// Digests maps service keys to multi-arch image digests (sha256:...). When set,
+	// provisioners pin image references as repository:tag@sha256:... (plan B3).
+	Digests map[string]string `json:"digests,omitempty"`
 }
 
 var builtinStackReleaseManifests = map[string]StackReleaseManifest{
@@ -43,6 +46,7 @@ var builtinStackReleaseManifests = map[string]StackReleaseManifest{
 		Pooler:       "2.9.5",
 		Analytics:    "1.43.1",
 		Vector:       "0.53.0-alpine",
+		Digests:      stackDigestsForPostgresVersion("15.8.1.085"),
 	},
 	"15.8.1.060": {
 		Version:      "15.8.1.060",
@@ -59,6 +63,7 @@ var builtinStackReleaseManifests = map[string]StackReleaseManifest{
 		Pooler:       "2.9.5",
 		Analytics:    "1.43.1",
 		Vector:       "0.53.0-alpine",
+		Digests:      stackDigestsForPostgresVersion("15.8.1.060"),
 	},
 	"15.8.1.054": {
 		Version:      "15.8.1.054",
@@ -75,6 +80,7 @@ var builtinStackReleaseManifests = map[string]StackReleaseManifest{
 		Pooler:       "2.9.5",
 		Analytics:    "1.43.1",
 		Vector:       "0.53.0-alpine",
+		Digests:      stackDigestsForPostgresVersion("15.8.1.054"),
 	},
 	"15.8.1.049": {
 		Version:      "15.8.1.049",
@@ -91,6 +97,7 @@ var builtinStackReleaseManifests = map[string]StackReleaseManifest{
 		Pooler:       "2.9.5",
 		Analytics:    "1.43.1",
 		Vector:       "0.53.0-alpine",
+		Digests:      stackDigestsForPostgresVersion("15.8.1.049"),
 	},
 }
 
@@ -259,6 +266,9 @@ func mergeStackReleaseManifestDefaults(defaults StackReleaseManifest, manifest S
 	}
 	if manifest.Vector == "" {
 		manifest.Vector = defaults.Vector
+	}
+	if len(manifest.Digests) == 0 && len(defaults.Digests) > 0 {
+		manifest.Digests = cloneStringMap(defaults.Digests)
 	}
 	return manifest
 }

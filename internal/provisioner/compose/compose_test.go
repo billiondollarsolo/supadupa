@@ -611,6 +611,82 @@ func TestCreateRendersConfiguredStackReleaseManifest(t *testing.T) {
 	}
 }
 
+func TestCreatePinsBuiltinStackImagesWithDigests(t *testing.T) {
+	root := t.TempDir()
+	provisioner := NewWithOptions(Options{RootDir: root})
+	if err := provisioner.Create(context.Background(), control.ProjectSpec{
+		Ref:          "digest-pin",
+		Domain:       "supadupa.test",
+		StackVersion: control.DefaultStackReleaseVersion,
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	payload, err := os.ReadFile(filepath.Join(root, "digest-pin", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(payload)
+	for _, fragment := range []string{
+		"supabase/postgres:" + control.DefaultStackReleaseVersion + "@sha256:",
+		"kong/kong:3.9.1@sha256:",
+		"supabase/gotrue:v2.189.0@sha256:",
+		"postgrest/postgrest:v14.12@sha256:",
+	} {
+		if !strings.Contains(compose, fragment) {
+			t.Fatalf("expected digest-pinned image containing %q, got:\n%s", fragment, compose)
+		}
+	}
+	// Tags alone without digests should not appear for kong when digests are pinned.
+	if strings.Contains(compose, "image: kong/kong:3.9.1\n") {
+		t.Fatal("expected kong image to be digest-pinned, found unpinned tag")
+	}
+}
+
+func TestCreateRendersJSONOverrideDigests(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("SUPADUPA_SUPPORTED_STACK_VERSIONS", "2026.06.07")
+	t.Setenv("SUPADUPA_STACK_RELEASES_JSON", `{
+		"2026.06.07": {
+			"postgres": "pg-tag",
+			"kong": "kong-tag",
+			"studio": "studio-tag",
+			"postgres_meta": "meta-tag",
+			"auth": "auth-tag",
+			"rest": "rest-tag",
+			"realtime": "realtime-tag",
+			"storage": "storage-tag",
+			"imgproxy": "imgproxy-tag",
+			"edge_runtime": "edge-tag",
+			"pooler": "pooler-tag",
+			"analytics": "analytics-tag",
+			"vector": "vector-tag",
+			"digests": {
+				"postgres": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"kong": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			}
+		}
+	}`)
+	provisioner := NewWithOptions(Options{RootDir: root})
+	if err := provisioner.Create(context.Background(), control.ProjectSpec{
+		Ref:          "json-digest",
+		Domain:       "supadupa.test",
+		StackVersion: "2026.06.07",
+	}); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	payload, err := os.ReadFile(filepath.Join(root, "json-digest", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(payload)
+	if !strings.Contains(compose, "supabase/postgres:pg-tag@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+		t.Fatalf("expected JSON override postgres digest pin, got:\n%s", compose)
+	}
+	if !strings.Contains(compose, "kong/kong:kong-tag@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") {
+		t.Fatalf("expected JSON override kong digest pin, got:\n%s", compose)
+	}
+}
+
 func TestCreateFailsWhenStackReleaseCatalogCannotResolve(t *testing.T) {
 	root := t.TempDir()
 	// Filter catalog to a version that has no manifest so neither requested nor default resolve.

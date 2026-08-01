@@ -2708,7 +2708,7 @@ func writeComposeFile(path string, spec control.ProjectSpec, projectDockerLogs b
 	builder.WriteString(fmt.Sprintf(`name: supadupa-%s
 services:
   db:
-    image: supabase/postgres:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2732,7 +2732,7 @@ services:
       - %s
       - %s
   kong:
-    image: kong/kong:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2762,13 +2762,13 @@ services:
       - %s
       - %s
     depends_on:
-`, spec.Ref, release.Postgres, deploySection("db"), spec.Ref, pgHBAMount, dbInitMount, release.Kong, deploySection("kong"), spec.Ref, kongConfigMount, kongEntrypointMount))
+`, spec.Ref, release.ImageRef("postgres", "supabase/postgres", release.Postgres), deploySection("db"), spec.Ref, pgHBAMount, dbInitMount, release.ImageRef("kong", "kong/kong", release.Kong), deploySection("kong"), spec.Ref, kongConfigMount, kongEntrypointMount))
 	for _, dependency := range depends {
 		builder.WriteString(fmt.Sprintf("      - %s\n", dependency))
 	}
 	if services["studio"] {
 		builder.WriteString(fmt.Sprintf(`  studio:
-    image: supabase/studio:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2798,10 +2798,10 @@ services:
     volumes:
       - %s
     depends_on: [meta]
-`, release.Studio, deploySection("studio"), studioProjectName(spec), spec.Ref, spec.Ref, composeBindMount(projectHostDir, "functions", "/home/deno/functions", true)))
+`, release.ImageRef("studio", "supabase/studio", release.Studio), deploySection("studio"), studioProjectName(spec), spec.Ref, spec.Ref, composeBindMount(projectHostDir, "functions", "/home/deno/functions", true)))
 	}
 	builder.WriteString(fmt.Sprintf(`  meta:
-    image: supabase/postgres-meta:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2815,10 +2815,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.PostgresMeta, deploySection("meta")))
+`, release.ImageRef("postgres_meta", "supabase/postgres-meta", release.PostgresMeta), deploySection("meta")))
 	if services["auth"] {
 		builder.WriteString(fmt.Sprintf(`  auth:
-    image: supabase/gotrue:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2828,11 +2828,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.Auth, deploySection("auth")))
+`, release.ImageRef("auth", "supabase/gotrue", release.Auth), deploySection("auth")))
 	}
 	if services["rest"] {
 		builder.WriteString(fmt.Sprintf(`  rest:
-    image: postgrest/postgrest:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2840,11 +2840,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.REST, deploySection("rest")))
+`, release.ImageRef("rest", "postgrest/postgrest", release.REST), deploySection("rest")))
 	}
 	if services["realtime"] {
 		builder.WriteString(fmt.Sprintf(`  realtime:
-    image: supabase/realtime:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2875,11 +2875,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.Realtime, deploySection("realtime"), spec.Ref))
+`, release.ImageRef("realtime", "supabase/realtime", release.Realtime), deploySection("realtime"), spec.Ref))
 	}
 	if services["storage"] {
 		builder.WriteString(fmt.Sprintf(`  storage:
-    image: supabase/storage-api:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2912,7 +2912,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.Storage, deploySection("storage")))
+`, release.ImageRef("storage", "supabase/storage-api", release.Storage), deploySection("storage")))
 		if services["rest"] {
 			builder.WriteString("      rest:\n        condition: service_started\n")
 		}
@@ -2922,7 +2922,7 @@ services:
 	}
 	if services["imgproxy"] {
 		builder.WriteString(fmt.Sprintf(`  imgproxy:
-    image: darthsim/imgproxy:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2931,11 +2931,11 @@ services:
     networks: [internal]
     volumes:
       - storage-data:/var/lib/storage:ro
-`, release.Imgproxy, deploySection("imgproxy")))
+`, release.ImageRef("imgproxy", "darthsim/imgproxy", release.Imgproxy), deploySection("imgproxy")))
 	}
 	if services["functions"] {
 		builder.WriteString(fmt.Sprintf(`  edge-runtime:
-    image: supabase/edge-runtime:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -2955,11 +2955,11 @@ services:
       - %s
       - storage-data:/mnt/.supadupa-storage:ro
     command: ["start", "--main-service", "/home/deno/functions/main"]
-`, release.EdgeRuntime, deploySection("functions"), functionsMount))
+`, release.ImageRef("edge_runtime", "supabase/edge-runtime", release.EdgeRuntime), deploySection("functions"), functionsMount))
 	}
 	if services["pooler"] {
 		builder.WriteString(fmt.Sprintf(`  pooler:
-    image: supabase/supavisor:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     restart: unless-stopped
@@ -2996,11 +2996,11 @@ services:
       db:
         condition: service_healthy
     command: ["/bin/sh", "-c", "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"]
-`, release.Pooler, deploySection("pooler"), spec.Ref, spec.Ref, spec.Ref, poolerConfigMount))
+`, release.ImageRef("pooler", "supabase/supavisor", release.Pooler), deploySection("pooler"), spec.Ref, spec.Ref, spec.Ref, poolerConfigMount))
 	}
 	if services["analytics"] {
 		builder.WriteString(fmt.Sprintf(`  analytics:
-    image: supabase/logflare:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -3023,7 +3023,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-`, release.Analytics, deploySection("analytics")))
+`, release.ImageRef("analytics", "supabase/logflare", release.Analytics), deploySection("analytics")))
 	}
 	if services["vector"] {
 		volumes := []string{
@@ -3034,7 +3034,7 @@ services:
 			volumes = append(volumes, "      - /var/run/docker.sock:/var/run/docker.sock:ro")
 		}
 		builder.WriteString(fmt.Sprintf(`  vector:
-    image: timberio/vector:%s
+    image: %s
 %s    security_opt:
       - no-new-privileges:true
     env_file: .env
@@ -3042,7 +3042,7 @@ services:
     volumes:
 %s
     command: ["--config", "/etc/vector/vector.yml", "--config-dir", "/etc/vector/log-drains"]
-`, release.Vector, deploySection("vector"), strings.Join(volumes, "\n")))
+`, release.ImageRef("vector", "timberio/vector", release.Vector), deploySection("vector"), strings.Join(volumes, "\n")))
 	}
 	builder.WriteString(fmt.Sprintf(`networks:
   internal:

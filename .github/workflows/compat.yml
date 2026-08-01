@@ -227,10 +227,11 @@ jobs:
       - name: Kubernetes Kind smoke
         env:
           SUPADUPA_KIND_REBUILD_IMAGES: "false"
-        run: scripts/check-kubernetes-kind-smoke.sh scripts/check-kind-dataplane-gate.sh
+        # Gate is a separate local-checks step (Kind dataplane gate); do not pass it as argv here.
+        run: scripts/check-kubernetes-kind-smoke.sh
       - name: Script syntax
         run: |
-          bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-platform-version.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/check-terraform-provider-smoke.sh scripts/check-final-remediation-suite.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh
+          bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-kind-dataplane-gate.sh scripts/check-platform-version.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/check-terraform-provider-smoke.sh scripts/check-final-remediation-suite.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh
           python3 -m py_compile scripts/check-compose-hardening.py scripts/check-docs-remediation.py scripts/check-security-regressions.py scripts/check-kubernetes-crds.py
 
   # L3: govulncheck is required and hard-fails on release tags (v*) and release/** branches.

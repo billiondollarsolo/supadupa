@@ -19,6 +19,10 @@ spec:
       protocol: TCP
 {{- end }}
 {{- if .Values.operator.podDisruptionBudget.enabled }}
+{{- /* D7: single-replica operator PDB with minAvailable blocks drains; needs HA + leader election. */ -}}
+{{- if or (not .Values.operator.leaderElection.enabled) (le (int .Values.operator.replicaCount) 1) }}
+{{- fail "operator.podDisruptionBudget.enabled requires leaderElection.enabled=true and operator.replicaCount > 1 (single replica PDB blocks voluntary node drains)" }}
+{{- end }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

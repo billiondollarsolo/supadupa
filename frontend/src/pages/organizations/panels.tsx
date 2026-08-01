@@ -877,7 +877,7 @@ export function BillingPanel({ orgId, invoices, loading, enabled }: { orgId: str
     >
       <div className="mt-4 grid gap-2">
         {!enabled ? (
-          <EmptyState icon={CreditCard} title="Billing disabled" description="Enable billing in org feature flags before listing or generating invoices." />
+          <EmptyState icon={CreditCard} title="Billing disabled" description="This surface is off via platform/org feature flags (billing). Enable billing under Organizations → Features or Settings → Feature flags — the empty list is intentional, not an error." />
         ) : null}
         {enabled && loading ? <p className="text-sm text-muted">Loading invoices...</p> : null}
         {enabled && !loading && invoices.length === 0 ? (

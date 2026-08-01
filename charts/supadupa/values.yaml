@@ -48,6 +48,7 @@ controlPlane:
   podDisruptionBudget:
     # Recommended when controlPlane.replicaCount > 1 so node drains keep at least
     # one API replica serving. minAvailable is ignored unless enabled.
+    # Enabling with replicaCount=1 fails chart render (D7 drain footgun).
     enabled: false
     minAvailable: 1
   podSecurityContext:
@@ -168,7 +169,8 @@ operator:
     # NOTE: a single-replica operator (leaderElection.enabled=false, replicas=1)
     # with minAvailable:1 will BLOCK voluntary node drains entirely. Only enable
     # this together with leaderElection.enabled=true and replicaCount>1, where it
-    # keeps a standby available during drains.
+    # keeps a standby available during drains. Chart fails render if PDB is
+    # enabled without leader election and replicaCount>1 (D7).
     enabled: false
     minAvailable: 1
   resources:

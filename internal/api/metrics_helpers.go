@@ -112,6 +112,10 @@ func renderPrometheusMetrics(metrics control.FleetMetrics, projects []control.Pr
 	writeMetric("supadupa_project_log_events_total", "Total project log events recorded.", metrics.ProjectLogEvents)
 	writeMetric("supadupa_audit_events_total", "Total audit events recorded.", metrics.AuditEvents)
 	writeMetric("supadupa_audit_verified", "Whether the audit hash chain verifies, 1 for true and 0 for false.", boolMetric(metrics.AuditVerified))
+	writeMetric("supadupa_rollback_failures_total", "Total best-effort project-child rollback delete failures after apply-path errors.", RollbackFailureTotal())
+	writeMetric("supadupa_legacy_password_hash_verifies_total", "Successful password verifications that used a legacy sha256$ hash since process start (B12 migration pressure).", control.LegacyPasswordHashVerifyCount())
+	writeMetric("supadupa_legacy_scim_hash_verifies_total", "Successful SCIM token verifications that used a legacy unkeyed SHA-256 hash since process start (B12 migration pressure).", control.LegacySCIMHashVerifyCount())
+	writeMetric("supadupa_legacy_mfa_plaintext_loads_total", "Normalized MFA seed loads that read legacy plaintext (no encryption envelope) since process start (B10 migration pressure).", control.LegacyMFAPlaintextLoadCount())
 	writeMetric("supadupa_metrics_sampled_at_unix", "Unix timestamp when fleet metrics were sampled.", metrics.SampledAt.Unix())
 	for _, project := range projects {
 		writeProjectMetric("supadupa_project_resource_cpu", "Reserved CPU for a project.", project, nil, project.Resources.CPU)

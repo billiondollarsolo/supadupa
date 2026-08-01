@@ -2683,6 +2683,9 @@ func (s *PersistentStore) decryptOptionalString(value sql.NullString) (string, e
 		return "", nil
 	}
 	if !strings.HasPrefix(value.String, encryptedStringPrefix) {
+		// Legacy plaintext MFA seed (or other optional string) still readable for
+		// migration; next normalized persistence sync rewrites encrypted.
+		noteLegacyMFAPlaintextLoad()
 		return value.String, nil
 	}
 	encoded := strings.TrimPrefix(value.String, encryptedStringPrefix)

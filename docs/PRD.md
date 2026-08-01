@@ -455,3 +455,9 @@ These are the only intended gaps. Everything in Section 8 is otherwise targeted 
 ## Appendix A - Upstream stack components
 
 Postgres, GoTrue (Auth), PostgREST, pg_graphql, Realtime, Storage API, imgproxy, Kong (gateway), Studio, Supavisor (pooler), Edge Runtime (Deno functions), Logflare (analytics), Vector (logs), pg_cron, pgmq, pgvector, Vault. Versions pinned per supadupa release; upstream `docker-compose.yml` is the reference for tested-together version sets.
+
+## As-built vs PRD (0.3.x)
+
+This PRD still reads as a phased roadmap. As of the 0.3.x control plane, many Phase 2/3 **API and admin surfaces** exist in code (feature-flagged): custom domains, network restrictions, log drains, PITR plumbing, preview branches, read replicas, usage metering, draft billing, platform SSO/SCIM adapters, Kubernetes Helm/operator scaffold, team RBAC, compliance helpers, and related project-child resources.
+
+That does **not** mean hosted-grade proof is complete. Compose remains the primary MVP runtime; Kubernetes data-plane parity is incomplete; off-host durable PITR/upgrade-restore validation is not fully proven in-tree; platform SSO is a normalized-JSON adapter (not full SAML XML); billing has no payment processor; and several recovery/HA paths remain operator-proven rather than product-certified. Treat feature flags and API presence as “surface available,” not “production-certified.” See [feature-flags.md](feature-flags.md), [known-issues.md](known-issues.md), [production-profile.md](production-profile.md), and [master-improvement-plan.md](master-improvement-plan.md).

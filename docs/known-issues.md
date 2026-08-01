@@ -41,8 +41,13 @@ recreating *just* the edge-router on a busy host.
 `runtime/routes/` holds Traefik's dynamic config:
 
 - `00-platform.yaml` — the control-plane routes (`admin.` / `api.` hosts). **Do
-  not delete this.** If it is lost, the API and admin UI return `404`; restore
-  the file or re-run `setup-compose.sh` (which rewrites `.env`).
+  not delete this** under normal operation. If it is lost, the API and admin UI
+  return `404` until it is restored. On control-plane start, Supadupa rewrites
+  a missing `00-platform.yaml` when `SUPADUPA_API_HOST` and
+  `SUPADUPA_ADMIN_HOST` are set (`EnsurePlatformRouteFile`, plan C6). You can
+  also restore by re-running `setup-compose.sh` (which rewrites `.env` and route
+  generation). Prefer not deleting the file; auto-rewrite is a recovery path,
+  not an invitation to manage routes by hand-delete.
 - `<ref>.yaml` — per-project routes, managed by the control plane.
 
 When clearing rendered state, remove only the per-project files.

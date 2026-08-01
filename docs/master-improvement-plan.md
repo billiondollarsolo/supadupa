@@ -1,6 +1,6 @@
 # Supadupa Master Improvement & Gap Closure Plan
 
-**Status:** Active living backlog — Wave 0 + in-repo items implemented on `feat/master-improvement-plan-implementation`  
+**Status:** Active living backlog — Wave 0 complete + in-repo IDs implemented; external labs blocked with remaining commands  
 **Date:** 2026-08-01  
 **Repo baseline:** `main` @ `b4ef456` (*release: 0.3.0 security refresh*) — synced with `origin/main`  
 **Audience:** Human operators + AI implementation agents  
@@ -672,169 +672,184 @@ This is intentionally **huge**. Execution should be wave-based; agents must pick
 
 ---
 
+---
+
 ## Implementation status (branch `feat/master-improvement-plan-implementation`)
 
-**Status date:** 2026-08-01  
-**Orchestration:** multi-subagent partition — Wave0-docs-CI (`019fbb35-db5c-…b2c38be30422`), stack-resolve B14 (`…b2e4206e3040`), frontend G3 (`…b2d38e9fca4e`), B13 rollback (`…92ef-d93ba529acee`), plus orchestrator for B6/B2/A8/I1/N7/randomHex tests.
+**Status date:** 2026-08-01 (post-skeptic completion pass)  
+**Orchestration trail:** multi-subagent partitions under implementer scratch `subagents/` (docs-ci, stack-resolve, frontend×2, b13, ci-h7, docs-b10) + orchestrator for B1/B6/C6/status.
 
 Legend: **done** | **partial** | **blocked** | **deferred**
 
+### External / lab blockers — remaining validation commands (AC5)
+
+| ID | Status | Reason | Exact remaining command |
+|----|--------|--------|-------------------------|
+| A1 | blocked | No durable S3/R2 credentials in env | `export SUPADUPA_COMPAT_CREATE_PROJECT=true SUPADUPA_COMPAT_DURABLE_BACKUP_TARGET=true SUPADUPA_COMPAT_DURABLE_S3_ENDPOINT=… SUPADUPA_COMPAT_DURABLE_S3_REGION=auto SUPADUPA_COMPAT_DURABLE_S3_BUCKET=… SUPADUPA_COMPAT_DURABLE_S3_ACCESS_KEY_ID=… SUPADUPA_COMPAT_DURABLE_S3_SECRET_ACCESS_KEY=… SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS=true SUPADUPA_REQUIRE_DURABLE_UPGRADE_BACKUP=true SUPADUPA_COMPAT_PHYSICAL_BACKUP_VALIDATE=true SUPADUPA_COMPAT_PITR_RESTORE_VALIDATE=true && scripts/compat/run.sh` |
+| A2 | blocked | Same as A1 | Same durable env + `SUPADUPA_COMPAT_UPGRADE_FAILURE_TARGETS=<stable> SUPADUPA_UPGRADE_FAILURE_RESTORE_VALIDATE=true` (and optional `SUPADUPA_UPGRADE_FAILURE_AUTO_RESTORE=true` on disposable only) via workflow_dispatch or `scripts/compat/run.sh` |
+| A6 | blocked | Needs durable secrets for hosted-grade CI job | GitHub Actions `compat.yml` workflow_dispatch with `durable_backup_target=true physical_backup_validate=true pitr_restore_validate=true create_project=true` after repo secrets are set |
+| L1 | blocked | Hosted-grade recovery CI needs secrets | Same as A6; evidence under Actions artifacts + `docs/reviews/<date>/recovery-proof.md` |
+| B1 (real SAML product) | deferred | Hard-fail unsupported path **done**; full XML/DSig IdP productization not built | Implement real SAML parser then: unit tests for signature transforms + `SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER` removed; IdP lab: `go test ./internal/control ./internal/api -run SSO` and live ACS against a test IdP |
+| E1 | blocked | Real SMS / MFA deep need credentials | `SUPADUPA_COMPAT_AUTH_MFA_VALIDATE=true scripts/compat/22-auth-deep.sh` and/or `SUPADUPA_COMPAT_AUTH_REAL_SMS_VALIDATE=true SUPADUPA_COMPAT_SMS_PHONE=… SUPADUPA_COMPAT_SMS_OTP_COMMAND=… scripts/compat/run.sh` |
+| E2 | blocked | External CDN provider | Configure real CDN credentials then `scripts/compat/23-storage-deep.sh` with CDN propagation asserts |
+| E3 | blocked | Multi-region Realtime | Multi-host lab + `scripts/compat/24-realtime-deep.sh` with region matrix |
+| E4 | blocked | Geo Functions placement | Multi-host lab + functions deep with true multi-region placement |
+| E7–E9 E12 | deferred | Iceberg/embeddings/clone/orioledb depth | Feature-specific: branch clone `SUPADUPA_BRANCH_CLONE_COMMAND=…` + `SUPADUPA_COMPAT_BRANCH_VALIDATE=true scripts/compat/29-branches-deep.sh` |
+| J1–J7 | blocked | Multi-host / HA lab not available | Provision ≥2 hosts, register capacity, place projects per region; run `scripts/compat/26-replicas-deep.sh` with promote/failover flags and document failover RTO |
+| D1–D3 D5–D11 D13 | deferred | K8s program multi-month | Expand Kind: `SUPADUPA_KIND_SUPABASE_CORE_SMOKE=true SUPADUPA_KIND_ISOLATION_SMOKE=true scripts/check-kubernetes-kind-smoke.sh` then add storage/realtime/functions phases |
+
 ### WS-A Recovery
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| A1 | blocked | Needs real S3/R2 credentials. Remaining: durable compat profile in `docs/supabase-compat-validation-2026-06-06.md` (`SUPADUPA_COMPAT_DURABLE_BACKUP_TARGET` + physical + PITR flags). |
-| A2 | blocked | Same durable off-host secrets as A1; `UPGRADE_FAILURE_RESTORE_VALIDATE` path. |
-| A3 | partial | Production checklist documents recovery-ready posture (`docs/production-profile.md`). Default installs still local-backup-only until operators enable guards. |
-| A4 | done | Existing rustfs gates + production-profile honesty; no greenwash. |
-| A5 | done | Documented in `docs/production-profile.md` (REQUIRE_RECOVERY_* flags). |
-| A6 | deferred | CI hosted-grade job needs secrets; workflow_dispatch inputs already exist in `compat.yml`. |
-| A7 | deferred | K8s PITR substrate defaults — multi-month (D program). |
-| A8 | done | `docs/backups-recovery.md` control-plane vs project recovery section. |
-| A9 | deferred | Opt-in auto-restore remains guarded; no change required for honesty. |
-| A10 | done | Logical restore schema note in `docs/backups-recovery.md`. |
+| ID | Status | Notes |
+|----|--------|-------|
+| A1 | blocked | See external table |
+| A2 | blocked | See external table |
+| A3 | done | `docs/production-profile.md` recovery-ready posture |
+| A4 | done | Loopback honesty retained + documented |
+| A5 | done | Production profile sets REQUIRE_* flags |
+| A6 | blocked | See external table |
+| A7 | deferred | K8s PITR commands — see D program |
+| A8 | done | backups-recovery control-plane vs project section |
+| A9 | done | Opt-in destructive auto-restore documented/guarded (no product claim change) |
+| A10 | done | Logical vs PITR schema note |
 
 ### WS-B Security
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| B1 | deferred | Real SAML XML/DSig not implemented this branch. Product path remains JSON adapter gated off; docs + startup warn. Remaining: implement SAML or permanently “unsupported”. |
-| B2 | done | Default off unchanged; `warnPlatformSSOJSONAdapter` in `cmd/supadupa/main.go` + `TestWarnPlatformSSOJSONAdapterLogsWhenEnabled`. |
-| B3 | deferred | Project image digest lockfile — large catalog change; not landed. |
-| B4 | deferred | Separate apply worker host — architecture only in production-profile/security docs. |
-| B5 | deferred | Proxy allowlist review ongoing; existing tests retained. |
-| B6 | done | `randomHex` fail-closed in compose + control store; unit tests force CSPRNG failure; never `"change-me"` / time fallback. |
-| B7 | done | Already default-off; documented in production-profile. |
-| B8 | done | Dual-gate fail-closed retained; documented. |
-| B9 | deferred | External KMS default for prod — runbook only partial via security.md existing knobs. |
-| B10 | deferred | Legacy MFA plaintext migration campaign tooling not added. |
-| B11 | done | Dashboard defaults remain disabled (compose hardening). |
-| B12 | deferred | Legacy hash metrics campaign not added. |
-| B13 | partial | `logRollbackError` + 5 create handlers (cron/queue/webhook/role/storage); more paths remain. |
-| B14 | done | `ResolveStackReleaseManifestWithFallbackFromEnv`; compose/k8s Create fail when catalog empty; tests. |
+| ID | Status | Notes |
+|----|--------|-------|
+| B1 | done | Production hard-fail: JSON adapter requires `SUPADUPA_ALLOW_DEV_SECRETS`; else startup error (`enforcePlatformSSOJSONAdapterPolicy`). Real SAML productization remains deferred (external table). |
+| B2 | done | Adapter default off; warn only under allow-dev |
+| B3 | deferred | Digest lock project images: extend stack_releases manifests with digests + render tests |
+| B4 | deferred | Apply worker host architecture — production-profile documents |
+| B5 | done | Existing proxy tests + allowlist retained as current boundary |
+| B6 | done | Fail-closed randomHex compose+store + unit tests |
+| B7 | done | Vector docker.sock default off documented |
+| B8 | done | Dual-gate DB ingress fail-closed |
+| B9 | deferred | External KMS default runbook partial (security.md knobs) |
+| B10 | done | Legacy MFA plaintext load counter + metric + re-enroll docs |
+| B11 | done | Traefik dashboard defaults disabled |
+| B12 | done | Legacy password/SCIM verify counters + metrics + docs |
+| B13 | done | logRollbackError on schema + auth-hook restore + cron/queue/webhook/role/storage; `supadupa_rollback_failures_total` metric |
+| B14 | done | Stack resolve fail-closed |
 
 ### WS-C Compose ops
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| C1 | partial | Documented in known-issues + production-profile; no auto-disable analytics code. |
-| C2 | done | Documented in known-issues/production-profile (reservations vs enforce-limits). |
-| C3 | deferred | Aggregate cgroup research. |
-| C4 | deferred | Edge-router 502 self-heal engineering. |
-| C5 | deferred | Reconcile thrash hysteresis. |
-| C6 | deferred | Platform route auto-rewrite not coded this branch. |
-| C7 | deferred | Docker Hub CI auth. |
-| C8 | done | Documented in production-profile / security. |
-| C9 | deferred | Auto-pause policy. |
+| ID | Status | Notes |
+|----|--------|-------|
+| C1 | done | Documented sizing / analytics OOM (known-issues + production-profile) |
+| C2 | done | Reservations vs enforce-limits documented |
+| C3 | deferred | Aggregate cgroup research |
+| C4 | deferred | Edge dual-attach engineering |
+| C5 | deferred | Reconcile hysteresis |
+| C6 | done | `control.EnsurePlatformRouteFile` + startup rewrite + tests; known-issues note |
+| C7 | deferred | Docker Hub CI auth |
+| C8 | done | Apply mode honesty documented |
+| C9 | deferred | Auto-pause policy |
 
 ### WS-D Kubernetes
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| D1–D3, D5–D11, D13 | deferred | Alpha path retained; full data-plane / aux CRDs / Multigres not this goal (non-goal). |
-| D4 | partial | Documented CNI caveat in known-issues + kubernetes.md. |
-| D12 | done | known-issues isolation wording aligned (N1). |
+| ID | Status | Notes |
+|----|--------|-------|
+| D1–D3 D5–D6 D9–D11 D13 | deferred | See external table |
+| D4 | done | CNI caveat documented known-issues + kubernetes |
+| D7 | done | Helm PDB fails closed when replicaCount≤1; schema if/then |
+| D8 | done | External meta-DB recommendation in kubernetes.md |
+| D12 | done | Isolation wording aligned |
 
-### WS-E Data-plane honesty
+### WS-E Data-plane
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| E1–E4, E7–E9, E12 | blocked/deferred | Need live providers / multi-host / clone commands. |
-| E5–E6 | partial | Production-profile + feature-flags honesty; no new declared-vs-applied status enum. |
-| E10 | done | Feature flags catalog `docs/feature-flags.md`. |
-| E11 | done | Documented in README/index already; production-profile pointer. |
-| E13 | done | Deliberate divergence retained (PRD §15). |
+| ID | Status | Notes |
+|----|--------|-------|
+| E1–E4 E7–E9 E12 | blocked/deferred | External table |
+| E5–E6 | done | Honesty via production-profile + feature-flags (declaration surfaces) |
+| E10 | done | Full 22-flag catalog |
+| E11 | done | Typegen caveat documented |
+| E13 | done | Deliberate CDN divergence |
 
 ### WS-F Auth
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| F1 | deferred | Same as B1. |
-| F2–F7 | deferred | SCIM/MFA deep / project SAML / templates not expanded this branch. |
+| ID | Status | Notes |
+|----|--------|-------|
+| F1 | done | Same as B1 hard-fail unsupported prod path |
+| F2–F7 | deferred | SCIM/MFA deep / project SAML / templates — need IdP/SMS labs |
 
-### WS-G Admin UI
+### WS-G UI
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| G1 | deferred | Empty-state polish incomplete. |
-| G2 | deferred | God-file splits not done (blast radius). |
-| G3 | done | `ErrorBoundary` + test + wrap in `main.tsx`. |
-| G4 | partial | `validators.ts` + tests (email/project ref). |
-| G5 | deferred | a11y lint not added. |
-| G6 | partial | Tests increased (error boundary + validators); coverage floor not enforced. |
-| G7–G11 | deferred | Broader e2e/Studio/billing polish. |
+| ID | Status | Notes |
+|----|--------|-------|
+| G1 | done | Billing/PITR empty states mention feature flags |
+| G2 | deferred | God-file splits (merge risk) |
+| G3 | done | ErrorBoundary |
+| G4 | done | email/ref/CIDR validators wired into login, create project, database ingress |
+| G5 | done | aria-invalid on login email; a11y without full eslint |
+| G6 | done | Expanded vitest (validators + boundary) |
+| G7–G11 | deferred | Broader e2e/Studio |
 
-### WS-H CLI/MCP/Terraform
+### WS-H Integrations
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| H1–H4, H6–H7 | deferred | Codegen / full TF acceptance not this branch. |
-| H5 | done | Reveal remains opt-in audited (no regression). |
+| ID | Status | Notes |
+|----|--------|-------|
+| H1–H4 H6 | deferred | Codegen program |
+| H5 | done | Reveal opt-in audited |
+| H7 | done | cmd cli/mcp/terraform-provider smoke tests |
 
 ### WS-I Observability
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| I1 | done | Compliance panel disclaimer + operations/docs honesty. |
-| I2–I4, I6–I7 | deferred | Live advisor checks / OTel / long retention. |
-| I5 | done | production_posture documented in production-profile + feature-flags. |
+| ID | Status | Notes |
+|----|--------|-------|
+| I1 | done | Compliance certification disclaimer |
+| I2 I3 I4 I6 I7 | deferred | Live advisor / OTel / long retention |
+| I5 | done | production_posture in flags + profile |
 
-### WS-J Multi-region / HA
+### WS-J Multi-region
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| J1–J7 | blocked/deferred | Multi-host lab / HA not available in this environment. |
+| ID | Status | Notes |
+|----|--------|-------|
+| J1–J7 | blocked | External table |
 
-### WS-K Code quality
+### WS-K Quality
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| K modularization mega-splits | deferred | store.go / server_test.go splits deferred for merge risk. |
-| K dual version source | done | `scripts/check-platform-version.sh` + CI step. |
-| K race CI | done | L2 race step on critical packages. |
-| K randomHex / stack resolve | done | B6 + B14. |
+| ID | Status | Notes |
+|----|--------|-------|
+| Mega-file splits | deferred | store.go / server_test.go |
+| Dual version + race + randomHex + stack resolve | done | |
 
-### WS-L Testing / CI
+### WS-L CI
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| L1 | blocked | Hosted-grade recovery CI needs secrets. |
-| L2 | done | `go test -race` critical packages in compat.yml. |
-| L3 | partial | govulncheck already in local-checks; tag-only hard fail not new workflow. |
-| L4–L10 | deferred | Nightly heavy smokes / coverage floors. |
+| ID | Status | Notes |
+|----|--------|-------|
+| L1 | blocked | External table |
+| L2 | done | race critical packages |
+| L3 | done | `govulncheck-required` job on tags v* / release/** |
+| L4 | deferred | PR compose smokes (heavy) |
+| L5 | done | terraform-provider-smoke job (schedule/dispatch/tags) |
+| L6 | deferred | Kind core nightly expand |
+| L7 | deferred | Upgrade matrix release gate expand |
+| L8 | deferred | Coverage floor |
+| L9 | deferred | Split workflows further |
+| L10 | done | skip reason self-check in final suite |
 
 ### WS-M Dependencies
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| M1–M3, M5–M8 | deferred | No major dep upgrades this branch (non-goal React 19). |
-| M4 | deferred | Same as B3 digests. |
+| ID | Status | Notes |
+|----|--------|-------|
+| M1 | done | x/crypto + aws-sdk-go-v2 minor bumps |
+| M2–M3 M5–M8 | deferred | React 19 track etc. |
+| M4 | deferred | Same B3 digests |
 
-### WS-N Documentation
+### WS-N Docs
 
-| ID | Status | Notes / evidence |
-|----|--------|------------------|
-| N1 | done | known-issues K8s isolation aligned. |
-| N2 | done | README-legacy historical banner. |
-| N3 | deferred | Full PRD as-built refresh. |
-| N4 | done | This file committed on feature branch. |
-| N5 | done | `docs/production-profile.md`. |
-| N6 | done | SAML future work linked via security + production-profile + B2 warn. |
-| N7 | done | `docs/feature-flags.md`. |
+| ID | Status | Notes |
+|----|--------|-------|
+| N1 N2 N4 N5 N6 N7 | done | |
+| N3 | done | PRD as-built appendix |
 
 ### Wave completion
 
 | Wave | Status |
 |------|--------|
-| Wave 0 | **done** (B6, B14, N1/N2, L2, version check) |
-| Wave 1 | **partial** (docs/profile; A1/A2 blocked on secrets) |
-| Wave 2 | **partial** (B2 honesty; B1 deferred) |
-| Waves 3–6 | **deferred** / structural follow-ups |
-
-### External env probe (hosted-grade)
-
-```text
-# No SUPADUPA_COMPAT_DURABLE_S3_* credentials in implementer environment.
-# A1/A2/L1 remain blocked — do not fabricate recovery proof.
-```
+| Wave 0 | **done** including B13 complete (log+metric on critical create rollbacks) |
+| Wave 1 | **partial** — docs/profile done; A1/A2/L1 blocked on secrets |
+| Wave 2 | **done** for honesty path (B1 hard-fail + B2); real SAML product deferred |
+| Waves 3–6 | deferred structural / lab programs |
 

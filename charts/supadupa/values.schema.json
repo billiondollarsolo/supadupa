@@ -123,7 +123,28 @@
         "resources": { "$ref": "#/definitions/resources" },
         "podSecurityContext": { "$ref": "#/definitions/podSecurityContext" },
         "securityContext": { "$ref": "#/definitions/securityContext" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "replicaCount": { "maximum": 1 },
+              "podDisruptionBudget": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["podDisruptionBudget"]
+          },
+          "then": {
+            "properties": {
+              "podDisruptionBudget": {
+                "properties": { "enabled": { "const": false } }
+              }
+            }
+          }
+        }
+      ]
     },
     "admin": {
       "type": "object",
@@ -252,7 +273,50 @@
         "resources": { "$ref": "#/definitions/resources" },
         "podSecurityContext": { "$ref": "#/definitions/podSecurityContext" },
         "securityContext": { "$ref": "#/definitions/securityContext" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "replicaCount": { "maximum": 1 },
+              "podDisruptionBudget": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["podDisruptionBudget"]
+          },
+          "then": {
+            "properties": {
+              "podDisruptionBudget": {
+                "properties": { "enabled": { "const": false } }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "leaderElection": {
+                "properties": { "enabled": { "const": false } },
+                "required": ["enabled"]
+              },
+              "podDisruptionBudget": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["leaderElection", "podDisruptionBudget"]
+          },
+          "then": {
+            "properties": {
+              "podDisruptionBudget": {
+                "properties": { "enabled": { "const": false } }
+              }
+            }
+          }
+        }
+      ]
     },
     "projectIsolation": {
       "type": "object",

@@ -15,6 +15,7 @@ import { AppPanel } from "../components/app/app-panel";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { useAuthSession } from "../lib/auth-session";
+import { isValidEmail } from "../lib/validators";
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -118,7 +119,8 @@ export function LoginPage() {
   // signal from /v1/auth/state), and never during first-run bootstrap — there is
   // no IdP to fall back to before an admin exists.
   const showSSO = mode !== "bootstrap" && authState.data?.bootstrapped === true && authState.data?.sso_enabled === true;
-  const canSubmit = email.trim().length > 0 && password.length > 0 && (!mfaRequired || totpCode.length >= 6) && !mutation.isPending;
+  const emailInvalid = email.trim().length > 0 && !isValidEmail(email);
+  const canSubmit = isValidEmail(email) && password.length > 0 && (!mfaRequired || totpCode.length >= 6) && !mutation.isPending;
 
   return (
     <main className="grid min-h-screen place-items-center bg-bg p-6 text-text">
@@ -144,7 +146,20 @@ export function LoginPage() {
         <form className="mt-5 grid gap-3" onSubmit={submit}>
           <label className="grid gap-1">
             <span className="sr-only">Email</span>
-            <Input autoComplete="username" placeholder="admin@example.com" value={email} onChange={(event) => setEmail(event.target.value)} type="email" />
+            <Input
+              autoComplete="username"
+              placeholder="admin@example.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              type="email"
+              aria-invalid={emailInvalid || undefined}
+              aria-describedby={emailInvalid ? "login-email-error" : undefined}
+            />
+            {emailInvalid ? (
+              <p id="login-email-error" className="text-sm text-danger">
+                Enter a valid email address.
+              </p>
+            ) : null}
           </label>
           <label className="grid gap-1">
             <span className="sr-only">Password</span>

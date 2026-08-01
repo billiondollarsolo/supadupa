@@ -41,7 +41,7 @@ func createProjectDatabaseSchemaHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		if err := applyProjectDatabaseSchemaCreate(r.Context(), project, schema); err != nil {
-			_ = store.DeleteProjectDatabaseSchema(r.Context(), ref, schema.Name, schema.Version)
+			logRollbackError(r.Context(), "delete project database schema after apply failure", store.DeleteProjectDatabaseSchema(r.Context(), ref, schema.Name, schema.Version))
 			metadata := map[string]string{"name": schema.Name, "version": schema.Version, "error": err.Error()}
 			control.LogProject(r.Context(), store, ref, "error", "Declarative schema apply failed", metadata)
 			control.Audit(r.Context(), store, "project.database_schema_create_failed", "project:"+ref, metadata)

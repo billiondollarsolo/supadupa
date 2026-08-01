@@ -175,13 +175,21 @@ func verifyPasswordWithRehash(password string, encoded string) (bool, bool) {
 	}
 	parts := strings.Split(encoded, "$")
 	if len(parts) == 2 {
-		return hmac.Equal([]byte(parts[1]), []byte(hex.EncodeToString(hashBytes([]byte(password))))), true
+		ok := hmac.Equal([]byte(parts[1]), []byte(hex.EncodeToString(hashBytes([]byte(password)))))
+		if ok {
+			noteLegacyPasswordHashVerify()
+		}
+		return ok, true
 	}
 	if len(parts) != 3 {
 		return false, false
 	}
 	expected := hex.EncodeToString(hashBytes([]byte(parts[1] + password)))
-	return hmac.Equal([]byte(parts[2]), []byte(expected)), true
+	ok := hmac.Equal([]byte(parts[2]), []byte(expected))
+	if ok {
+		noteLegacyPasswordHashVerify()
+	}
+	return ok, true
 }
 
 func hashBytes(input []byte) []byte {

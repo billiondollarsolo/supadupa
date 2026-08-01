@@ -8,11 +8,18 @@ import (
 )
 
 func TestLogRollbackErrorDoesNotPanic(t *testing.T) {
+	before := RollbackFailureTotal()
 	// nil err must be a no-op
 	logRollbackError(context.Background(), "noop", nil)
+	if RollbackFailureTotal() != before {
+		t.Fatalf("nil error must not increment metric")
+	}
 
-	// non-nil err must log without panicking
+	// non-nil err must log without panicking and increment metric
 	logRollbackError(context.Background(), "delete after apply failure", errors.New("rollback boom"))
+	if RollbackFailureTotal() != before+1 {
+		t.Fatalf("expected metric +1, before=%d after=%d", before, RollbackFailureTotal())
+	}
 }
 
 func TestLogRollbackErrorLogsOnFailure(t *testing.T) {

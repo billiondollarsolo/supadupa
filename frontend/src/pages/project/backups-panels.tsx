@@ -592,7 +592,7 @@ export function PITRPanel({ project, policy, recoverability, archives, loading, 
           {!featureEnabled ? (
             <div className="rounded-md border border-border bg-bg p-3">
               <p className="text-sm font-medium">PITR disabled</p>
-              <p className="mt-1 text-sm text-muted">Enable the pitr feature flag for this org before changing WAL archive policy.</p>
+              <p className="mt-1 text-sm text-muted">Point-in-time recovery is turned off via platform/org feature flags (pitr). Enable the flag under Settings → Feature flags or org Features before changing WAL archive policy — this is intentional, not a broken panel.</p>
             </div>
           ) : null}
           {loading ? <p className="text-sm text-muted">Loading PITR...</p> : null}

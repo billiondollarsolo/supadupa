@@ -22,6 +22,7 @@ import { featureFlagGroups } from "../../lib/feature-flags";
 import { formatBytes, formatDateTime, shortChecksum } from "../../lib/format";
 import { parseLines } from "../../lib/parse";
 import { platformSettingsSections, type PlatformSettingsSection } from "../../lib/project-config";
+import { isValidCIDR } from "../../lib/validators";
 import type { BackupStorageTarget, FleetMetrics, PlatformBackup, PlatformDefaults, PlatformSSOConfig, ProvisionerStatus, RuntimeConfig, SCIMGroup, SCIMListResponse, SCIMServiceProviderConfig, SCIMUser, StackReleaseManifest } from "../../types";
 
 function backupTargetReadinessLabel(target: BackupStorageTarget) {
@@ -332,6 +333,7 @@ export function SettingsPanel({
   const databaseIngressCIDRs = parseLines(form.database_ingress_allowed_cidrs);
   const databaseIngressPublic = databaseIngress?.public ?? false;
   const databaseIngressAllowlisted = databaseIngressCIDRs.length > 0;
+  const invalidDatabaseIngressCIDRs = databaseIngressCIDRs.filter((line) => !isValidCIDR(line));
   // Host-level bind status. Exposure of an individual database is controlled
   // per project (Config -> Network), so a published host port is informational,
   // not a fleet-wide alarm.
@@ -564,7 +566,11 @@ export function SettingsPanel({
 
   function submitDatabaseIngress(event: FormEvent) {
     event.preventDefault();
-    mutation.mutate({ ...persistedDefaultsPayload(), database_ingress_allowed_cidrs: parseLines(form.database_ingress_allowed_cidrs) });
+    const lines = parseLines(form.database_ingress_allowed_cidrs);
+    if (lines.some((line) => !isValidCIDR(line))) {
+      return;
+    }
+    mutation.mutate({ ...persistedDefaultsPayload(), database_ingress_allowed_cidrs: lines });
   }
 
   function submitSMTP(event: FormEvent) {
@@ -840,6 +846,34 @@ export function SettingsPanel({
               {databaseIngress.warnings.join(" · ")}
             </div>
           ) : null}
+          <form className="grid gap-3" onSubmit={submitDatabaseIngress}>
+            <label className="grid gap-1">
+              <span className="label">Platform database ingress allowlist (CIDRs)</span>
+              <Textarea
+                className="min-h-24 font-mono text-xs leading-5"
+                value={form.database_ingress_allowed_cidrs}
+                onChange={(event) => setForm({ ...form, database_ingress_allowed_cidrs: event.target.value })}
+                placeholder={"10.0.0.0/8\n192.168.1.0/24\n203.0.113.10"}
+                aria-invalid={invalidDatabaseIngressCIDRs.length > 0 || undefined}
+                aria-describedby={invalidDatabaseIngressCIDRs.length > 0 ? "database-ingress-cidr-error" : undefined}
+              />
+              <span className="text-xs text-faint">
+                One IPv4 address or CIDR per line (e.g. 10.0.0.0/8). Bare IPs are treated as /32. Empty clears the platform allowlist.
+              </span>
+            </label>
+            {invalidDatabaseIngressCIDRs.length > 0 ? (
+              <p id="database-ingress-cidr-error" className="text-sm text-danger">
+                Invalid CIDR{invalidDatabaseIngressCIDRs.length === 1 ? "" : "s"}: {invalidDatabaseIngressCIDRs.join(", ")}
+              </p>
+            ) : null}
+            <SaveRow
+              disabled={!canSave || mutation.isPending || invalidDatabaseIngressCIDRs.length > 0}
+              detail={databaseIngressAllowlisted
+                ? `${databaseIngressCIDRs.length} CIDR${databaseIngressCIDRs.length === 1 ? "" : "s"} configured`
+                : "No platform allowlist entries"}
+              title="Database ingress allowlist"
+            />
+          </form>
           {mutation.error ? <p className="text-sm text-danger">{mutation.error.message}</p> : null}
         </div>
       ) : null}

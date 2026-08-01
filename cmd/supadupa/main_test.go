@@ -116,27 +116,38 @@ func TestValidateRuntimeSecretsAllowsExplicitDevOverride(t *testing.T) {
 	}
 }
 
-func TestWarnPlatformSSOJSONAdapterLogsWhenEnabled(t *testing.T) {
-	var buf strings.Builder
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	warnPlatformSSOJSONAdapter(logger, func(key string) string {
+func TestEnforcePlatformSSOJSONAdapterPolicyHardFailsProduction(t *testing.T) {
+	err := enforcePlatformSSOJSONAdapterPolicy(nil, func(key string) string {
 		if key == "SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER" {
 			return "true"
 		}
 		return ""
 	})
-	out := buf.String()
-	if !strings.Contains(out, "platform SSO JSON adapter is enabled") {
-		t.Fatalf("expected SSO adapter warning log, got %q", out)
-	}
-	if !strings.Contains(out, "not production SAML") {
-		t.Fatalf("expected production SAML honesty in warning, got %q", out)
+	if err == nil || !strings.Contains(err.Error(), "permanently unsupported in production") {
+		t.Fatalf("expected hard-fail when adapter enabled without dev override, got %v", err)
 	}
 
-	buf.Reset()
-	warnPlatformSSOJSONAdapter(logger, func(string) string { return "" })
-	if strings.TrimSpace(buf.String()) != "" {
-		t.Fatalf("expected no warning when adapter disabled, got %q", buf.String())
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	err = enforcePlatformSSOJSONAdapterPolicy(logger, func(key string) string {
+		switch key {
+		case "SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER":
+			return "true"
+		case "SUPADUPA_ALLOW_DEV_SECRETS":
+			return "true"
+		default:
+			return ""
+		}
+	})
+	if err != nil {
+		t.Fatalf("expected adapter allowed under dev secrets, got %v", err)
+	}
+	if !strings.Contains(buf.String(), "not production SAML") {
+		t.Fatalf("expected warning under dev override, got %q", buf.String())
+	}
+
+	if err := enforcePlatformSSOJSONAdapterPolicy(nil, func(string) string { return "" }); err != nil {
+		t.Fatalf("expected no error when adapter disabled, got %v", err)
 	}
 }
 

@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - "release/**"
+    tags:
+      - "v*"
   pull_request:
   schedule:
     - cron: "17 8 * * *"
@@ -131,6 +133,8 @@ jobs:
         run: scripts/check-platform-version.sh
       - name: Go toolchain guard
         run: test "$(go env GOVERSION)" = "go1.26.4"
+      # govulncheck hard-fails this job on findings (no SUPADUPA_FINAL_SKIP_* path in CI).
+      # Release tags also run the dedicated govulncheck-required job below (L3).
       - name: Go vulnerability check
         run: |
           set -euo pipefail
@@ -220,8 +224,58 @@ jobs:
         run: scripts/check-kubernetes-kind-smoke.sh
       - name: Script syntax
         run: |
-          bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-platform-version.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh
+          bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-platform-version.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/check-terraform-provider-smoke.sh scripts/check-final-remediation-suite.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh
           python3 -m py_compile scripts/check-compose-hardening.py scripts/check-docs-remediation.py scripts/check-security-regressions.py scripts/check-kubernetes-crds.py
+
+  # L3: govulncheck is required and hard-fails on release tags (v*) and release/** branches.
+  # local-checks already runs govulncheck with no skip flags; this job is a dedicated
+  # release gate so tag cuts cannot land with known Go vulns. There is intentionally
+  # no SUPADUPA_FINAL_SKIP_GOVULNCHECK (or any other skip) path in this job.
+  govulncheck-required:
+    name: govulncheck (required)
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache: true
+      - name: Go vulnerability check (hard fail, no skip flags)
+        run: |
+          set -euo pipefail
+          # No SUPADUPA_FINAL_SKIP_* / continue-on-error: findings fail the job.
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # L5: Terraform provider CLI smoke (fake Management API + apply/plan/destroy).
+  # Runs on schedule, tags, release branches, and manual dispatch — not every PR
+  # (installs Terraform; heavier than unit tests). Requires TERRAFORM_BIN only.
+  terraform-provider-smoke:
+    name: Terraform Provider Smoke
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache: true
+      - name: Install Terraform
+        run: |
+          set -euo pipefail
+          TF_VERSION=1.15.5
+          curl -fsSL "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o /tmp/terraform.zip
+          echo "702b2136af6728c8ff037f843dd2dbce2b7ad88786b7381d1d72aefa250f601c  /tmp/terraform.zip" | sha256sum -c -
+          sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
+          terraform version
+      - name: Terraform provider smoke
+        env:
+          TERRAFORM_BIN: terraform
+        run: scripts/check-terraform-provider-smoke.sh
 
   live-compat:
     name: Live Compatibility

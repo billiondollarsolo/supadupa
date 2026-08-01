@@ -37,7 +37,15 @@ Set `operator.runtimeNamespaceOverride` when project runtime resources should be
 
 Set `operator.interval` to tune the polling reconcile loop. The value uses Go duration syntax, for example `5s`, `30s`, or `1m`.
 
-The bundled metadata database is intended for small/self-contained installs. Its PostgreSQL container keeps privilege escalation disabled but allows the limited file ownership/mode capabilities required by the official `postgres` entrypoint during first initialization. For stricter production environments, set `metaDb.enabled=false` and provide `controlPlane.metaDsn` for an externally managed PostgreSQL database.
+### Metadata database (production recommendation)
+
+The bundled `metaDb` PostgreSQL Deployment is intended for small/self-contained installs and evaluation. Its container keeps privilege escalation disabled but allows the limited file ownership/mode capabilities required by the official `postgres` entrypoint during first initialization.
+
+**Production recommendation:** use an external managed Postgres for the control-plane meta DB. Set `metaDb.enabled=false` and provide `controlPlane.metaDsn` (or equivalent secret-backed DSN) pointing at provider-managed PostgreSQL with automated backups, patching, and multi-AZ durability. Do not treat the in-cluster bundled meta-DB PVC as a hosted-grade control-plane durability story.
+
+### PodDisruptionBudgets and single-replica deployments
+
+`controlPlane.podDisruptionBudget` and `operator.podDisruptionBudget` default to **disabled**. Enabling a PDB with `minAvailable: 1` while `replicaCount` is `1` blocks voluntary node drains (Kubernetes cannot evict the only pod). The chart **fails install/template** when PDB is enabled without enough replicas (`controlPlane.replicaCount > 1`; operator also requires `leaderElection.enabled=true` and `replicaCount > 1`). See comments in `charts/supadupa/values.yaml`.
 
 ## Project Workloads
 

@@ -11,6 +11,9 @@ run() {
   "$@"
 }
 
+# L10: Every SUPADUPA_FINAL_SKIP_* path MUST call skip_gate. skip_gate requires a
+# non-empty matching ${FLAG}_REASON (whitespace-only is rejected). Do not honor
+# skip flags with bare conditionals — skipped gates must leave recorded evidence.
 skip_gate() {
   local label="$1"
   local flag="$2"
@@ -23,6 +26,34 @@ skip_gate() {
   echo "==> skipping $label because $flag=1: $reason"
   SKIP_SUMMARY+=("$label: $reason")
 }
+
+# Unit-like self-check of skip_gate reason discipline (always runs; subshell-isolated).
+_l10_self_check_skip_reasons() {
+  if (
+    unset SUPADUPA_FINAL_SKIP_L10_SELFTEST_REASON 2>/dev/null || true
+    skip_gate "l10 empty-reason selftest" "SUPADUPA_FINAL_SKIP_L10_SELFTEST" >/dev/null 2>&1
+  ); then
+    echo "L10 self-check failed: skip_gate accepted a missing reason" >&2
+    exit 1
+  fi
+  if (
+    SUPADUPA_FINAL_SKIP_L10_SELFTEST_REASON="   "
+    export SUPADUPA_FINAL_SKIP_L10_SELFTEST_REASON
+    skip_gate "l10 whitespace-reason selftest" "SUPADUPA_FINAL_SKIP_L10_SELFTEST" >/dev/null 2>&1
+  ); then
+    echo "L10 self-check failed: skip_gate accepted a whitespace-only reason" >&2
+    exit 1
+  fi
+  if ! (
+    SUPADUPA_FINAL_SKIP_L10_SELFTEST_REASON="documented self-check acceptance"
+    export SUPADUPA_FINAL_SKIP_L10_SELFTEST_REASON
+    skip_gate "l10 valid-reason selftest" "SUPADUPA_FINAL_SKIP_L10_SELFTEST" >/dev/null
+  ); then
+    echo "L10 self-check failed: skip_gate rejected a non-empty reason" >&2
+    exit 1
+  fi
+}
+_l10_self_check_skip_reasons
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then

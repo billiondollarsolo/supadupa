@@ -1183,12 +1183,24 @@ func TestPersistentStoreEncryptsNormalizedMFASeedStrings(t *testing.T) {
 	if decrypted != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("expected decrypted seed, got %q", decrypted)
 	}
+	beforeLegacyLoads := LegacyMFAPlaintextLoadCount()
 	legacy, err := store.decryptOptionalString(sql.NullString{String: "LEGACYPLAINTEXT", Valid: true})
 	if err != nil {
 		t.Fatalf("decrypt legacy mfa seed: %v", err)
 	}
 	if legacy != "LEGACYPLAINTEXT" {
 		t.Fatalf("expected legacy plaintext passthrough, got %q", legacy)
+	}
+	if LegacyMFAPlaintextLoadCount() != beforeLegacyLoads+1 {
+		t.Fatalf("expected legacy MFA plaintext load counter +1, before=%d after=%d", beforeLegacyLoads, LegacyMFAPlaintextLoadCount())
+	}
+	// Encrypted path must not count as legacy plaintext load.
+	beforeEncrypted := LegacyMFAPlaintextLoadCount()
+	if _, err := store.decryptOptionalString(sql.NullString{String: encodedString, Valid: true}); err != nil {
+		t.Fatalf("decrypt encrypted again: %v", err)
+	}
+	if LegacyMFAPlaintextLoadCount() != beforeEncrypted {
+		t.Fatalf("encrypted load must not increment legacy counter, before=%d after=%d", beforeEncrypted, LegacyMFAPlaintextLoadCount())
 	}
 	empty, err := store.encryptOptionalString("")
 	if err != nil {

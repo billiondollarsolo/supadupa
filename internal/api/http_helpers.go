@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"supadupa2026/internal/control"
@@ -317,14 +318,25 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+// rollbackFailureTotal counts best-effort rollback delete failures after apply-path errors.
+// Exposed for metrics scraping via IncRollbackFailure / RollbackFailureTotal.
+var rollbackFailureTotal atomic.Uint64
+
+// RollbackFailureTotal returns the number of recorded rollback failures since process start.
+func RollbackFailureTotal() uint64 {
+	return rollbackFailureTotal.Load()
+}
+
 // logRollbackError records a best-effort control-plane rollback failure so
 // operators can detect orphaned project-child rows after apply-path cleanup.
 // Primary create failures still own the user-facing error response.
+// Increments rollbackFailureTotal for metrics (plan B13).
 func logRollbackError(ctx context.Context, action string, err error) {
 	if err == nil {
 		return
 	}
-	slog.Default().ErrorContext(ctx, "rollback failed", "action", action, "error", err)
+	rollbackFailureTotal.Add(1)
+	slog.Default().ErrorContext(ctx, "rollback failed", "action", action, "error", err, "rollback_failures_total", rollbackFailureTotal.Load())
 }
 
 func writeStoreError(w http.ResponseWriter, err error) {

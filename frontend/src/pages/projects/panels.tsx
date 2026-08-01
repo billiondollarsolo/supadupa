@@ -15,6 +15,7 @@ import { NativeSelect } from "../../components/ui/native-select";
 import { StatusPill } from "../../components/ui/status-pill";
 import { DbExposureBadge, dbExposureMeta } from "../../components/db-exposure-badge";
 import { formatBytes, formatDateTime } from "../../lib/format";
+import { isValidProjectRef } from "../../lib/validators";
 import type { Host, HostCapacity, Org, PlatformDefaults, Project, StackReleaseManifest } from "../../types";
 
 type StackProfile = "essential" | "full" | "orioledb";
@@ -523,7 +524,9 @@ export function CreateProjectPanel({
   if (form.services.analytics !== form.services.vector) serviceWarnings.push("Analytics (Logflare) and Vector are the logging pipeline — enable both or neither, or project logs won't be collected.");
   if (!form.services.rest && form.services.storage) serviceWarnings.push("Storage works best with the REST API enabled; some Storage operations route through PostgREST.");
   const hostCapacityProblem = Boolean(selectedHost && !hostCanFit(selectedHost, reservation));
-  const identityValid = form.name.trim().length > 0 && form.ref.trim().length > 0 && form.domain.trim().length > 0;
+  const refValid = isValidProjectRef(form.ref);
+  const refHintInvalid = form.ref.trim().length > 0 && !refValid;
+  const identityValid = form.name.trim().length > 0 && refValid && form.domain.trim().length > 0;
   const placementValid = orgId.length > 0 && !hostCapacityProblem;
   const sizingValid =
     form.cpu >= 1 && form.cpu <= SIZING_BOUNDS.maxCpu &&
@@ -567,8 +570,21 @@ export function CreateProjectPanel({
                 <Field label="Project name" required hint="Human-friendly display name.">
                   <Input placeholder="My production app" aria-label="Project name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
                 </Field>
-                <Field label="Project ref" required hint="Lowercase slug used in URLs and the CLI.">
-                  <Input className="font-mono" placeholder="my-production-app" aria-label="Project ref" value={form.ref} onChange={(event) => setForm({ ...form, ref: normalizeProjectRef(event.target.value) })} />
+                <Field
+                  label="Project ref"
+                  required
+                  hint={refHintInvalid
+                    ? "3–55 lowercase letters, numbers, hyphens; cannot start or end with a hyphen."
+                    : "Lowercase slug used in URLs and the CLI."}
+                >
+                  <Input
+                    className="font-mono"
+                    placeholder="my-production-app"
+                    aria-label="Project ref"
+                    aria-invalid={refHintInvalid || undefined}
+                    value={form.ref}
+                    onChange={(event) => setForm({ ...form, ref: normalizeProjectRef(event.target.value) })}
+                  />
                 </Field>
               </div>
               <Field label="Base domain" required hint="Projects are exposed at <ref>.<domain>.">

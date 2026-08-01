@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isValidEmail, isValidProjectRef } from "./validators";
+import { isValidCIDR, isValidEmail, isValidProjectRef } from "./validators";
 
 describe("isValidEmail", () => {
   it("accepts common email shapes", () => {
@@ -44,5 +44,30 @@ describe("isValidProjectRef", () => {
     const tooLong = "a" + "b".repeat(54) + "c";
     expect(tooLong.length).toBe(56);
     expect(isValidProjectRef(tooLong)).toBe(false);
+  });
+});
+
+describe("isValidCIDR", () => {
+  it("accepts IPv4 CIDRs and bare IPv4 addresses", () => {
+    expect(isValidCIDR("10.0.0.0/8")).toBe(true);
+    expect(isValidCIDR("192.168.1.0/24")).toBe(true);
+    expect(isValidCIDR("0.0.0.0/0")).toBe(true);
+    expect(isValidCIDR("255.255.255.255/32")).toBe(true);
+    expect(isValidCIDR("203.0.113.10")).toBe(true); // single IP as /32 optional
+    expect(isValidCIDR("  10.0.0.0/16  ")).toBe(true);
+  });
+
+  it("rejects empty, malformed, and out-of-range values", () => {
+    expect(isValidCIDR("")).toBe(false);
+    expect(isValidCIDR("   ")).toBe(false);
+    expect(isValidCIDR("not-a-cidr")).toBe(false);
+    expect(isValidCIDR("10.0.0.0/")).toBe(false);
+    expect(isValidCIDR("10.0.0.0/33")).toBe(false);
+    expect(isValidCIDR("10.0.0.0/-1")).toBe(false);
+    expect(isValidCIDR("10.0.0.0/24abc")).toBe(false);
+    expect(isValidCIDR("10.0.0/24")).toBe(false);
+    expect(isValidCIDR("256.0.0.1/32")).toBe(false);
+    expect(isValidCIDR("01.2.3.4/32")).toBe(false); // leading zero
+    expect(isValidCIDR("2001:db8::/32")).toBe(false); // IPv6 out of scope
   });
 });

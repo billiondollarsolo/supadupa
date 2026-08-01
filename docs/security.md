@@ -97,6 +97,17 @@ Browser admin auth uses an HttpOnly `supadupa_session` cookie with SameSite=Lax;
 
 New platform user passwords are stored as `bcrypt-sha256$...` hashes: the submitted password is SHA-256 prehashed before bcrypt so long admin passwords are handled consistently by bcrypt's input limit. Legacy `sha256$...` password hashes continue to verify during migration and are rehashed to the new format after successful login or explicit password update. User creation and password update reject short passwords, common development placeholders, leading/trailing whitespace, and control characters.
 
+### Legacy password / SCIM hash migration (operator note)
+
+Successful verifications that still hit a legacy hash format increment process counters exposed on admin `GET /metrics`:
+
+| Metric | Meaning |
+|--------|---------|
+| `supadupa_legacy_password_hash_verifies_total` | Successful logins (or password checks) that verified a legacy `sha256$...` password hash. Auto-rehash on successful login moves users off this path. |
+| `supadupa_legacy_scim_hash_verifies_total` | Successful SCIM bearer checks that used a legacy unkeyed SHA-256 token hash. Re-save the SCIM token via `/v1/settings/sso` so it stores as `hmac-sha256$...`. |
+
+Non-zero sustained counts after a full login / IdP reconfig window mean some accounts or the SCIM token still need migration. There is no force-rehash campaign CLI yet; operators should require affected users to sign in (password rehash) and rotate the SCIM token once.
+
 Browser sessions are cookie based. The admin UI should not store reusable bearer tokens in `localStorage` or `sessionStorage`; the static frontend checks guard that behavior.
 
 Platform admin bearer tokens include a user token version. Platform-admin authorization reloads the current user before privileged actions and rejects stale tokens when the user was demoted, deleted, or had credentials/MFA state changed. Existing admin tokens issued before this token-version field may need users to log in again after deploying this change; lower-risk development no-auth mode remains explicit through server configuration, not implicit missing-claim success.
@@ -105,7 +116,13 @@ Platform admin bearer tokens include a user token version. Platform-admin author
 
 Control-plane TOTP seeds are encrypted before they are written to normalized `users.mfa_secret` and `users.mfa_pending_secret` persistence columns. Encrypted values use an application envelope marker so legacy plaintext rows can still be read during migration.
 
-Existing plaintext MFA seed rows are treated as legacy input: the control plane can load them, and a later normalized persistence sync rewrites the row with encrypted values. If prior database dumps, backups, logs, or support bundles may have exposed plaintext seeds, require affected users to disable and re-enroll MFA after rotating any related account credentials. Do not paste TOTP seed values into logs, tickets, or review artifacts.
+Existing plaintext MFA seed rows are treated as legacy input: the control plane can load them, and a later normalized persistence sync rewrites the row with encrypted values.
+
+### Operator note: re-enroll if plaintext seeds may have leaked
+
+If prior database dumps, backups, logs, support bundles, or unencrypted meta-DB snapshots may have exposed plaintext TOTP seeds, **require affected users to disable and re-enroll MFA** after rotating related account credentials. Encryption-on-next-sync prevents *future* plaintext at rest but does not invalidate a seed that was already copied from an old artifact. Do not paste TOTP seed values into logs, tickets, or review artifacts.
+
+Process counter `supadupa_legacy_mfa_plaintext_loads_total` on admin `GET /metrics` increments each time a normalized MFA seed column is loaded without the application encryption envelope (migration pressure signal after upgrades).
 
 ## Platform SSO
 
@@ -179,7 +196,7 @@ Treat these as secrets:
 
 - Service role key.
 - Database password.
-- SCIM tokens. New SCIM tokens must be at least 24 characters and are stored as versioned HMAC-SHA256 hashes keyed by the control-plane auth secret; legacy SHA-256 hashes continue to verify during migration.
+- SCIM tokens. New SCIM tokens must be at least 24 characters and are stored as versioned HMAC-SHA256 hashes keyed by the control-plane auth secret; legacy SHA-256 hashes continue to verify during migration (see legacy metrics above; rotate the token to rehash).
 - Webhook secrets.
 - Auth provider client secrets.
 - Function secrets.

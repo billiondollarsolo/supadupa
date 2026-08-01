@@ -129,7 +129,11 @@ func VerifyPlatformSCIMToken(config PlatformSSOConfig, token string) bool {
 		expected := strings.TrimPrefix(HashPlatformSCIMToken(token), "hmac-sha256$")
 		return hmac.Equal([]byte(hash), []byte(expected))
 	}
-	return hmac.Equal([]byte(config.SCIMTokenHash), []byte(legacyPlatformSCIMTokenHash(token)))
+	ok := hmac.Equal([]byte(config.SCIMTokenHash), []byte(legacyPlatformSCIMTokenHash(token)))
+	if ok {
+		noteLegacySCIMHashVerify()
+	}
+	return ok
 }
 
 func PlatformSCIMTokenNeedsRehash(config PlatformSSOConfig, token string) bool {

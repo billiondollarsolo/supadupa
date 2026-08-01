@@ -120,6 +120,10 @@ spec:
         - name: tmp
           emptyDir: {}
 {{- if .Values.controlPlane.podDisruptionBudget.enabled }}
+{{- /* D7: PDB + single replica blocks voluntary drains (minAvailable with one pod). */ -}}
+{{- if le (int .Values.controlPlane.replicaCount) 1 }}
+{{- fail "controlPlane.podDisruptionBudget.enabled requires controlPlane.replicaCount > 1 (a single replica with minAvailable blocks voluntary node drains)" }}
+{{- end }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

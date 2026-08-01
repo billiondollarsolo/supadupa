@@ -221,11 +221,13 @@ func restoreProjectAuthHooks(ctx context.Context, store control.Store, ref strin
 	current, err := store.ListProjectAuthHooks(ctx, ref)
 	if err == nil {
 		for _, hook := range current {
-			_ = store.DeleteProjectAuthHook(ctx, ref, hook.HookType)
+			logRollbackError(ctx, "delete project auth hook during restore after sync failure", store.DeleteProjectAuthHook(ctx, ref, hook.HookType))
 		}
 	}
 	for _, hook := range hooks {
-		_, _ = store.CreateProjectAuthHook(ctx, ref, authHookInputFromHook(hook))
+		if _, err := store.CreateProjectAuthHook(ctx, ref, authHookInputFromHook(hook)); err != nil {
+			logRollbackError(ctx, "recreate project auth hook during restore after sync failure", err)
+		}
 	}
 }
 

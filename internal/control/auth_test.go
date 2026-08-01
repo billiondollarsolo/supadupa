@@ -72,6 +72,7 @@ func TestAuthenticateUserRehashesLegacySHA256Password(t *testing.T) {
 	store.users[user.Email] = user
 	store.mu.Unlock()
 
+	before := LegacyPasswordHashVerifyCount()
 	authenticated, err := store.AuthenticateUser(ctx, "admin@example.com", "super-secure")
 	if err != nil {
 		t.Fatalf("authenticate legacy hash: %v", err)
@@ -79,11 +80,43 @@ func TestAuthenticateUserRehashesLegacySHA256Password(t *testing.T) {
 	if authenticated.PasswordHash == legacyHash {
 		t.Fatal("expected returned user to contain rehashed password")
 	}
+	if LegacyPasswordHashVerifyCount() != before+1 {
+		t.Fatalf("expected legacy password hash verify counter +1, before=%d after=%d", before, LegacyPasswordHashVerifyCount())
+	}
 	store.mu.RLock()
 	rehash := store.users[user.Email].PasswordHash
 	store.mu.RUnlock()
 	if !strings.HasPrefix(rehash, "bcrypt-sha256$") {
 		t.Fatalf("expected stored password to be rehashed, got %q", rehash)
+	}
+}
+
+func TestVerifyPasswordWithRehashIncrementsLegacyCounter(t *testing.T) {
+	legacy := legacySaltedPasswordHash("legacy-password-ok", "deadbeef")
+	before := LegacyPasswordHashVerifyCount()
+	ok, needsRehash := verifyPasswordWithRehash("legacy-password-ok", legacy)
+	if !ok || !needsRehash {
+		t.Fatalf("expected legacy verify ok with rehash, ok=%v needsRehash=%v", ok, needsRehash)
+	}
+	if LegacyPasswordHashVerifyCount() != before+1 {
+		t.Fatalf("expected legacy counter +1, before=%d after=%d", before, LegacyPasswordHashVerifyCount())
+	}
+	// Wrong password must not inflate the migration counter.
+	ok, _ = verifyPasswordWithRehash("wrong-password", legacy)
+	if ok {
+		t.Fatal("expected wrong password to fail")
+	}
+	if LegacyPasswordHashVerifyCount() != before+1 {
+		t.Fatalf("wrong password must not increment counter, before=%d after=%d", before, LegacyPasswordHashVerifyCount())
+	}
+	// Modern bcrypt path must not count as legacy.
+	modern := hashPassword("modern-password-ok")
+	ok, needsRehash = verifyPasswordWithRehash("modern-password-ok", modern)
+	if !ok || needsRehash {
+		t.Fatalf("expected modern verify ok without rehash, ok=%v needsRehash=%v", ok, needsRehash)
+	}
+	if LegacyPasswordHashVerifyCount() != before+1 {
+		t.Fatalf("modern hash must not increment legacy counter, before=%d after=%d", before, LegacyPasswordHashVerifyCount())
 	}
 }
 
@@ -211,14 +244,23 @@ func TestPlatformSCIMTokenAcceptsLegacySHA256AndSignalsRehash(t *testing.T) {
 	t.Setenv(AuthSecretEnv, "scim-hmac-test-secret")
 	token := "legacy-scim-token-value-123456"
 	config := PlatformSSOConfig{SCIMEnabled: true, SCIMTokenHash: legacyPlatformSCIMTokenHash(token)}
+	before := LegacySCIMHashVerifyCount()
 	if !VerifyPlatformSCIMToken(config, token) {
 		t.Fatal("expected legacy SCIM token hash to verify")
+	}
+	if LegacySCIMHashVerifyCount() != before+1 {
+		t.Fatalf("expected legacy SCIM hash verify counter +1, before=%d after=%d", before, LegacySCIMHashVerifyCount())
 	}
 	if !PlatformSCIMTokenNeedsRehash(config, token) {
 		t.Fatal("expected legacy SCIM token hash to need rehash")
 	}
+	// PlatformSCIMTokenNeedsRehash calls Verify again — counter may advance; capture and check wrong path.
+	afterOK := LegacySCIMHashVerifyCount()
 	if VerifyPlatformSCIMToken(config, "wrong-legacy-scim-token") {
 		t.Fatal("expected wrong legacy SCIM token to fail")
+	}
+	if LegacySCIMHashVerifyCount() != afterOK {
+		t.Fatalf("wrong SCIM token must not increment counter, before=%d after=%d", afterOK, LegacySCIMHashVerifyCount())
 	}
 }
 

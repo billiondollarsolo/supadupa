@@ -37,7 +37,10 @@ func main() {
 		logger.Error("runtime secret validation failed", "error", err)
 		os.Exit(1)
 	}
-	warnPlatformSSOJSONAdapter(logger, os.Getenv)
+	if err := enforcePlatformSSOJSONAdapterPolicy(logger, os.Getenv); err != nil {
+		logger.Error("platform SSO policy failed", "error", err)
+		os.Exit(1)
+	}
 	metaDB, err := openMetaDB(context.Background(), logger)
 	if err != nil {
 		logger.Error("meta database setup failed", "error", err)
@@ -75,6 +78,11 @@ func main() {
 	}
 	if err := registerLocalHostCapacity(context.Background(), store, logger); err != nil {
 		logger.Warn("local host capacity registration skipped", "error", err)
+	}
+	if wrote, err := control.EnsurePlatformRouteFile("", os.Getenv); err != nil {
+		logger.Warn("platform route ensure failed", "error", err)
+	} else if wrote {
+		logger.Info("rewrote missing platform route file", "path", "00-platform.yaml")
 	}
 	if err := reconcileExistingProjectRoutes(context.Background(), store, provisioner, logger); err != nil {
 		logger.Error("project route reconciliation failed", "error", err)
@@ -845,20 +853,25 @@ func envBoolAny(fallback bool, keys ...string) bool {
 	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
-// warnPlatformSSOJSONAdapter logs when the development JSON SSO adapter is enabled.
-// Production deployments must keep SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER unset/false
-// until real SAML XML validation is available (plan B1/B2).
-func warnPlatformSSOJSONAdapter(logger *slog.Logger, getenv func(string) string) {
+// enforcePlatformSSOJSONAdapterPolicy implements plan B1: the normalized JSON SSO
+// adapter is permanently unsupported in production. Enabling it requires an explicit
+// development override (SUPADUPA_ALLOW_DEV_SECRETS); otherwise startup hard-fails.
+// Controlled compatibility tests may set both flags; production keeps both off.
+func enforcePlatformSSOJSONAdapterPolicy(logger *slog.Logger, getenv func(string) string) error {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	if logger == nil {
-		return
+	if !env.BoolValue(getenv("SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER")) {
+		return nil
 	}
-	if env.BoolValue(getenv("SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER")) {
-		logger.Warn("platform SSO JSON adapter is enabled; this is not production SAML XML validation and must stay off outside controlled development or compatibility tests",
+	if !env.BoolValue(getenv("SUPADUPA_ALLOW_DEV_SECRETS")) {
+		return fmt.Errorf("platform SSO JSON adapter is permanently unsupported in production (not real SAML XML); unset SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER or set SUPADUPA_ALLOW_DEV_SECRETS=true only for controlled development/compatibility tests")
+	}
+	if logger != nil {
+		logger.Warn("platform SSO JSON adapter enabled under SUPADUPA_ALLOW_DEV_SECRETS; this is not production SAML XML validation",
 			"env", "SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER")
 	}
+	return nil
 }
 
 func validateRuntimeSecretsFromEnv(getenv func(string) string) error {

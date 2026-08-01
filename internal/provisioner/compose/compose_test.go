@@ -611,6 +611,25 @@ func TestCreateRendersConfiguredStackReleaseManifest(t *testing.T) {
 	}
 }
 
+func TestCreateFailsWhenStackReleaseCatalogCannotResolve(t *testing.T) {
+	root := t.TempDir()
+	// Filter catalog to a version that has no manifest so neither requested nor default resolve.
+	t.Setenv("SUPADUPA_SUPPORTED_STACK_VERSIONS", "does-not-exist-in-catalog")
+	provisioner := NewWithOptions(Options{RootDir: root})
+
+	err := provisioner.Create(context.Background(), control.ProjectSpec{
+		Ref:          "unresolvable",
+		Domain:       "supadupa.test",
+		StackVersion: "15.8.1.060",
+	})
+	if err == nil {
+		t.Fatal("expected create to fail when stack release catalog cannot resolve")
+	}
+	if !strings.Contains(err.Error(), "not available in the active catalog") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCreateRendersSuppliedManagedSecrets(t *testing.T) {
 	root := t.TempDir()
 	provisioner := NewWithOptions(Options{RootDir: root})
@@ -2026,7 +2045,8 @@ func TestUpgradeApplyRunsDatabaseBootstrap(t *testing.T) {
 
 func TestUpgradeRerendersConfiguredStackReleaseManifest(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("SUPADUPA_SUPPORTED_STACK_VERSIONS", "2026.06.06")
+	// Keep the initial create version resolvable; upgrade target is the configured override.
+	t.Setenv("SUPADUPA_SUPPORTED_STACK_VERSIONS", "15.8.1.060,2026.06.06")
 	t.Setenv("SUPADUPA_STACK_RELEASES_JSON", `{
 		"2026.06.06": {
 			"postgres": "pg-upgrade",

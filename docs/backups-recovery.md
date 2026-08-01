@@ -2,6 +2,14 @@
 
 Supadupa supports project backups, control-plane backups, S3-compatible backup targets, WAL archive plumbing, and recovery posture reporting. The MVP has backup and validation plumbing, but hosted-grade recovery requires off-host proof.
 
+## Control-plane vs project recovery
+
+- **Control-plane backups** capture Supadupa metadata (orgs, projects, policies, encrypted secrets checkpoint). They do **not** replace project database dumps or physical Postgres base backups.
+- **Project logical backups** capture application data suitable for logical restore. They intentionally avoid some Supabase internal operational schemas (Realtime, GraphQL, extensions, analytics internals) because restoring those can conflict with a live stack-owned data plane.
+- **Full-cluster recovery** (including stack internals and point-in-time rollback) requires **physical base backup + WAL archive + PITR restore**, with a durable off-host target and `SUPADUPA_REQUIRE_RECOVERY_READY_TARGETS=true` in production.
+
+Always treat platform backup, project logical backup, and PITR posture as complementary operator runbook steps.
+
 ## Backup Targets
 
 Configure backup targets in:

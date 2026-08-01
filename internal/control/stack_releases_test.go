@@ -1,6 +1,9 @@
 package control
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSupportedStackReleaseVersionsUseBuiltins(t *testing.T) {
 	versions := SupportedStackReleaseVersionsFromEnv(func(string) string { return "" })
@@ -222,5 +225,46 @@ func TestConfiguredBuiltinStackReleaseCanBePartiallyOverridden(t *testing.T) {
 	}
 	if manifest.Storage == "" || manifest.Pooler == "" || manifest.Postgres != "15.8.1.085" {
 		t.Fatalf("expected built-in fallback service tags, got %#v", manifest)
+	}
+}
+
+func TestResolveStackReleaseManifestWithFallbackUsesRequestedVersion(t *testing.T) {
+	manifest, err := ResolveStackReleaseManifestWithFallbackFromEnv(func(string) string { return "" }, "15.8.1.060")
+	if err != nil {
+		t.Fatalf("expected resolve success: %v", err)
+	}
+	if manifest.Version != "15.8.1.060" || manifest.Postgres != "15.8.1.060" {
+		t.Fatalf("expected requested version manifest, got %#v", manifest)
+	}
+}
+
+func TestResolveStackReleaseManifestWithFallbackUsesDefaultWhenMissing(t *testing.T) {
+	manifest, err := ResolveStackReleaseManifestWithFallbackFromEnv(func(string) string { return "" }, "not-a-real-version")
+	if err != nil {
+		t.Fatalf("expected default fallback success: %v", err)
+	}
+	if manifest.Version != DefaultStackReleaseVersion {
+		t.Fatalf("expected default %s, got %#v", DefaultStackReleaseVersion, manifest)
+	}
+}
+
+func TestResolveStackReleaseManifestWithFallbackErrorsWhenCatalogEmpty(t *testing.T) {
+	// Filter the catalog to only an unknown version so neither requested nor default resolve.
+	getenv := func(key string) string {
+		if key == "SUPADUPA_SUPPORTED_STACK_VERSIONS" {
+			return "does-not-exist-in-catalog"
+		}
+		return ""
+	}
+	_, err := ResolveStackReleaseManifestWithFallbackFromEnv(getenv, "15.8.1.060")
+	if err == nil {
+		t.Fatal("expected error when active catalog cannot resolve requested or default version")
+	}
+	if !strings.Contains(err.Error(), "not available in the active catalog") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_, err = ResolveStackReleaseManifestWithFallbackFromEnv(getenv, DefaultStackReleaseVersion)
+	if err == nil {
+		t.Fatal("expected error when default is also filtered out of the catalog")
 	}
 }

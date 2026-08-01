@@ -11165,7 +11165,7 @@ func randomSecretValue(ref string, kind string) string {
 		return randomJWTSigningKeyValue(ref, status)
 	}
 	if kind == "db_password" {
-		return randomHex(secretByteLengths[kind])
+		return mustRandomHex(secretByteLengths[kind])
 	}
 	return randomToken(secretPrefixes[kind], secretByteLengths[kind])
 }
@@ -11231,7 +11231,7 @@ func randomJWTSigningKeyValue(ref string, status string) string {
 		return randomToken("jwk", 32)
 	}
 	material := JWTSigningKeyMaterial{
-		KID:        ref + "-" + status + "-" + randomHex(4),
+		KID:        ref + "-" + status + "-" + mustRandomHex(4),
 		Alg:        "EdDSA",
 		PublicKey:  strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER}))),
 		PrivateKey: strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}))),
@@ -11444,15 +11444,31 @@ func secretsToSlice(secrets map[string]ProjectSecret) []ProjectSecret {
 }
 
 func randomToken(prefix string, bytes int) string {
-	return prefix + "_" + randomHex(bytes)
+	return prefix + "_" + mustRandomHex(bytes)
 }
 
-func randomHex(bytes int) string {
-	data := make([]byte, bytes)
-	if _, err := rand.Read(data); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+// cryptoRead is crypto/rand.Read, overridable in tests to force failure paths.
+var cryptoRead = rand.Read
+
+// randomHex returns cryptographically random hex or an error. It never falls back
+// to weak time-based placeholders on CSPRNG failure (fail-closed).
+func randomHex(bytes int) (string, error) {
+	if bytes <= 0 {
+		return "", fmt.Errorf("randomHex: bytes must be positive")
 	}
-	return hex.EncodeToString(data)
+	data := make([]byte, bytes)
+	if _, err := cryptoRead(data); err != nil {
+		return "", fmt.Errorf("crypto/rand: %w", err)
+	}
+	return hex.EncodeToString(data), nil
+}
+
+func mustRandomHex(bytes int) string {
+	value, err := randomHex(bytes)
+	if err != nil {
+		panic(err)
+	}
+	return value
 }
 
 func maskSecret(value string) string {

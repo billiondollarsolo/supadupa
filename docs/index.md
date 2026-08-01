@@ -12,11 +12,14 @@ Start here:
 - [Upgrades](upgrades.md): stable stack releases, project upgrades, upgrade backup guards, and control-plane updates.
 - [Operations](operations.md): day-to-day commands, runtime layout, metrics, logs, Advisor, Compliance, and local development.
 - [Security](security.md): secrets, access model, network exposure, Studio access, and production hardening.
+- [Production Profile](production-profile.md): operator checklist for secrets, recovery guards, flags, sizing, apply mode, and SSO honesty.
 - [Kubernetes](kubernetes.md): Helm chart, CRDs, operator scaffold, and current Kubernetes limits.
 - [Operator Note Policy](release-note-policy.md): when security-sensitive or deployment-sensitive changes need explicit release/operator notes.
+- [Feature Flags](feature-flags.md): platform defaults and production enablement guidance.
 - [Troubleshooting](troubleshooting.md): common API, CORS, TLS, project runtime, backup, and CLI issues.
+- [Master Improvement Plan](master-improvement-plan.md): living backlog for correctness, recovery, security, and platform maturity work.
 
-The older long-form README is preserved at [README-legacy.md](README-legacy.md).
+The older long-form README is preserved at [README-legacy.md](README-legacy.md) (historical only — see the banner at the top of that file).
 
 ## MVP Scope
 

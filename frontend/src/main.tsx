@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./app";
+import { ErrorBoundary } from "./components/error-boundary";
 import {
   AboutPage,
   AuditLogPage,
@@ -264,7 +265,9 @@ declare module "@tanstack/react-router" {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <ErrorBoundary>
+        <RouterProvider router={router} />
+      </ErrorBoundary>
     </QueryClientProvider>
   </React.StrictMode>,
 );

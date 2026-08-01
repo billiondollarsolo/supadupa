@@ -116,6 +116,30 @@ func TestValidateRuntimeSecretsAllowsExplicitDevOverride(t *testing.T) {
 	}
 }
 
+func TestWarnPlatformSSOJSONAdapterLogsWhenEnabled(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	warnPlatformSSOJSONAdapter(logger, func(key string) string {
+		if key == "SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER" {
+			return "true"
+		}
+		return ""
+	})
+	out := buf.String()
+	if !strings.Contains(out, "platform SSO JSON adapter is enabled") {
+		t.Fatalf("expected SSO adapter warning log, got %q", out)
+	}
+	if !strings.Contains(out, "not production SAML") {
+		t.Fatalf("expected production SAML honesty in warning, got %q", out)
+	}
+
+	buf.Reset()
+	warnPlatformSSOJSONAdapter(logger, func(string) string { return "" })
+	if strings.TrimSpace(buf.String()) != "" {
+		t.Fatalf("expected no warning when adapter disabled, got %q", buf.String())
+	}
+}
+
 func TestBootstrapPlatformDefaultsNoEnvDoesNothing(t *testing.T) {
 	store := control.NewMemoryStore()
 	ctx := context.Background()

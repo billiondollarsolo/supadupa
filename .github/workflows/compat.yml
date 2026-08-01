@@ -125,6 +125,10 @@ jobs:
         run: mkdir -p artifacts/security
       - name: Go tests
         run: go test ./...
+      - name: Go race tests (critical packages)
+        run: go test -race ./internal/api ./internal/control ./internal/scheduler ./internal/operator ./internal/provisioner/compose
+      - name: Platform version dual-source check
+        run: scripts/check-platform-version.sh
       - name: Go toolchain guard
         run: test "$(go env GOVERSION)" = "go1.26.4"
       - name: Go vulnerability check
@@ -216,7 +220,7 @@ jobs:
         run: scripts/check-kubernetes-kind-smoke.sh
       - name: Script syntax
         run: |
-          bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh
+          bash -n scripts/check-compose-apply-lifecycle-smoke.sh scripts/check-dockerignore.sh scripts/check-helm-chart.sh scripts/check-kubernetes-kind-smoke.sh scripts/check-platform-version.sh scripts/check-release-note-policy.sh scripts/check-setup-compose.sh scripts/setup-compose.sh scripts/setup-local-dns.sh scripts/compat/*.sh
           python3 -m py_compile scripts/check-compose-hardening.py scripts/check-docs-remediation.py scripts/check-security-regressions.py scripts/check-kubernetes-crds.py
 
   live-compat:

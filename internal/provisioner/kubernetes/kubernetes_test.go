@@ -62,6 +62,25 @@ func assertKubernetesServiceHasResources(t *testing.T, services map[string]kuber
 	}
 }
 
+func TestCreateFailsWhenStackReleaseCatalogCannotResolve(t *testing.T) {
+	root := t.TempDir()
+	// Filter catalog so neither requested nor default stack release is present.
+	t.Setenv("SUPADUPA_SUPPORTED_STACK_VERSIONS", "does-not-exist-in-catalog")
+	provisioner := NewWithOptions(Options{RootDir: root, Namespace: "platform"})
+
+	err := provisioner.Create(context.Background(), control.ProjectSpec{
+		Ref:          "unresolvable",
+		Domain:       "supadupa.test",
+		StackVersion: "15.8.1.060",
+	})
+	if err == nil {
+		t.Fatal("expected create to fail when stack release catalog cannot resolve")
+	}
+	if !strings.Contains(err.Error(), "not available in the active catalog") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCreateRendersProjectCRD(t *testing.T) {
 	root := t.TempDir()
 	provisioner := NewWithOptions(Options{RootDir: root, Namespace: "platform"})

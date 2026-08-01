@@ -1168,7 +1168,7 @@ func (p *Provisioner) Upgrade(ctx context.Context, ref string, version string) e
 	}
 	postgresPassword := env["POSTGRES_PASSWORD"]
 	if postgresPassword == "" {
-		postgresPassword = randomHex(24)
+		postgresPassword = mustRandomHex(24)
 		if err := updateEnvValue(filepath.Join(projectDir, ".env"), "POSTGRES_PASSWORD", postgresPassword); err != nil {
 			return err
 		}
@@ -1287,7 +1287,7 @@ func (p *Provisioner) AddReplica(ctx context.Context, ref string, opts control.R
 	}
 	replicaID := strings.TrimSpace(opts.ID)
 	if replicaID == "" {
-		replicaID = randomHex(8)
+		replicaID = mustRandomHex(8)
 	}
 	name := strings.TrimSpace(opts.Name)
 	if name == "" {
@@ -2124,11 +2124,11 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 	}
 	apiExternalURL := fmt.Sprintf("https://%s.%s", spec.Ref, projectDomain)
 	storageExternalURL := fmt.Sprintf("https://storage-%s.%s", spec.Ref, projectDomain)
-	jwtSecret := randomHex(32)
+	jwtSecret := mustRandomHex(32)
 	if value := strings.TrimSpace(spec.Environment["JWT_SECRET"]); value != "" {
 		jwtSecret = value
 	}
-	postgresPassword := randomHex(24)
+	postgresPassword := mustRandomHex(24)
 	if value := strings.TrimSpace(spec.Environment["POSTGRES_PASSWORD"]); value != "" {
 		postgresPassword = value
 	}
@@ -2136,14 +2136,14 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 		"ANON_KEY":                          "generated-by-control-plane",
 		"API_EXTERNAL_URL":                  apiExternalURL,
 		"DB_AFTER_CONNECT_QUERY":            "SET search_path TO _realtime",
-		"DB_ENC_KEY":                        randomHex(8),
+		"DB_ENC_KEY":                        mustRandomHex(8),
 		"DB_HOST":                           "db",
 		"DB_NAME":                           "postgres",
 		"DB_PASSWORD":                       postgresPassword,
 		"DB_PORT":                           "5432",
 		"DB_USER":                           "supabase_admin",
 		"DASHBOARD_USERNAME":                "supadupa",
-		"DASHBOARD_PASSWORD":                randomHex(18),
+		"DASHBOARD_PASSWORD":                mustRandomHex(18),
 		"EDGE_RUNTIME_POLICY":               "oneshot",
 		"FILE_SIZE_LIMIT":                   "52428800",
 		"FUNCTIONS_VERIFY_JWT":              "true",
@@ -2161,10 +2161,10 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 		"IMGPROXY_AUTO_WEBP":                "true",
 		"IMGPROXY_BIND":                     ":5001",
 		"JWT_SECRET":                        jwtSecret,
-		"LOGFLARE_API_KEY":                  randomHex(24),
-		"LOGFLARE_LOGGER_BACKEND_API_KEY":   randomHex(24),
-		"LOGFLARE_PRIVATE_ACCESS_TOKEN":     randomHex(24),
-		"LOGFLARE_PUBLIC_ACCESS_TOKEN":      randomHex(24),
+		"LOGFLARE_API_KEY":                  mustRandomHex(24),
+		"LOGFLARE_LOGGER_BACKEND_API_KEY":   mustRandomHex(24),
+		"LOGFLARE_PRIVATE_ACCESS_TOKEN":     mustRandomHex(24),
+		"LOGFLARE_PUBLIC_ACCESS_TOKEN":      mustRandomHex(24),
 		"PGRST_DB_ANON_ROLE":                "anon",
 		"PGRST_DB_SCHEMAS":                  "public,storage,graphql_public",
 		"PGRST_DB_URI":                      fmt.Sprintf("postgres://authenticator:%s@db:5432/postgres", postgresPassword),
@@ -2185,7 +2185,7 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 		"REALTIME_DB_USER":                  "supabase_admin",
 		"REALTIME_JWT_SECRET":               jwtSecret,
 		"RESOURCE_TIER":                     resourceTier,
-		"SECRET_KEY_BASE":                   randomHex(48),
+		"SECRET_KEY_BASE":                   mustRandomHex(48),
 		"SERVICE_ROLE_KEY":                  "generated-by-control-plane",
 		"SITE_URL":                          apiExternalURL,
 		"SMTP_ADMIN_EMAIL":                  "",
@@ -2208,8 +2208,8 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 		"UPLOAD_FILE_SIZE_LIMIT_STANDARD":   "52428800",
 		"UPLOAD_SIGNED_URL_EXPIRATION_TIME": "120",
 		"GLOBAL_S3_BUCKET":                  spec.Ref,
-		"S3_PROTOCOL_ACCESS_KEY_ID":         randomHex(24),
-		"S3_PROTOCOL_ACCESS_KEY_SECRET":     randomHex(32),
+		"S3_PROTOCOL_ACCESS_KEY_ID":         mustRandomHex(24),
+		"S3_PROTOCOL_ACCESS_KEY_SECRET":     mustRandomHex(32),
 		"STUDIO_DEFAULT_ORGANIZATION":       "supadupa",
 		"STUDIO_DEFAULT_PROJECT":            spec.Ref,
 		"STUDIO_PG_META_URL":                "http://meta:8080",
@@ -2226,7 +2226,7 @@ func writeEnvFile(path string, spec control.ProjectSpec) (string, error) {
 		"SUPAVISOR_DB_PASSWORD":             postgresPassword,
 		"SUPAVISOR_DB_PORT":                 "5432",
 		"SUPAVISOR_DB_USER":                 "supabase_admin",
-		"VAULT_ENC_KEY":                     randomHex(16),
+		"VAULT_ENC_KEY":                     mustRandomHex(16),
 	}
 	for key, value := range spec.Environment {
 		values[key] = value
@@ -2256,10 +2256,10 @@ func applyRuntimeDefaultEnvValues(values map[string]string, spec control.Project
 		}
 	}
 	if strings.TrimSpace(values["S3_PROTOCOL_ACCESS_KEY_ID"]) == "" {
-		values["S3_PROTOCOL_ACCESS_KEY_ID"] = randomHex(24)
+		values["S3_PROTOCOL_ACCESS_KEY_ID"] = mustRandomHex(24)
 	}
 	if strings.TrimSpace(values["S3_PROTOCOL_ACCESS_KEY_SECRET"]) == "" {
-		values["S3_PROTOCOL_ACCESS_KEY_SECRET"] = randomHex(32)
+		values["S3_PROTOCOL_ACCESS_KEY_SECRET"] = mustRandomHex(32)
 	}
 	if strings.TrimSpace(values["TUS_URL_PATH"]) == "" {
 		values["TUS_URL_PATH"] = "/upload/resumable"
@@ -2684,7 +2684,10 @@ func readEnvFile(path string) (map[string]string, error) {
 }
 
 func writeComposeFile(path string, spec control.ProjectSpec, projectDockerLogs bool, projectHostDir string) error {
-	release := composeStackReleaseManifest(spec.StackVersion)
+	release, err := composeStackReleaseManifest(spec.StackVersion)
+	if err != nil {
+		return err
+	}
 	services := control.ProjectServiceStates(spec.Services)
 	depends := kongDependencies(services)
 	pgHBAMount := composeBindMount(projectHostDir, "pg_hba.conf", "/etc/postgresql/pg_hba.conf", true)
@@ -4257,12 +4260,30 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func randomHex(bytes int) string {
-	data := make([]byte, bytes)
-	if _, err := rand.Read(data); err != nil {
-		return "change-me"
+// cryptoRead is crypto/rand.Read, overridable in tests to force failure paths.
+var cryptoRead = rand.Read
+
+// randomHex returns cryptographically random hex or an error. It never returns a
+// weak placeholder secret on CSPRNG failure (fail-closed).
+func randomHex(bytes int) (string, error) {
+	if bytes <= 0 {
+		return "", fmt.Errorf("randomHex: bytes must be positive")
 	}
-	return hex.EncodeToString(data)
+	data := make([]byte, bytes)
+	if _, err := cryptoRead(data); err != nil {
+		return "", fmt.Errorf("crypto/rand: %w", err)
+	}
+	return hex.EncodeToString(data), nil
+}
+
+// mustRandomHex is for internal secret generation paths that cannot thread errors.
+// CSPRNG failure panics so weak secrets are never written into project env files.
+func mustRandomHex(bytes int) string {
+	value, err := randomHex(bytes)
+	if err != nil {
+		panic(err)
+	}
+	return value
 }
 
 func minInt(left int, right int) int {
@@ -4272,14 +4293,30 @@ func minInt(left int, right int) int {
 	return right
 }
 
-func composeStackReleaseManifest(version string) control.StackReleaseManifest {
+func composeStackReleaseManifest(version string) (control.StackReleaseManifest, error) {
 	manifest, ok := control.ResolveStackReleaseManifestFromEnv(os.Getenv, version)
 	if ok {
-		return manifest
+		return manifest, nil
 	}
-	manifest, _ = control.ResolveStackReleaseManifestFromEnv(os.Getenv, control.DefaultStackReleaseVersion)
+	// Requested version missing: fall back to the default release. If the default is
+	// also absent from the active catalog (e.g. SUPADUPA_SUPPORTED_STACK_VERSIONS
+	// filtered it out), fail closed instead of stamping a half-empty manifest.
+	manifest, ok = control.ResolveStackReleaseManifestFromEnv(os.Getenv, control.DefaultStackReleaseVersion)
+	if !ok {
+		requested := strings.TrimSpace(version)
+		if requested == "" {
+			requested = "latest"
+		}
+		return control.StackReleaseManifest{}, fmt.Errorf(
+			"stack release manifest for version %q (and default %q) is not available in the active catalog",
+			requested,
+			control.DefaultStackReleaseVersion,
+		)
+	}
+	// Historical compose behavior: when falling back, stamp Version/Postgres to the
+	// requested normalized string so image tags follow the requested version label.
 	normalized := control.NormalizeStackReleaseVersion(version)
 	manifest.Version = normalized
 	manifest.Postgres = normalized
-	return manifest
+	return manifest, nil
 }

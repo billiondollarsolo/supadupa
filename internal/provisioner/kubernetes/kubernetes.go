@@ -277,7 +277,11 @@ func (p *Provisioner) Create(ctx context.Context, spec control.ProjectSpec) erro
 		return err
 	}
 	path := filepath.Join(projectDir, "project.yaml")
-	if err := artifact.WriteFile(path, []byte(renderProjectCRD(spec, p.namespace, "running", p.runtimeNamespaceForRef(spec.Ref))), 0o600); err != nil {
+	manifestYAML, err := renderProjectCRD(spec, p.namespace, "running", p.runtimeNamespaceForRef(spec.Ref))
+	if err != nil {
+		return err
+	}
+	if err := artifact.WriteFile(path, []byte(manifestYAML), 0o600); err != nil {
 		return err
 	}
 	if !p.apply {
@@ -391,7 +395,11 @@ func (p *Provisioner) SyncServices(ctx context.Context, ref string, spec control
 			return err
 		}
 	}
-	next, err := replaceProjectSpecValue(payload, "services", kubernetesRenderedServiceMap(spec))
+	services, err := kubernetesRenderedServiceMap(spec)
+	if err != nil {
+		return err
+	}
+	next, err := replaceProjectSpecValue(payload, "services", services)
 	if err != nil {
 		return err
 	}
@@ -541,7 +549,11 @@ func (p *Provisioner) Scale(ctx context.Context, ref string, spec control.Projec
 		if next, err = replaceProjectSpecValue(next, "enforceLimits", spec.EnforceLimits); err != nil {
 			return nil, err
 		}
-		return replaceProjectSpecValue(next, "services", kubernetesRenderedServiceMap(spec))
+		services, err := kubernetesRenderedServiceMap(spec)
+		if err != nil {
+			return nil, err
+		}
+		return replaceProjectSpecValue(next, "services", services)
 	})
 }
 
@@ -1116,14 +1128,22 @@ func stringSchema(minLength int) map[string]any {
 	return schema
 }
 
-func renderProjectCRD(spec control.ProjectSpec, namespace string, desiredState string, runtimeNamespace string) string {
-	return encodeYAMLValue(projectManifestForSpec(spec, namespace, desiredState, runtimeNamespace))
+func renderProjectCRD(spec control.ProjectSpec, namespace string, desiredState string, runtimeNamespace string) (string, error) {
+	manifest, err := projectManifestForSpec(spec, namespace, desiredState, runtimeNamespace)
+	if err != nil {
+		return "", err
+	}
+	return encodeYAMLValue(manifest), nil
 }
 
-func projectManifestForSpec(spec control.ProjectSpec, namespace string, desiredState string, runtimeNamespace string) projectManifest {
+func projectManifestForSpec(spec control.ProjectSpec, namespace string, desiredState string, runtimeNamespace string) (projectManifest, error) {
 	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(spec.Domain)), ".")
 	if domain == "" {
 		domain = "supadupa.test"
+	}
+	services, err := kubernetesRenderedServiceMap(spec)
+	if err != nil {
+		return projectManifest{}, err
 	}
 	return projectManifest{
 		APIVersion: "platform.supadupa.dev/v1alpha1",
@@ -1154,9 +1174,9 @@ func projectManifestForSpec(spec control.ProjectSpec, namespace string, desiredS
 				DropCapabilities:         []string{"ALL"},
 			},
 			Environment: copyStringMap(spec.Environment),
-			Services:    kubernetesRenderedServiceMap(spec),
+			Services:    services,
 		},
-	}
+	}, nil
 }
 
 func renderBranchCloneCRD(namespace string, opts control.BranchCloneOptions) string {
@@ -1382,12 +1402,15 @@ type kubernetesRenderedIngress struct {
 	TLSSecretName string `yaml:"tlsSecretName,omitempty"`
 }
 
-func renderServices(builder *strings.Builder, spec control.ProjectSpec) {
-	services := kubernetesRenderedServices(spec)
+func renderServices(builder *strings.Builder, spec control.ProjectSpec) error {
+	services, err := kubernetesRenderedServices(spec)
+	if err != nil {
+		return err
+	}
 	builder.WriteString("  services:\n")
 	if len(services) == 0 {
 		builder.WriteString("    {}\n")
-		return
+		return nil
 	}
 	for _, service := range services {
 		builder.WriteString(fmt.Sprintf("    %s:\n", yamlKey(service.Name)))
@@ -1424,12 +1447,13 @@ func renderServices(builder *strings.Builder, spec control.ProjectSpec) {
 		renderServiceProbe(builder, "livenessProbe", service.LivenessProbe)
 		renderServiceIngress(builder, service.Ingress)
 	}
+	return nil
 }
 
-func kubernetesRenderedServices(spec control.ProjectSpec) []kubernetesRenderedService {
-	release, ok := control.ResolveStackReleaseManifestFromEnv(os.Getenv, spec.StackVersion)
-	if !ok {
-		release, _ = control.ResolveStackReleaseManifestFromEnv(os.Getenv, "")
+func kubernetesRenderedServices(spec control.ProjectSpec) ([]kubernetesRenderedService, error) {
+	release, err := control.ResolveStackReleaseManifestWithFallbackFromEnv(os.Getenv, spec.StackVersion)
+	if err != nil {
+		return nil, err
 	}
 	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(spec.Domain)), ".")
 	states := control.ProjectServiceStates(spec.Services)
@@ -1490,16 +1514,19 @@ func kubernetesRenderedServices(spec control.ProjectSpec) []kubernetesRenderedSe
 	for _, key := range keys {
 		services = append(services, kubernetesServiceFromControlSpec(key, spec.Services[key], "", nil, nil, nil, nil, nil, nil, nil, nil, nil))
 	}
-	return applyKubernetesResourceAllocations(services, control.ProjectServiceResourceAllocations(spec))
+	return applyKubernetesResourceAllocations(services, control.ProjectServiceResourceAllocations(spec)), nil
 }
 
-func kubernetesRenderedServiceMap(spec control.ProjectSpec) map[string]kubernetesRenderedService {
-	services := kubernetesRenderedServices(spec)
+func kubernetesRenderedServiceMap(spec control.ProjectSpec) (map[string]kubernetesRenderedService, error) {
+	services, err := kubernetesRenderedServices(spec)
+	if err != nil {
+		return nil, err
+	}
 	out := make(map[string]kubernetesRenderedService, len(services))
 	for _, service := range services {
 		out[service.Name] = service
 	}
-	return out
+	return out, nil
 }
 
 func applyKubernetesResourceAllocations(services []kubernetesRenderedService, allocations map[string]control.ProjectServiceResourceAllocation) []kubernetesRenderedService {

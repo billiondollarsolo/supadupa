@@ -141,6 +141,9 @@ export function CompliancePanel({ report, loading }: { report?: ComplianceReport
       title="SOC 2 / HIPAA controls"
     >
       <div className="mt-4 grid gap-3">
+        <p className="rounded-md border border-border bg-surface-2 px-3 py-2 text-xs text-muted" role="note">
+          Operator evidence helper only — not a SOC 2 or HIPAA certification claim. Certification remains the deploying organization&apos;s responsibility.
+        </p>
         {loading ? <p className="text-sm text-muted">Loading compliance report...</p> : null}
         {report ? (
           <>

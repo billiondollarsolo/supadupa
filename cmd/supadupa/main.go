@@ -37,6 +37,7 @@ func main() {
 		logger.Error("runtime secret validation failed", "error", err)
 		os.Exit(1)
 	}
+	warnPlatformSSOJSONAdapter(logger, os.Getenv)
 	metaDB, err := openMetaDB(context.Background(), logger)
 	if err != nil {
 		logger.Error("meta database setup failed", "error", err)
@@ -842,6 +843,22 @@ func envBoolAny(fallback bool, keys ...string) bool {
 		return fallback
 	}
 	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+// warnPlatformSSOJSONAdapter logs when the development JSON SSO adapter is enabled.
+// Production deployments must keep SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER unset/false
+// until real SAML XML validation is available (plan B1/B2).
+func warnPlatformSSOJSONAdapter(logger *slog.Logger, getenv func(string) string) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if logger == nil {
+		return
+	}
+	if env.BoolValue(getenv("SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER")) {
+		logger.Warn("platform SSO JSON adapter is enabled; this is not production SAML XML validation and must stay off outside controlled development or compatibility tests",
+			"env", "SUPADUPA_ENABLE_PLATFORM_SSO_JSON_ADAPTER")
+	}
 }
 
 func validateRuntimeSecretsFromEnv(getenv func(string) string) error {

@@ -43,7 +43,7 @@ func createProjectDatabaseWebhookHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		if err := applyProjectDatabaseWebhookCreate(r.Context(), store, project, webhook); err != nil {
-			_ = store.DeleteProjectDatabaseWebhook(r.Context(), ref, webhook.Name)
+			logRollbackError(r.Context(), "delete project database webhook after apply failure", store.DeleteProjectDatabaseWebhook(r.Context(), ref, webhook.Name))
 			metadata := map[string]string{"name": webhook.Name, "table": webhook.Schema + "." + webhook.Table, "error": err.Error()}
 			control.LogProject(r.Context(), store, ref, "error", "Database webhook apply failed", metadata)
 			control.Audit(r.Context(), store, "project.database_webhook_create_failed", "project:"+ref, metadata)

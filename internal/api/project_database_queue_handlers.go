@@ -41,7 +41,7 @@ func createProjectDatabaseQueueHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		if err := applyProjectDatabaseQueueCreate(r.Context(), project, queue); err != nil {
-			_ = store.DeleteProjectDatabaseQueue(r.Context(), ref, queue.Name)
+			logRollbackError(r.Context(), "delete project database queue after apply failure", store.DeleteProjectDatabaseQueue(r.Context(), ref, queue.Name))
 			metadata := map[string]string{"name": queue.Name, "schema": queue.Schema, "active": fmt.Sprintf("%t", queue.Active), "error": err.Error()}
 			control.LogProject(r.Context(), store, ref, "error", "Database queue apply failed", metadata)
 			control.Audit(r.Context(), store, "project.database_queue_create_failed", "project:"+ref, metadata)

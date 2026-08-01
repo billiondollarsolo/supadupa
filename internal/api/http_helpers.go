@@ -317,6 +317,16 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+// logRollbackError records a best-effort control-plane rollback failure so
+// operators can detect orphaned project-child rows after apply-path cleanup.
+// Primary create failures still own the user-facing error response.
+func logRollbackError(ctx context.Context, action string, err error) {
+	if err == nil {
+		return
+	}
+	slog.Default().ErrorContext(ctx, "rollback failed", "action", action, "error", err)
+}
+
 func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, control.ErrNotFound):

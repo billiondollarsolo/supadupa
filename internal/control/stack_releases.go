@@ -117,6 +117,29 @@ func ResolveStackReleaseManifestFromEnv(getenv func(string) string, version stri
 	return StackReleaseManifest{}, false
 }
 
+// ResolveStackReleaseManifestWithFallbackFromEnv resolves version from the active
+// catalog. When the requested version is missing it falls back to
+// DefaultStackReleaseVersion (empty/"latest" already normalize to the default).
+// It returns an error when neither is available so apply/render paths fail closed
+// instead of continuing with a half-empty manifest.
+func ResolveStackReleaseManifestWithFallbackFromEnv(getenv func(string) string, version string) (StackReleaseManifest, error) {
+	if manifest, ok := ResolveStackReleaseManifestFromEnv(getenv, version); ok {
+		return manifest, nil
+	}
+	if manifest, ok := ResolveStackReleaseManifestFromEnv(getenv, DefaultStackReleaseVersion); ok {
+		return manifest, nil
+	}
+	requested := strings.TrimSpace(version)
+	if requested == "" {
+		requested = "latest"
+	}
+	return StackReleaseManifest{}, fmt.Errorf(
+		"stack release manifest for version %q (and default %q) is not available in the active catalog",
+		requested,
+		DefaultStackReleaseVersion,
+	)
+}
+
 func NormalizeStackReleaseVersion(version string) string {
 	version = strings.TrimSpace(version)
 	if version == "" || strings.EqualFold(version, "latest") {

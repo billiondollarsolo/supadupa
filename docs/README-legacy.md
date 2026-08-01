@@ -1,5 +1,19 @@
 # supadupa
 
+> **HISTORICAL — do not treat this file as current operator guidance.**
+>
+> This long-form README is preserved for archaeology. It is **not** the current
+> auth or install model:
+>
+> - **Browser admin auth** uses HttpOnly cookie sessions (`supadupa_session`);
+>   bearer tokens are for API clients (CLI, Terraform, automation), not the
+>   primary browser path.
+> - Do **not** use stack version `"latest"`; pin stable stack releases from the
+>   catalog / `GET /v1/stack-releases`.
+> - Prefer the current docs hub ([docs/index.md](index.md)) and the repository
+>   root [README.md](../README.md) for install, security, operations, and
+>   recovery guidance.
+
 Self-hosted, enterprise-grade Supabase platform control plane.
 
 This repository is being built from `docs/PRD.md` draft v0.2. The MVP target is a Docker Compose-backed supadupavisor control plane with a full admin UI, while keeping orchestration behind a provisioner interface so Kubernetes can become a backend swap later.

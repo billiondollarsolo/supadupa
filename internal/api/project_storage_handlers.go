@@ -48,7 +48,7 @@ func createProjectStorageBucketHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		if err := applyProjectStorageBucketCreate(r.Context(), store, project, bucket); err != nil {
-			_ = store.DeleteProjectStorageBucket(r.Context(), ref, bucket.Name)
+			logRollbackError(r.Context(), "delete project storage bucket after apply failure", store.DeleteProjectStorageBucket(r.Context(), ref, bucket.Name))
 			control.LogProject(r.Context(), store, ref, "error", "Storage bucket data-plane create failed", map[string]string{"name": bucket.Name, "error": err.Error()})
 			control.Audit(r.Context(), store, "project.storage_bucket_create_failed", "project:"+ref, map[string]string{"name": bucket.Name, "error": err.Error()})
 			writeError(w, http.StatusConflict, err.Error())

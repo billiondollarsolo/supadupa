@@ -60,8 +60,14 @@ work (e.g. image builds) on the host while projects are under load.
 Carried over from the README MVP status:
 
 - Off-host PITR / durable recovery is not yet proven end-to-end.
-- The Kubernetes provisioner is a renderer/operator contract, not the MVP
-  runtime, and does not yet enforce namespace-per-project isolation.
+- The Kubernetes path is still not the primary MVP runtime, and full
+  Supabase data-plane parity is incomplete. When `projectIsolation` is
+  enabled (the chart default), namespace-per-project isolation and
+  default-deny `NetworkPolicy` resources **are** implemented; the remaining
+  network-isolation caveat is that policies only enforce under a
+  policy-enforcing CNI (Calico/Cilium). Under kindnet (Kind's default) and
+  similar flat CNIs, NetworkPolicies apply but do not block traffic. See
+  [Kubernetes — Project Network Isolation](kubernetes.md#project-network-isolation-namespace-per-project-default-on).
 - Platform SSO is a normalized-JSON adapter, not full SAML XML validation.
 
 ## Identifying the running build

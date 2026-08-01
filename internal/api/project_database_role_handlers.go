@@ -42,7 +42,7 @@ func createProjectDatabaseRoleHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		if err := applyProjectDatabaseRoleCreate(r.Context(), store, project, role); err != nil {
-			_ = store.DeleteProjectDatabaseRole(r.Context(), ref, role.Name)
+			logRollbackError(r.Context(), "delete project database role after apply failure", store.DeleteProjectDatabaseRole(r.Context(), ref, role.Name))
 			metadata := map[string]string{"name": role.Name, "login": fmt.Sprintf("%t", role.Login), "bypass_rls": fmt.Sprintf("%t", role.BypassRLS), "error": err.Error()}
 			control.LogProject(r.Context(), store, ref, "error", "Database role apply failed", metadata)
 			control.Audit(r.Context(), store, "project.database_role_create_failed", "project:"+ref, metadata)

@@ -41,7 +41,7 @@ func createProjectDatabaseCronJobHandler(store control.Store) http.HandlerFunc {
 			return
 		}
 		if err := applyProjectDatabaseCronJobCreate(r.Context(), project, job); err != nil {
-			_ = store.DeleteProjectDatabaseCronJob(r.Context(), ref, job.Name)
+			logRollbackError(r.Context(), "delete project database cron job after apply failure", store.DeleteProjectDatabaseCronJob(r.Context(), ref, job.Name))
 			metadata := map[string]string{"name": job.Name, "schedule": job.Schedule, "active": fmt.Sprintf("%t", job.Active), "error": err.Error()}
 			control.LogProject(r.Context(), store, ref, "error", "Database cron job apply failed", metadata)
 			control.Audit(r.Context(), store, "project.database_cron_create_failed", "project:"+ref, metadata)

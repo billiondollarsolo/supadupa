@@ -14,7 +14,12 @@ REBUILD_IMAGES="${SUPADUPA_KIND_REBUILD_IMAGES:-true}"
 SUPABASE_CORE_SMOKE="${SUPADUPA_KIND_SUPABASE_CORE_SMOKE:-false}"
 # Opt-in: enable storage/realtime/functions/pooler/analytics on the core smoke Project
 # and wait for those Deployments. Default false so CI stays lightweight.
+# DATAPLANE alone must not be a silent no-op: it forces the Supabase core smoke path
+# (which owns run_supabase_core_smoke) so remaining-command docs stay honest.
 DATAPLANE_SMOKE="${SUPADUPA_KIND_DATAPLANE_SMOKE:-false}"
+if [[ "$DATAPLANE_SMOKE" == "true" ]]; then
+  SUPABASE_CORE_SMOKE="true"
+fi
 PRELOAD_CORE_IMAGES="${SUPADUPA_KIND_PRELOAD_CORE_IMAGES:-true}"
 DELETE_EXISTING_CLUSTER="${SUPADUPA_KIND_DELETE_EXISTING_CLUSTER:-false}"
 # Namespace-per-project isolation smoke. Default false because kindnet does NOT
@@ -48,6 +53,17 @@ CORE_SMOKE_IMAGES=(
   "kong/kong:3.9.1"
   "busybox:1.37.0"
 )
+# When data-plane smoke is on, also preload the extended service images so Kind
+# is less likely to hit Docker Hub rate limits for storage/realtime/functions/etc.
+if [[ "$DATAPLANE_SMOKE" == "true" ]]; then
+  CORE_SMOKE_IMAGES+=(
+    "supabase/storage-api:v1.60.4"
+    "supabase/realtime:v2.102.3"
+    "supabase/edge-runtime:v1.74.0"
+    "supabase/supavisor:2.9.5"
+    "supabase/logflare:1.43.1"
+  )
+fi
 
 require_tool() {
   local bin="$1"
@@ -618,7 +634,9 @@ fi
 
 "$KUBECTL_BIN" -n "$NAMESPACE" delete project "$PROJECT" --ignore-not-found
 
-if [[ "$SUPABASE_CORE_SMOKE" == "true" ]]; then
+# CORE is forced true when DATAPLANE_SMOKE=true (see top of script), so either flag
+# runs the Supabase core path; DATAPLANE alone never silently skips it.
+if [[ "$SUPABASE_CORE_SMOKE" == "true" || "$DATAPLANE_SMOKE" == "true" ]]; then
   run_supabase_core_smoke
 fi
 

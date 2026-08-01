@@ -184,7 +184,7 @@ Sequencing recommendation: **A → B → L (gate) → C → F → E → K → G/
 | ID | Item | Pri | Effort | Evidence | Done | Validation |
 |----|------|-----|--------|----------|------|------------|
 | D1 | K8s not primary runtime | P1 | XL | index, README | Equal live validation vs Compose for declared GA features | Full parity checklist |
-| D2 | Full Supabase K8s data plane incomplete | P1 | XL | kubernetes.md | Partial: unit/render for storage/realtime/functions/pooler/analytics + opt-in Kind flag; live Kind blocked without kind binary | Remaining: `SUPADUPA_KIND_DATAPLANE_SMOKE=true scripts/check-kubernetes-kind-smoke.sh` |
+| D2 | Full Supabase K8s data plane incomplete | P1 | XL | kubernetes.md | Partial: unit/render for storage/realtime/functions/pooler/analytics + opt-in Kind flag; live Kind blocked without kind binary | Remaining: install kind; `SUPADUPA_KIND_DATAPLANE_SMOKE=true scripts/check-kubernetes-kind-smoke.sh` (forces CORE + preloads dataplane images) (auto-enables CORE path) |
 | D3 | Auxiliary CRDs observed-only (`DataPlanePending`) | P1 | L | kubernetes.md, operator | Real reconcile for ProjectConfig, AuthHooks, BranchClone, Replica, Retained | Operator unit + Kind |
 | D4 | NetworkPolicy needs policy CNI | P1 | M | kubernetes.md | Document required CNI; optional Kind Calico job | `KIND_ISOLATION_CNI_ENFORCED` |
 | D5 | No in-place shared-ns → per-project-ns migration | P2 | L | kubernetes.md | Drain/recreate tool or documented freeze | Runbook |
@@ -696,7 +696,7 @@ Legend: **done** | **partial** | **blocked** | **deferred**
 | E4 | blocked | Geo Functions placement | Multi-host lab + functions deep with true multi-region placement |
 | E7–E9 E12 | deferred | Iceberg/embeddings/clone/orioledb depth | Feature-specific: branch clone `SUPADUPA_BRANCH_CLONE_COMMAND=…` + `SUPADUPA_COMPAT_BRANCH_VALIDATE=true scripts/compat/29-branches-deep.sh` |
 | J1–J7 | blocked | Multi-host / HA lab not available | Provision ≥2 hosts, register capacity, place projects per region; run `scripts/compat/26-replicas-deep.sh` with promote/failover flags and document failover RTO |
-| D2 | partial | Unit/render proves storage+realtime+functions+pooler+analytics with digest images; Kind dataplane smoke flag added but Kind binary missing here — remaining: install kind + `SUPADUPA_KIND_DATAPLANE_SMOKE=true scripts/check-kubernetes-kind-smoke.sh` |
+| D2 | partial | Unit/render proves storage+realtime+functions+pooler+analytics; Kind smoke: `SUPADUPA_KIND_DATAPLANE_SMOKE=true` forces CORE + preloads dataplane images (`scripts/check-kind-dataplane-gate.sh`); live Kind still needs kind binary installed |
 
 ### WS-A Recovery
 

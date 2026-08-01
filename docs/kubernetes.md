@@ -161,7 +161,17 @@ The Compose model this mirrors is in `internal/provisioner/compose/compose.go` (
 
 ## Extended data-plane Kind smoke (opt-in)
 
-Set `SUPADUPA_KIND_DATAPLANE_SMOKE=true` when running `scripts/check-kubernetes-kind-smoke.sh` to provision a Project with storage, realtime, functions, pooler, and analytics enabled and assert Deployment readiness. Default Kind CI remains the lightweight core path. Unit coverage for these service renders lives in `internal/provisioner/kubernetes` (`TestKubernetesRenderedServicesIncludesDataPlaneServices`).
+`SUPADUPA_KIND_DATAPLANE_SMOKE=true` enables storage, realtime, functions, pooler, and analytics on the Supabase core Kind Project, asserts Deployment readiness, and **automatically enables** the Supabase core smoke path (`SUPADUPA_KIND_SUPABASE_CORE_SMOKE` is forced on). You can set either:
+
+```bash
+# Minimal: DATAPLANE alone is enough (forces CORE)
+SUPADUPA_KIND_DATAPLANE_SMOKE=true scripts/check-kubernetes-kind-smoke.sh
+
+# Explicit both flags (equivalent)
+SUPADUPA_KIND_SUPABASE_CORE_SMOKE=true SUPADUPA_KIND_DATAPLANE_SMOKE=true   scripts/check-kubernetes-kind-smoke.sh
+```
+
+Default Kind CI remains the lightweight generic Project path (no CORE/DATAPLANE). Unit coverage for these service renders lives in `internal/provisioner/kubernetes` (`TestKubernetesRenderedServicesIncludesDataPlaneServices`). Structural gate: `scripts/check-kind-dataplane-gate.sh`.
 
 
 ## Current Limits
